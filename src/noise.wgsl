@@ -100,10 +100,10 @@ fn simplex_corner(x: vec3f, c: vec3f, period: i32, seed: u32) -> f32 {
 // Brings simplex to roughly [-1, 1]; measured by the range test in gpu_tests.rs.
 const SIMPLEX_GAIN: f32 = 90.0;
 
-// ---- Cellular (Voronoi / Worley) ------------------------------------------
+// ---- Cellular (Worley) ------------------------------------------
 
 // (F1, F2, random value of the nearest cell in [-1, 1]); feature points jittered over the whole cell.
-// The cell value costs one more hash, so only Voronoi asks for it.
+// The cell value costs one more hash, so only the cell-value feature asks for it.
 fn cells(x: vec3f, period: i32, seed: u32, want_value: bool) -> vec3f {
     let i = wrap_cell(vec3i(floor(x)), period);
     let f = fract(x);
@@ -133,11 +133,12 @@ fn cells(x: vec3f, period: i32, seed: u32, want_value: bool) -> vec3f {
 }
 
 fn worley(x: vec3f, period: i32, seed: u32, feature: u32) -> f32 {
-    let c = cells(x, period, seed, false);
+    let c = cells(x, period, seed, feature == 3u);
     // Typical range of each feature, used to map it to signed [-1, 1].
     switch feature {
         case 1u: { return clamp(c.y / 1.4 * 2.0 - 1.0, -1.0, 1.0); }
         case 2u: { return clamp((c.y - c.x) * 2.0 - 1.0, -1.0, 1.0); }
+        case 3u: { return c.z; }
         default: { return clamp(c.x * 2.0 - 1.0, -1.0, 1.0); }
     }
 }

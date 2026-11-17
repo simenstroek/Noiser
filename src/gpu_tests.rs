@@ -119,14 +119,19 @@ fn cases() -> Vec<(String, NoiseParams, bool)> {
     let mut v = Vec::new();
     for kind in NoiseKind::ALL {
         let scale = if kind == NoiseKind::Blue { 8.0 } else { 4.0 };
-        let continuous = matches!(kind, NoiseKind::Perlin | NoiseKind::Simplex | NoiseKind::Worley);
-        let features: &[WorleyFeature] =
-            if kind == NoiseKind::Worley { &[WorleyFeature::F1, WorleyFeature::F2, WorleyFeature::F2MinusF1] } else { &[WorleyFeature::F1] };
+        let features: &[WorleyFeature] = if kind == NoiseKind::Worley {
+            &[WorleyFeature::F1, WorleyFeature::F2, WorleyFeature::F2MinusF1, WorleyFeature::CellValue]
+        } else {
+            &[WorleyFeature::F1]
+        };
         for &feature in features {
-            let p = NoiseParams { kind, feature, scale, octaves: 3, ..Default::default() };
+            // Fractal Worley exercises the octave loop; a flat cell value is never continuous.
+            let continuous = matches!(kind, NoiseKind::Perlin | NoiseKind::Simplex | NoiseKind::Worley) && feature != WorleyFeature::CellValue;
+            let p = NoiseParams { kind, feature, fractal: true, scale, octaves: 3, ..Default::default() };
             v.push((format!("{} {feature:?}", kind.name()), p, continuous));
         }
     }
+    v.push(("Worley F1 single octave".into(), NoiseParams { kind: NoiseKind::Worley, ..Default::default() }, true));
     v.push(("Perlin distorted".into(), NoiseParams { distortion: 0.7, octaves: 3, ..Default::default() }, true));
     v
 }
@@ -322,7 +327,7 @@ fn slice_grid_png_places_slices_and_levels() {
 #[test]
 fn cache_bake_matches_full_evaluation() {
     let Some(gpu) = gpu() else { return eprintln!("no GPU adapter; skipping") };
-    let g = noise_graph(NoiseParams { kind: NoiseKind::Worley, octaves: 2, ..Default::default() });
+    let g = noise_graph(NoiseParams { kind: NoiseKind::Worley, fractal: true, octaves: 2, ..Default::default() });
     let c = codegen::compile(&g).unwrap();
     let res = 64u32; // 64 × 4 bytes = one 256-byte row, so the readback needs no padding
     let tex = crate::cache::texture(&gpu.device, res);

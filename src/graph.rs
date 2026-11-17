@@ -20,11 +20,9 @@ pub enum MathOp {
 pub enum NoiseKind {
     Perlin = 0,
     Simplex = 1,
-    /// Flat random value per cell.
-    Voronoi = 2,
-    /// Voronoi summed over octaves (Blender 4.0+ fractal Voronoi).
-    VoronoiFractal = 3,
-    /// Distance to the nearest feature points (see `WorleyFeature`).
+    /// Cellular noise: distance to the nearest feature points or a flat value per cell (see
+    /// `WorleyFeature`), optionally fractal. Replaced the separate Voronoi and Voronoi Fractal nodes.
+    /// (Discriminants are names, not indices: 2 and 3 were those two nodes.)
     Worley = 4,
     /// Random value per cell.
     White = 5,
@@ -33,11 +31,9 @@ pub enum NoiseKind {
 }
 
 impl NoiseKind {
-    pub const ALL: [NoiseKind; 7] = [
+    pub const ALL: [NoiseKind; 5] = [
         NoiseKind::Perlin,
         NoiseKind::Simplex,
-        NoiseKind::Voronoi,
-        NoiseKind::VoronoiFractal,
         NoiseKind::Worley,
         NoiseKind::White,
         NoiseKind::Blue,
@@ -47,17 +43,16 @@ impl NoiseKind {
         match self {
             NoiseKind::Perlin => "Perlin",
             NoiseKind::Simplex => "Simplex",
-            NoiseKind::Voronoi => "Voronoi",
-            NoiseKind::VoronoiFractal => "Voronoi Fractal",
             NoiseKind::Worley => "Worley",
             NoiseKind::White => "White Noise",
             NoiseKind::Blue => "Blue Noise",
         }
     }
 
-    /// Whether octaves, lacunarity and roughness apply.
+    /// Whether octaves, lacunarity and roughness can apply (Worley only when fractal; see
+    /// `NoiseParams::uses_octaves`).
     pub fn has_octaves(self) -> bool {
-        matches!(self, NoiseKind::Perlin | NoiseKind::Simplex | NoiseKind::VoronoiFractal | NoiseKind::Worley)
+        matches!(self, NoiseKind::Perlin | NoiseKind::Simplex | NoiseKind::Worley)
     }
 }
 
@@ -67,6 +62,8 @@ pub enum WorleyFeature {
     F1 = 0,
     F2 = 1,
     F2MinusF1 = 2,
+    /// A flat random value per cell (what the Voronoi node used to output).
+    CellValue = 3,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -75,6 +72,9 @@ pub struct NoiseParams {
     /// Worley only.
     #[serde(default)]
     pub feature: WorleyFeature,
+    /// Worley only: sum octaves (lacunarity, roughness). Off means a single octave.
+    #[serde(default)]
+    pub fractal: bool,
     /// Cells per tile. A whole number keeps the noise tiling.
     pub scale: f32,
     /// Map the signed [-1, 1] result to [0, 1].
@@ -90,11 +90,44 @@ pub struct NoiseParams {
     pub seed: Option<u32>,
 }
 
+impl NoiseParams {
+    /// Octaves actually evaluated: Perlin and Simplex always use `octaves`, Worley only when fractal.
+    pub fn octaves_used(&self) -> u32 {
+        if self.uses_octaves() { self.octaves.max(1) } else { 1 }
+    }
+
+    /// Whether the octave, lacunarity and roughness controls apply.
+    pub fn uses_octaves(&self) -> bool {
+        self.kind.has_octaves() && (self.kind != NoiseKind::Worley || self.fractal)
+    }
+}
+
+/// Files saved before Voronoi, Voronoi Fractal and Worley became one node: Voronoi is Worley with
+/// the cell-value feature, Voronoi Fractal adds fractal, and a Worley that had octaves keeps them.
+fn migrate_noise_kinds(v: &mut serde_json::Value) {
+    let Some(nodes) = v.get_mut("nodes").and_then(|n| n.as_object_mut()) else { return };
+    for node in nodes.values_mut() {
+        let Some(p) = node.pointer_mut("/kind/Noise").and_then(|p| p.as_object_mut()) else { continue };
+        let kind = p.get("kind").and_then(|k| k.as_str()).unwrap_or_default().to_owned();
+        let octaves = p.get("octaves").and_then(|o| o.as_u64()).unwrap_or(1);
+        match kind.as_str() {
+            "Voronoi" | "VoronoiFractal" => {
+                p.insert("kind".into(), "Worley".into());
+                p.insert("feature".into(), "CellValue".into());
+                p.insert("fractal".into(), (kind == "VoronoiFractal").into());
+            }
+            "Worley" if !p.contains_key("fractal") => _ = p.insert("fractal".into(), (octaves > 1).into()),
+            _ => {}
+        }
+    }
+}
+
 impl Default for NoiseParams {
     fn default() -> Self {
         Self {
             kind: NoiseKind::Perlin,
             feature: WorleyFeature::F1,
+            fractal: false,
             scale: 4.0,
             normalize: false,
             octaves: 4,
@@ -208,7 +241,9 @@ impl Graph {
 
     #[allow(dead_code)]
     pub fn from_json(s: &str) -> Result<Self, String> {
-        let g: Graph = serde_json::from_str(s).map_err(|e| e.to_string())?;
+        let mut v: serde_json::Value = serde_json::from_str(s).map_err(|e| e.to_string())?;
+        migrate_noise_kinds(&mut v);
+        let g: Graph = serde_json::from_value(v).map_err(|e| e.to_string())?;
         for e in &g.edges {
             let to = g.nodes.get(&e.to).ok_or(format!("edge to missing node {}", e.to))?;
             g.nodes.get(&e.from).ok_or(format!("edge from missing node {}", e.from))?;
@@ -293,7 +328,7 @@ impl Graph {
                         continue;
                     }
                     if let NodeKind::Noise(p) = &self.nodes[&n].kind {
-                        let oct = if p.kind.has_octaves() { p.octaves.max(1) } else { 1 };
+                        let oct = p.octaves_used();
                         finest = finest.max(p.scale * p.lacunarity.max(1.0).powi(oct as i32 - 1));
                     }
                     stack.extend(self.edges.iter().filter(|e| e.to == n).map(|e| e.from));
@@ -392,7 +427,7 @@ impl Graph {
                 } else if n.kind == NoiseKind::Blue && n.scale % 4.0 != 0.0 {
                     // The blue noise tables are 4³, 8³, 16³ and 32³; the tile must hold whole tables.
                     Broken(format!("blue noise scale {} is not a multiple of 4", n.scale))
-                } else if n.kind.has_octaves() && n.octaves > 1 && !is_whole(n.lacunarity) {
+                } else if n.octaves_used() > 1 && !is_whole(n.lacunarity) {
                     Broken(format!("lacunarity {} is not a whole number", n.lacunarity))
                 } else {
                     match input(0, memo, stack) {
@@ -578,6 +613,38 @@ mod tests {
         g.connect(a, b, 0);
         g.connect(b, a, 0);
         assert!(matches!(tiling_at(&g, a), Tiling::Broken(_)));
+    }
+
+    #[test]
+    fn old_voronoi_files_migrate_to_worley() {
+        // Rewrites the default graph's noise node as an old-format file would have stored it.
+        let old = |kind: &str, octaves: u64, drop_fractal: bool| {
+            let mut v: serde_json::Value = serde_json::from_str(&Graph::default_graph().to_json()).unwrap();
+            let p = v.pointer_mut("/nodes/1/kind/Noise").unwrap().as_object_mut().unwrap();
+            p.insert("kind".into(), kind.into());
+            p.insert("octaves".into(), octaves.into());
+            if drop_fractal {
+                p.remove("fractal");
+            }
+            let g = Graph::from_json(&v.to_string()).unwrap();
+            match &g.nodes[&1].kind {
+                NodeKind::Noise(n) => n.clone(),
+                _ => unreachable!(),
+            }
+        };
+        let v = old("Voronoi", 4, true);
+        assert_eq!((v.kind, v.feature, v.fractal), (NoiseKind::Worley, WorleyFeature::CellValue, false));
+        let vf = old("VoronoiFractal", 3, true);
+        assert_eq!((vf.kind, vf.feature, vf.fractal, vf.octaves_used()), (NoiseKind::Worley, WorleyFeature::CellValue, true, 3));
+        // A Worley that used octaves stays fractal; one with a single octave doesn't.
+        assert!(old("Worley", 4, true).fractal);
+        assert!(!old("Worley", 1, true).fractal);
+        // The test graph saved before the merge still opens, with its Worley kept fractal.
+        let g = Graph::from_json(include_str!("../SimpleTestGraph.noisegraph")).unwrap();
+        assert!(g.nodes.values().any(|n| matches!(&n.kind, NodeKind::Noise(p) if p.kind == NoiseKind::Worley && p.fractal)));
+        // New files keep what they say.
+        assert!(!old("Worley", 4, false).fractal);
+        assert_eq!(old("Worley", 4, false).octaves_used(), 1);
     }
 
     #[test]

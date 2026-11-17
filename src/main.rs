@@ -534,14 +534,15 @@ fn node_props(ui: &mut egui::Ui, kind: &mut NodeKind) {
             if n.kind == graph::NoiseKind::Worley {
                 row(ui, &mut n.feature, d.feature, |ui, v| {
                     use graph::WorleyFeature::*;
-                    for (f, name) in [(F1, "F1"), (F2, "F2"), (F2MinusF1, "F2 − F1")] {
+                    for (f, name) in [(F1, "F1"), (F2, "F2"), (F2MinusF1, "F2 − F1"), (CellValue, "Cell value")] {
                         ui.selectable_value(v, f, name);
                     }
                 });
+                row(ui, &mut n.fractal, d.fractal, |ui, v| _ = ui.checkbox(v, "fractal (octaves)"));
             }
             row(ui, &mut n.scale, d.scale, |ui, v| _ = ui.add(egui::Slider::new(v, 0.5..=32.0).text("scale (cells/tile)")));
             row(ui, &mut n.normalize, d.normalize, |ui, v| _ = ui.checkbox(v, "normalize 0-1"));
-            if n.kind.has_octaves() {
+            if n.uses_octaves() {
                 row(ui, &mut n.octaves, d.octaves, |ui, v| _ = ui.add(egui::Slider::new(v, 1..=8).text("octaves")));
                 row(ui, &mut n.lacunarity, d.lacunarity, |ui, v| _ = ui.add(egui::Slider::new(v, 1.0..=4.0).text("lacunarity")));
                 row(ui, &mut n.roughness, d.roughness, |ui, v| _ = ui.add(egui::Slider::new(v, 0.0..=1.0).text("roughness")));

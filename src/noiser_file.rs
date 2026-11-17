@@ -13,8 +13,6 @@ fn kind_name(k: NoiseKind) -> &'static str {
     match k {
         NoiseKind::Perlin => "perlin",
         NoiseKind::Simplex => "simplex",
-        NoiseKind::Voronoi => "voronoi",
-        NoiseKind::VoronoiFractal => "voronoi_fractal",
         NoiseKind::Worley => "worley",
         NoiseKind::White => "white",
         NoiseKind::Blue => "blue",
@@ -57,7 +55,7 @@ pub fn ops(g: &Graph, seed: u32) -> Result<Value, String> {
                 NodeKind::Noise(n) => {
                     let mut o = json!({
                         "op": "noise", "kind": kind_name(n.kind), "position": input(id, 0),
-                        "scale": n.scale, "normalize": n.normalize, "octaves": n.octaves, "lacunarity": n.lacunarity,
+                        "scale": n.scale, "normalize": n.normalize, "octaves": n.octaves_used(), "lacunarity": n.lacunarity,
                         "roughness": n.roughness, "distortion": n.distortion, "seed": n.seed.unwrap_or(seed),
                     });
                     if n.kind == NoiseKind::Worley {
@@ -65,6 +63,7 @@ pub fn ops(g: &Graph, seed: u32) -> Result<Value, String> {
                             WorleyFeature::F1 => "f1",
                             WorleyFeature::F2 => "f2",
                             WorleyFeature::F2MinusF1 => "f2_minus_f1",
+                            WorleyFeature::CellValue => "cell_value",
                         });
                     }
                     o

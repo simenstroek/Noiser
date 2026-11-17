@@ -61,9 +61,9 @@ then both operands are converted to vectors and the op applies per component.
 
 ### `noise`
 Fields: `kind`, `position` (op id or `null` for `p`), `scale`, `normalize`, `octaves`,
-`lacunarity`, `roughness`, `distortion`, `seed` (already resolved; a non-negative integer), and `feature` for Worley (`f1`, `f2`, `f2_minus_f1`). Type float.
+`lacunarity`, `roughness`, `distortion`, `seed` (already resolved; a non-negative integer), and `feature` for Worley (`f1`, `f2`, `f2_minus_f1`, `cell_value`; Worley is fractal when `octaves` > 1). Type float.
 
-`kind` is one of `perlin`, `simplex`, `voronoi`, `voronoi_fractal`, `worley`, `white`, `blue`.
+`kind` is one of `perlin`, `simplex`, `worley`, `white`, `blue`.
 Version 1 specifies `perlin` exactly below. The others follow the same lattice, hash and fBm
 rules; until each gets its own section, `src/noise.wgsl` is their definition.
 
@@ -154,8 +154,8 @@ noise(q):
   return normalize ? v · 0.5 + 0.5 : v
 ```
 
-`BASE` for `perlin` is `perlin(...)` above. Kinds without octaves: `voronoi`, `worley`,
-`white`, `blue`.
+`BASE` for `perlin` is `perlin(...)` above. Kinds without octaves: `white`, `blue`. `worley` has
+octaves only when fractal; the file then stores `octaves` as 1.
 
 ## Test vectors
 

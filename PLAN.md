@@ -42,7 +42,7 @@ graph (serde model)  ──►  IR (flat SSA op list, versioned)  ──►  WGS
 Node graph (centre) · 3D view (primitive picker, solid/cloud, displacement amount, orbit camera) · 2D slice view (axis X/Y/Z, slice slider, grayscale/heatmap, auto-normalize by min/max reduction) · properties panel for the selected node.
 
 ### Nodes (v1)
-- **Noise**: Perlin, Simplex (psrdnoise), Voronoi, Voronoi Fractal, Worley, White, Blue. Shared params: scale (integer when tiling), normalize, octaves, lacunarity (integer when tiling), roughness/gain, distortion, seed, and an optional position input.
+- **Noise**: Perlin, Simplex (psrdnoise), Worley (cellular, see below), White, Blue.
 - **Value** (float or vec3), **Math** (add/sub/mul/div/min/max), **Position**, **Normal** (gradient of the input, flip option).
 - **Outputs**: Density (SDF in the math export; 0–1 for 8/16-bit, signed for 32-bit), Normal (vec3).
 
@@ -64,7 +64,7 @@ Node graph (centre) · 3D view (primitive picker, solid/cloud, displacement amou
 ### Noise notes (milestone 4)
 - **Hash**: pcg3d on the wrapped integer cell, so every noise tiles by wrapping its lattice every `scale` cells. Octaves use `seed + octave`. (Briefly switched to Blender's Jenkins hash on 2026-11-17 so a stock Blender node could reproduce it, then reverted the same day: it cost 2–4.6× preview speed. See the hash-cost note below.)
 - **Simplex** uses psrdnoise's BCC lattice (`uvw = M·x`, kernel `max(0.5 − r², 0)⁴`, gain 90). Its features are slightly finer than Perlin's at the same scale.
-- **Voronoi / Worley** search 3×3×3 cells, fully jittered. Worley maps F1, F2 and F2−F1 to signed [-1, 1] using typical ranges (1, 1.4, 1).
+- **Worley** (one node; Voronoi and Voronoi Fractal were merged into it on 2026-11-17) searches 3×3×3 cells, fully jittered. Feature: F1 (default), F2, F2−F1, or Cell value (a flat random value per cell, the old Voronoi). The first three map to signed [-1, 1] using typical ranges (1, 1.4, 1). **Fractal** is a checkbox: off means one octave, on shows octaves, lacunarity and roughness. Old files migrate on load (`migrate_noise_kinds` in `graph.rs`): Voronoi becomes Cell value, Voronoi Fractal adds Fractal, and a Worley saved with octaves above 1 stays fractal.
 - **Blue noise** is a lookup into precomputed void-and-cluster tables (4³, 8³, 16³, 32³) in `assets/bluenoise.bin`. It tiles only when the scale is a multiple of 4. The seed shifts the lookup by whole cells.
 - **GPU tests** (`src/gpu_tests.rs`): seam check per axis, a 1e-4-step continuity check across the tile edge, and a signed-range check. `cargo test noise_contact_sheet -- --ignored` writes `target/noise_sheet.pgm` for a visual check.
 
@@ -111,6 +111,12 @@ Node graph (centre) · 3D view (primitive picker, solid/cloud, displacement amou
 
 ---
 
+### Planned nodes (requested 2026-11-17)
+- **Curve**: a response curve edited in the details panel. Points can be Bézier (with handles), linear or step. Evaluated per sample on the GPU, so it needs a lookup table in the parameter buffer (or a small baked 1D texture).
+- **Remap**: input min/max and output min/max, with an optional clamp.
+- **Brick**: a primitive node that outputs a rectangular grid, default 8×8×8. (Details to confirm: what it outputs per cell, e.g. a brick pattern with mortar or just cell coordinates.)
+- **More Math operators**: dot product, smooth minimum, smooth maximum, power. Dot product takes two vectors and outputs a float, so Math needs per-operator output types, not just the vector/float rule it has now. (The first line of this request was cut off after "Remap", so there may be more.)
+
 ## 3a. Mesh pipeline sketch (milestone 7)
 1. **Import**: OBJ (`tobj`) and glTF (`gltf`). FBX is out of scope.
 2. **Mesh → SDF**: a narrow-band grid, with resolution and band width set in the app. Distance comes from a BVH closest-point query. The sign comes from the **generalized winding number**, which tolerates small holes and is more forgiving than "must be closed". Candidate crate: `mesh_to_sdf` (check sign quality first). It can move to a GPU compute shader if it's too slow.
@@ -144,7 +150,7 @@ Node graph (centre) · 3D view (primitive picker, solid/cloud, displacement amou
 - **Blender** (`blender/noiser/`, an extension for 5.2+; checked on 5.3, and the Bit Math node it needs hasn't been checked in 5.2): File > Import > Noiser Function builds a Geometry Nodes group from stock nodes (Integer Math and Bit Math for pcg3d), with a Position input and a Density output. Checked headless: `blender/check_file.py` (five Perlin graphs, 344 test points each, max error about 1e-6), `blender/check_hash.py` (hash alone, 201 cells, exact) and `blender/check_addon.py` (the real import operator). Perlin is a reusable group of about 450 nodes but evaluates live at any resolution. **No shader group**: shader node trees have no Bit Math node, so shaders use the texture bake.
 - **Houdini** (next): a VEX sampler is the natural fit (VEX has the u32 ops the hash needs). Same test vectors.
 - **Fallback**: Noiser's VDB and slice-grid exports (milestone 5).
-- **Not yet in the format/add-on**: Simplex, Voronoi, Voronoi Fractal, Worley, White, Blue (blue noise must ship as an embedded 3D texture, since it's an optimized pattern, not a formula), the Normal op. The add-on says which op it can't build.
+- **Not yet in the format/add-on**: Simplex, Worley, White, Blue
 - **Not worth doing**: a Python sampler that writes attributes (an operator, not live).
 
 ## 5. Things to watch
@@ -157,7 +163,7 @@ Node graph (centre) · 3D view (primitive picker, solid/cloud, displacement amou
 ## 6. Decisions (2026-11-17)
 | Topic | Decision |
 |---|---|
-| Voronoi vs Worley | **Worley** outputs distances (F1, F2, F2−F1). **Voronoi** outputs a flat random value per cell. **Voronoi Fractal** is Voronoi with octaves, as in Blender 4.0+. |
+| Voronoi vs Worley | One **Worley** node. Feature F1 (default), F2, F2−F1 or Cell value; Fractal option for octaves, as in Blender 4.0+ fractal Voronoi. (Was three nodes until 2026-11-17.) |
 | Distortion | Same as Blender's Noise Texture: the input position is offset by a noise vector × distortion before the fBm loop. |
 | Tile space | One tile = 1 world unit. The primitive has its own transform/scale, independent of the tile. A noise's scale = whole cells per tile. |
 | 3D export | Slice grid (vertical strip or square, as in NoiseGenerator) and OpenVDB. Plus 2D PNG/EXR. |

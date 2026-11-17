@@ -80,7 +80,7 @@ pub fn compile_with(g: &Graph, caches: &BTreeMap<NodeId, u32>) -> Result<Compile
             NodeKind::Noise(n) => params.extend([
                 n.scale,
                 if n.normalize { 1.0 } else { 0.0 },
-                n.octaves as f32,
+                n.octaves_used() as f32,
                 n.lacunarity,
                 n.roughness,
                 n.distortion,
@@ -138,7 +138,6 @@ fn fbm_function(kind: NoiseKind) -> String {
     let base = match kind {
         NoiseKind::Perlin => "clamp(perlin(x, period, seed + o), -1.0, 1.0)",
         NoiseKind::Simplex => "clamp(simplex(x, period, seed + o), -1.0, 1.0)",
-        NoiseKind::Voronoi | NoiseKind::VoronoiFractal => "cells(x, period, seed + o, true).z",
         NoiseKind::Worley => "worley(x, period, seed + o, feature)",
         NoiseKind::White => "white(x, period, seed + o)",
         NoiseKind::Blue => "blue(x, period, seed + o)",
