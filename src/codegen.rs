@@ -465,7 +465,8 @@ mod tests {
             state ^= state << 17;
             (state % n as u64) as usize
         };
-        for round in 0..120 {
+        let rounds: usize = std::env::var("NOISER_FUZZ_ROUNDS").ok().and_then(|v| v.parse().ok()).unwrap_or(120);
+        for round in 0..rounds {
             let g = random_graph(&mut rnd);
             let c = compile(&g).unwrap_or_else(|e| panic!("round {round}: {e}
 {}", g.to_json()));

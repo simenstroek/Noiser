@@ -555,7 +555,8 @@ fn random_graphs_build_and_evaluate_on_the_gpu() {
         (state % n as u64) as usize
     };
     let at = [[0.3, 0.6, 0.9], [0.1, 0.2, 0.3]];
-    for round in 0..16 {
+    let rounds: usize = std::env::var("NOISER_FUZZ_ROUNDS").ok().and_then(|v| v.parse().ok()).unwrap_or(16);
+    for round in 0..rounds {
         let g = codegen::random_graph(&mut rnd);
         let v = eval(&gpu, &g, &at); // panics if the driver rejects the shader
         assert_eq!(v.len(), 2, "round {round}");
