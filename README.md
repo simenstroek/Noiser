@@ -76,10 +76,10 @@ scaled to a unit sphere first, the noise is the same size relative to each mesh.
 reported and the rest continue; nothing is ever overwritten. From a script:
 `noiser.exe graph.noisegraph --batch-out DIR --batch-file a.obj --batch-file b.obj`.
 
-**Headless.** `noiser.exe --headless graph.noisegraph --batch-out DIR --batch-dir SRC` does the same without a window
+**Headless.** `noiser-batch.cmd graph.noisegraph --batch-out DIR --batch-dir SRC` (it runs `noiser.exe --headless`, waits for it and returns the exit code; `noiser.exe` itself is a windowed program that shells do not wait for) does the same without a window
 (options: `--amount`, `--amount-var 0.2` (each mesh varies its displacement by up to 20 %), `--tile`, `--size`, `--seed`, `--seed-mode same|increment|random`, `--res`, `--grid-res`,
 `--format obj|ply`, `--cull`, `--mask KIND`). Progress goes to the console and to `noiser-batch.log` in the output
-folder; the exit code is 1 if any mesh failed.
+folder; the exit code is 1 if any mesh failed. Without the .cmd, use `Start-Process -Wait -PassThru` in PowerShell.
 
 **Editing.** Undo and redo, copy and paste of nodes (also between two Noiser windows), duplicate, reroute nodes, mute (bypass) a
 node with M, frame the selection with F or everything with Home, search in the add menu, File > New from template
@@ -95,7 +95,7 @@ quarter) and a march step limit; none of them affect exports.
 |---|---|
 | Node graph | Middle-drag pans, scroll zooms, left-drag on empty space box-selects, right-click adds a node |
 | | Drag from a pin to connect; drag a connected input away to disconnect; drop a wire on empty space to pick a node for it |
-| | | Delete removes the selection, Ctrl+D duplicates it at the cursor, Ctrl+C / Ctrl+V copy and paste, M mutes, F / Home frame; drop a lone node on a wire to splice it in |
+| | | Delete removes the selection, Ctrl+D duplicates it at the cursor, Ctrl+C / Ctrl+V copy and paste, M mutes, F / Home frame, Ctrl+A selects all; drop a lone node on a wire to splice it in; Ctrl+S / Ctrl+O save and open |
 | 3D view | Drag orbits, scroll zooms |
 | Slice view | Scroll moves the slice |
 
@@ -107,5 +107,5 @@ quarter) and a march step limit; none of them affect exports.
 
 ## Roadmap
 
-Next: an environment map and lighting setups for the viewport, vertex-colour masks for meshes, comment frames in
-the graph editor, exposed graph parameters for batch work. See `PLAN.md` for the details.
+Ideas: vertex-colour masks for meshes, exposed graph parameters for batch work, shader-code export of the density
+function, a value readout in the slice view. See `PLAN.md` for the details.

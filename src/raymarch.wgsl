@@ -92,7 +92,21 @@ fn bounds(ro: vec3f, rd: vec3f) -> vec2f {
     let b = dot(ro, rd);
     let h = b * b - dot(ro, ro) + r * r;
     if (h < 0.0) { return vec2f(1.0, 0.0); }
-    return vec2f(max(-b - sqrt(h), 0.0), -b + sqrt(h));
+    var span = vec2f(max(-b - sqrt(h), 0.0), -b + sqrt(h));
+    if (u.prim == 7u) {
+        // A mesh: also limited to its bounding box (grown by how far the noise can push the surface), so a
+        // flat open mesh does not leave a thick slab of "solid" below it inside the bounding sphere.
+        let m = max(max(-u.push_min, u.push_max), 0.0) + SHELL_MARGIN;
+        let lo = u.mesh_lo * u.prim_size - m;
+        let hi = u.mesh_hi * u.prim_size + m;
+        let inv = 1.0 / select(rd, vec3f(1e-9), abs(rd) < vec3f(1e-9));
+        let t0 = (lo - ro) * inv;
+        let t1 = (hi - ro) * inv;
+        let tn = min(t0, t1);
+        let tf = max(t0, t1);
+        span = vec2f(max(span.x, max(tn.x, max(tn.y, tn.z))), min(span.y, min(tf.x, min(tf.y, tf.z))));
+    }
+    return span;
 }
 
 fn normal_at(p: vec3f, e: f32) -> vec3f {

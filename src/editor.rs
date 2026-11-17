@@ -586,7 +586,7 @@ impl Editor {
             graph.disconnect(to, port);
         }
         // Optional snapping: when a drag ends, selected nodes settle on a 20-unit grid.
-        if self.snap && ui.input(|i| i.pointer.primary_released()) {
+        if self.snap && self.node_dragged && ui.input(|i| i.pointer.primary_released()) {
             for id in &self.selected {
                 if let Some(n) = graph.nodes.get_mut(id) {
                     n.pos = [(n.pos[0] / 20.0).round() * 20.0, (n.pos[1] / 20.0).round() * 20.0];
