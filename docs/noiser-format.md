@@ -81,7 +81,7 @@ when `clamp` is true. Type float.
 corners for `center`, the cell centres for `corner`). Tiles when every count is a whole number. Type float.
 
 ### `pattern`
-`kind` selects the pattern; version 1 has `bricks`, `checker`, `stripes`, `dimples`, `gyroid`, `fractal` and `truchet`. Common fields: `position` (op id or `null` for
+`kind` selects the pattern; version 1 has `bricks`, `checker`, `stripes`, `dimples`, `gyroid`, `fractal`, `truchet` and `honeycomb`. Common fields: `position` (op id or `null` for
 `p`) and `seed` (resolved, as for `noise`). Output is a float in [-1, 1].
 
 **`bricks`**: a brick wall. Fields `counts` `[nx, ny, nz]`, `mode2d`, `axis`, `steps`, `gap`,
@@ -152,6 +152,18 @@ plane is the row and stacking axes of `mode2d` (see `bricks`), extruded along th
 `uv = fract(x)` on the two axes with `uv.x = 1 − uv.x` when flipped. Arcs: `d = min(|‖uv‖ − ½|, |‖uv − (1,1)‖ − ½|)`;
 diagonals: `d = |uv.x − uv.y| / √2`. With `h = ½ · width`, the result is
 `−1 + 2 · ramp(h(1 − softness), h(1 + softness), d)`. Version 1 has no 3D pipes variant.
+
+**`honeycomb`**: fields `counts`, `variant` (0 hexagons, 1 body-centred cells, 2 face-centred cells), `mode2d`/`axis`
+(hexagons are 2D: `mode2d` true, extruded along `axis`; the others are 3D), `output` (`distance`, `shape`,
+`cell_value`), `gap`, `bevel`, `seed`. Lattice points are at `(cell + b) / counts`, `cell = floor(q · counts)` plus offsets in
+{−1, 0, 1} on each used axis (just 0 on the extrusion axis in 2D). The offsets `b` (cell units): hexagons `(0,0,0)` and
+`(½,½,½)` with the extrusion-axis component 0; body-centred `(0,0,0)`, `(½,½,½)`; face-centred `(0,0,0)`, `(0,½,½)`, `(½,0,½)`,
+`(½,½,0)`. Pass 1 finds the nearest point `a` (in tile units, `x = q · counts / counts`); pass 2 takes, over every other point `b` in
+the same search, `wall = min dot((a + b)/2 − q, normalize(b − a))` (the exact distance to the cell's boundary). With `inv = 1 / counts` the
+cell radius is `r = ½ · min(inv on the used axes, |b · inv| for each basis offset b ≠ 0)` and `depth = clamp(wall / r, 0, 1)`.
+`distance` returns `2·depth − 1`; `shape` returns `1 − 2·ramp(gap, gap + bevel, depth)` (+1 on walls); `cell_value` returns
+`hash3(wrapped cell, seed + k).x · 2 − 1` for the nearest point's cell and basis index `k` (the cell wrapped by `counts` and, in 2D,
+with the extrusion axis 0). Hexagons are regular when the counts are in the ratio 1 : 0.577 (7 × 4, 12 × 7, 26 × 15).
 
 ### `noise`
 Fields: `kind`, `position` (op id or `null` for `p`), `scale`, `normalize`, `octaves`,

@@ -1047,6 +1047,46 @@ fn pattern_props(ui: &mut egui::Ui, p: &mut graph::PatternParams) {
             pattern_seed(ui, p, &d);
             ui.weak("-1 on the line, +1 away from it. Each cell is flipped at random; the lines join across cells.");
         }
+        PatternKind::Honeycomb => {
+            let before = p.variant;
+            row(ui, &mut p.variant, d.variant, |ui, v| {
+                ui.selectable_value(v, 0, "Hexagons (2D)");
+                ui.selectable_value(v, 1, "Body-centred cells");
+                ui.selectable_value(v, 2, "Face-centred cells");
+            });
+            if p.variant != before {
+                p.mode2d = p.variant == 0; // hexagons are flat; the lattice cells are 3D
+            }
+            if p.variant == 0 {
+                row(ui, &mut p.axis, d.axis, |ui, v| {
+                    ui.label("extrude along");
+                    for (a, name) in [(0, "X"), (1, "Y"), (2, "Z")] {
+                        ui.selectable_value(v, a, name);
+                    }
+                });
+            }
+            pattern_counts(ui, p, ["cells", "cells", "cells"]);
+            if p.variant == 0 {
+                ui.weak("Hexagons are regular when the cell counts are in the ratio 1 : 0.577: 7 × 4, 12 × 7, 26 × 15.");
+            }
+            row(ui, &mut p.output, d.output, |ui, v| {
+                ui.selectable_value(v, Distance, "Distance");
+                ui.selectable_value(v, Shape, "Walls");
+                ui.selectable_value(v, CellValue, "Cell value");
+            });
+            match p.output {
+                Distance => _ = ui.weak("-1 at a wall, +1 at the centre of a cell."),
+                Shape => {
+                    row(ui, &mut p.gap, d.gap, |ui, v| _ = ui.add(egui::Slider::new(v, 0.0..=1.0).text("wall width")));
+                    row(ui, &mut p.bevel, d.bevel, |ui, v| _ = ui.add(egui::Slider::new(v, 0.0..=1.0).text("edge softness")));
+                    ui.weak("+1 on the walls, -1 inside the cells.");
+                }
+                CellValue => {
+                    pattern_seed(ui, p, &d);
+                    ui.weak("A flat random value per cell.");
+                }
+            }
+        }
         PatternKind::Gyroid => {
             pattern_counts(ui, p, ["periods", "periods", "periods"]);
             row(ui, &mut p.variant, d.variant, |ui, v| {

@@ -300,6 +300,7 @@ impl Gen<'_> {
                     PatternKind::Gyroid => "gyroid",
                     PatternKind::Fractal => "fractal",
                     PatternKind::Truchet => "truchet",
+                    PatternKind::Honeycomb => "honeycomb",
                 };
                 (Ty::F, format!("{function}({q}, {s}u)"))
             }

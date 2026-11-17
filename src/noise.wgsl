@@ -543,3 +543,82 @@ fn truchet(q: vec3f, s: u32) -> f32 {
     let half_width = 0.5 * width;
     return -1.0 + 2.0 * ramp01(half_width * (1.0 - soft), half_width * (1.0 + soft), d);
 }
+
+// The cells of a lattice. variant 0 hexagons (the plane of the two axes left by `axis`, extruded along
+// it), 1 the cells of a body-centred lattice, 2 of a face-centred one (the points are the ones in
+// `dimples`; in 2D the second point is (1/2, 1/2) in the plane). The wall distance is exact: find the
+// nearest lattice point, then the distance to the bisector plane of each other point near it.
+// Outputs: 0 distance (-1 at a wall, +1 at a cell's centre), 1 shape (+1 on the wall, -1 on the
+// cell; `gap` and `bevel` are shares of the cell's radius), 2 a flat random value per cell.
+fn honeycomb(q: vec3f, s: u32) -> f32 {
+    let n = max(vec3f(P[s], P[s + 1u], P[s + 2u]), vec3f(1e-3));
+    let gap = P[s + 4u];
+    let bevel = P[s + 5u];
+    let mode = u32(P[s + 6u]);
+    let flat2d = P[s + 7u] > 0.5;
+    let axis = u32(P[s + 8u]);
+    let seed = select(u.seed, u32(P[s + 9u]), P[s + 9u] >= 0.0);
+    let lattice = u32(P[s + 10u]);
+    var ly = 2u; // the extruded axis in 2D
+    if (flat2d && axis == 0u) { ly = 0u; }
+    else if (flat2d && axis == 1u) { ly = 1u; }
+    var basis = array<vec3f, 4>(vec3f(0.0), vec3f(0.5), vec3f(0.0), vec3f(0.0));
+    var count = 2u;
+    if (flat2d) { basis[1][ly] = 0.0; }
+    if (lattice == 2u) { basis[1] = vec3f(0.0, 0.5, 0.5); basis[2] = vec3f(0.5, 0.0, 0.5); basis[3] = vec3f(0.5, 0.5, 0.0); count = 4u; }
+    var x = q * n;
+    if (flat2d) { x[ly] = 0.0; }
+    let base = vec3i(floor(x));
+    // Pass 1: the nearest lattice point.
+    var best = 1e9;
+    var best_cell = vec3f(0.0);
+    var best_k = 0u;
+    for (var z = -1; z <= 1; z++) {
+        for (var y = -1; y <= 1; y++) {
+            for (var w = -1; w <= 1; w++) {
+                let o = vec3i(w, y, z);
+                if (flat2d && o[ly] != 0) { continue; }
+                let cell = vec3f(base + o);
+                for (var k = 0u; k < count; k++) {
+                    let d = (x - (cell + basis[k])) / n;
+                    let d2 = dot(d, d);
+                    if (d2 < best) { best = d2; best_cell = cell; best_k = k; }
+                }
+            }
+        }
+    }
+    let a = (best_cell + basis[best_k]) / n;
+    let p = x / n;
+    // Pass 2: the nearest wall, which is the bisector of the nearest point and one of its neighbours.
+    var wall = 1e9;
+    for (var z = -1; z <= 1; z++) {
+        for (var y = -1; y <= 1; y++) {
+            for (var w = -1; w <= 1; w++) {
+                let o = vec3i(w, y, z);
+                if (flat2d && o[ly] != 0) { continue; }
+                let cell = vec3f(base + o);
+                for (var k = 0u; k < count; k++) {
+                    let b = (cell + basis[k]) / n;
+                    let ab = b - a;
+                    if (dot(ab, ab) < 1e-12) { continue; }
+                    wall = min(wall, dot(0.5 * (a + b) - p, normalize(ab)));
+                }
+            }
+        }
+    }
+    // A cell's radius is half the distance to its nearest neighbour.
+    let inv = 1.0 / n;
+    var nearest = 1e9;
+    for (var c = 0u; c < 3u; c++) { if (!(flat2d && c == ly)) { nearest = min(nearest, inv[c]); } }
+    for (var k = 1u; k < count; k++) { nearest = min(nearest, length(basis[k] * inv)); }
+    let radius = 0.5 * nearest;
+    let depth = clamp(wall / radius, 0.0, 1.0); // 0 on a wall, 1 at a centre
+    if (mode == 2u) {
+        let cells = vec3i(max(n, vec3f(1.0)) + 0.5);
+        var id = vec3i(best_cell);
+        if (flat2d) { id[ly] = 0; }
+        return hash01(((id % cells) + cells) % cells, seed + best_k).x * 2.0 - 1.0;
+    }
+    if (mode == 1u) { return 1.0 - 2.0 * ramp01(gap, gap + bevel, depth); }
+    return depth * 2.0 - 1.0;
+}

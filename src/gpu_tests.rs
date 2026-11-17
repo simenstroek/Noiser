@@ -714,6 +714,8 @@ fn render_pattern_images() {
         ("stripes_square", single_node_graph(NodeKind::Pattern({ let mut p = crate::graph::PatternParams::for_kind(crate::graph::PatternKind::Stripes); p.variant = 3; p.dir = [1.0, 1.0, 0.0]; p.counts[0] = 6.0; p.width = 0.4; p }))),
         ("dimples_golf", single_node_graph(NodeKind::Pattern(crate::graph::PatternParams::for_kind(crate::graph::PatternKind::Dimples)))),
         ("gyroid_shell", single_node_graph(NodeKind::Pattern({ let mut p = crate::graph::PatternParams::for_kind(crate::graph::PatternKind::Gyroid); p.output = PatternOutput::Shape; p.counts = [3.0; 3]; p }))),
+        ("honeycomb", single_node_graph(NodeKind::Pattern(crate::graph::PatternParams::for_kind(crate::graph::PatternKind::Honeycomb)))),
+        ("honeycomb_cells", single_node_graph(NodeKind::Pattern({ let mut p = crate::graph::PatternParams::for_kind(crate::graph::PatternKind::Honeycomb); p.output = PatternOutput::CellValue; p }))),
         ("menger", single_node_graph(NodeKind::Pattern({ let mut p = crate::graph::PatternParams::for_kind(crate::graph::PatternKind::Fractal); p.iterations = 4; p }))),
         ("sierpinski", single_node_graph(NodeKind::Pattern({ let mut p = crate::graph::PatternParams::for_kind(crate::graph::PatternKind::Fractal); p.variant = 1; p.iterations = 4; p }))),
         ("truchet_arcs", single_node_graph(NodeKind::Pattern(crate::graph::PatternParams::for_kind(crate::graph::PatternKind::Truchet)))),
@@ -1234,6 +1236,49 @@ mod pattern_family_tests {
         let golf = eval(&gpu, &pattern(Dimples, |_| {}), &points(20000, 4));
         let flat_share = golf.iter().filter(|v| **v > 0.999).count() as f32 / golf.len() as f32;
         assert!((0.25..0.7).contains(&flat_share), "flat share {flat_share}");
+    }
+
+    #[test]
+    fn honeycomb_cells_have_centres_walls_and_flat_values() {
+        use PatternKind::*;
+        use PatternOutput::{CellValue, Distance, Shape};
+        let Some(gpu) = gpu() else { return eprintln!("no GPU adapter; skipping") };
+        for variant in 0..3 {
+            for output in [Distance, Shape, CellValue] {
+                let g = pattern(Honeycomb, |p| { p.variant = variant; p.mode2d = variant == 0; p.output = output; if variant > 0 { p.counts = [4.0; 3]; } });
+                check(&gpu, &g, &format!("honeycomb {variant} {output:?}"), output != CellValue);
+            }
+        }
+        // Lattice points are cell centres (depth 1); the midpoint between two neighbouring points is
+        // on the wall between their cells (depth 0). counts are cells per tile; the points sit at
+        // (cell + b) / counts.
+        let probes: [(u32, [f32; 3], [f32; 3], [f32; 3]); 3] = [
+            // hexagons, 7 x 4: points (0,0) and (1/2,1/2) of a cell, extruded along z
+            (0, [7.0, 4.0, 4.0], [0.0, 0.0, 0.3], [0.5 / 7.0, 0.0, 0.3]),
+            // body-centred, 4 per side: (0,0,0) and (1/2,1/2,1/2) of a cell
+            (1, [4.0; 3], [0.0; 3], [0.25 * 0.25, 0.25 * 0.25, 0.25 * 0.25]),
+            // face-centred, 4 per side: (0,0,0) and (0,1/2,1/2) of a cell
+            (2, [4.0; 3], [0.0; 3], [0.0, 0.25 * 0.25, 0.25 * 0.25]),
+        ];
+        for (variant, counts, centre, wall) in probes {
+            let make = |output: PatternOutput| pattern(Honeycomb, |p| { p.variant = variant; p.mode2d = variant == 0; p.counts = counts; p.output = output; p.gap = 0.1; p.bevel = 0.1; });
+            let d = eval(&gpu, &make(Distance), &[centre, wall]);
+            let sh = eval(&gpu, &make(Shape), &[centre, wall]);
+            near(d[0], 1.0, &format!("variant {variant}: a lattice point is a cell centre"));
+            near(d[1], -1.0, &format!("variant {variant}: halfway between neighbours is a wall"));
+            near(sh[0], -1.0, &format!("variant {variant}: inside a cell"));
+            near(sh[1], 1.0, &format!("variant {variant}: on a wall"));
+        }
+        // Hexagons are extruded: nothing changes along z.
+        let hex = pattern(Honeycomb, |_| {});
+        let v = eval(&gpu, &hex, &[[0.13, 0.21, 0.1], [0.13, 0.21, 0.6], [0.13, 0.21, 0.95]]);
+        near(v[0], v[1], "hexagons along z");
+        near(v[0], v[2], "hexagons along z, again");
+        // Cell values are flat inside a cell and differ between cells.
+        let cells = pattern(Honeycomb, |p| p.output = CellValue);
+        let v = eval(&gpu, &cells, &[[0.0, 0.0, 0.3], [0.01, 0.01, 0.3], [0.5 / 7.0, 0.5 / 4.0, 0.3], [1.0 / 7.0, 0.0, 0.3]]);
+        near(v[0], v[1], "two points in one cell");
+        assert!((v[0] - v[2]).abs() > 1e-3 && (v[0] - v[3]).abs() > 1e-3, "neighbouring cells should differ: {v:?}");
     }
 
     #[test]

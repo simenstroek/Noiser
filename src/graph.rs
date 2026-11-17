@@ -168,10 +168,12 @@ pub enum PatternKind {
     Fractal,
     /// Truchet tiles: random quarter-circle arcs or diagonals joining up across cells (2D, extruded).
     Truchet,
+    /// The cells of a lattice: hexagons (2D, extruded) or the 3D cells of a body-centred or face-centred lattice.
+    Honeycomb,
 }
 
 impl PatternKind {
-    pub const ALL: [PatternKind; 7] = [PatternKind::Bricks, PatternKind::Dimples, PatternKind::Checker, PatternKind::Stripes, PatternKind::Gyroid, PatternKind::Fractal, PatternKind::Truchet];
+    pub const ALL: [PatternKind; 8] = [PatternKind::Bricks, PatternKind::Dimples, PatternKind::Checker, PatternKind::Stripes, PatternKind::Gyroid, PatternKind::Fractal, PatternKind::Truchet, PatternKind::Honeycomb];
 
     pub fn name(self) -> &'static str {
         match self {
@@ -182,6 +184,7 @@ impl PatternKind {
             PatternKind::Gyroid => "Gyroid",
             PatternKind::Fractal => "Fractal",
             PatternKind::Truchet => "Truchet",
+            PatternKind::Honeycomb => "Honeycomb",
         }
     }
 
@@ -195,6 +198,7 @@ impl PatternKind {
             PatternKind::Gyroid => "gyroid",
             PatternKind::Fractal => "fractal",
             PatternKind::Truchet => "truchet",
+            PatternKind::Honeycomb => "honeycomb",
         }
     }
 }
@@ -286,6 +290,8 @@ impl PatternParams {
             PatternKind::Gyroid => PatternParams { counts: [2.0; 3], mode2d: false, width: 0.25, ..base },
             PatternKind::Fractal => PatternParams { counts: [1.0; 3], mode2d: false, output: PatternOutput::Shape, ..base },
             PatternKind::Truchet => PatternParams { counts: [6.0, 6.0, 1.0], width: 0.3, softness: 0.1, output: PatternOutput::Shape, ..base },
+            // 7 x 4 cells make nearly regular hexagons (the cell is 7:4, regular wants 1.732).
+            PatternKind::Honeycomb => PatternParams { counts: [7.0, 4.0, 4.0], output: PatternOutput::Shape, ..base },
         }
     }
 
@@ -307,7 +313,7 @@ impl PatternParams {
         match self.kind {
             PatternKind::Stripes => vec![0],
             PatternKind::Dimples | PatternKind::Gyroid | PatternKind::Fractal => vec![0, 1, 2],
-            PatternKind::Bricks | PatternKind::Checker | PatternKind::Truchet => {
+            PatternKind::Bricks | PatternKind::Checker | PatternKind::Truchet | PatternKind::Honeycomb => {
                 let (r, s, l) = self.axes();
                 [Some(r), Some(s), l].into_iter().flatten().collect()
             }
