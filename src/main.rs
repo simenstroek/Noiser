@@ -775,6 +775,10 @@ fn node_props(ui: &mut egui::Ui, kind: &mut NodeKind) {
                 ui.weak("1 − |a|. Ridge of noise gives ridged noise; Absolute gives billow.");
             }
         }
+        NodeKind::Mix { clamp, .. } => {
+            row(ui, clamp, true, |ui, c| _ = ui.checkbox(c, "limit the factor to 0..1"));
+            ui.weak("A + (B - A) x Factor. The input values sit on the node.");
+        }
         NodeKind::Remap { clamp, .. } => {
             row(ui, clamp, false, |ui, c| _ = ui.checkbox(c, "clamp to the output range"));
             ui.weak("The input values sit on the node.");

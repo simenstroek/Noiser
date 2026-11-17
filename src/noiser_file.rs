@@ -72,6 +72,10 @@ pub fn ops(g: &Graph, seed: u32) -> Result<Value, String> {
                     json!({"op": "remap", "value": operand(0), "from_min": operand(1), "from_max": operand(2),
                            "to_min": operand(3), "to_max": operand(4), "clamp": clamp})
                 }
+                NodeKind::Mix { vals, clamp } => {
+                    let operand = |port: usize| g.input(id, port).map_or(json!(vals[port]), |s| json!({"node": s}));
+                    json!({"op": "mix", "factor": operand(0), "a": operand(1), "b": operand(2), "clamp": clamp})
+                }
                 NodeKind::Curve { points, mode } => {
                     let sorted = crate::graph::curve_points(points);
                     json!({"op": "curve", "value": input(id, 0), "points": sorted, "mode": mode.label().to_lowercase()})

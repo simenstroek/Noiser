@@ -510,6 +510,9 @@ pub enum NodeKind {
     /// Linear map of input 0 from [from min, from max] to [to min, to max]; the other four inputs
     /// are those bounds. `vals` holds the unconnected defaults of all five inputs.
     Remap { vals: [f32; 5], clamp: bool },
+    /// Blends A into B: `a + (b - a) * factor`, the factor limited to 0..1 when `clamp`. Inputs are
+    /// factor, A and B; `vals` holds their unconnected defaults.
+    Mix { vals: [f32; 3], clamp: bool },
     /// A function of input 0 drawn through `points` (x, y), at most `MAX_CURVE_POINTS`; x need not be
     /// sorted (use `curve_points`). Outside the first and last x the output holds the end values.
     Curve { points: Vec<[f32; 2]>, mode: CurveMode },
@@ -540,6 +543,7 @@ impl NodeKind {
             NodeKind::Float(_) | NodeKind::Vec3(_) | NodeKind::Position => 0,
             NodeKind::Math { op, .. } => if op.is_smooth() { 3 } else if op.is_unary() { 1 } else { 2 },
             NodeKind::Remap { .. } => 5,
+            NodeKind::Mix { .. } => 3,
             NodeKind::Curve { .. } => 1,
             NodeKind::Normal { .. } | NodeKind::Noise(_) | NodeKind::Grid { .. } | NodeKind::Pattern(_) | NodeKind::OutDensity | NodeKind::OutNormal => 1,
         }
@@ -550,6 +554,7 @@ impl NodeKind {
         match self {
             NodeKind::Math { a, b, c, .. } if port < self.input_count() => Some([*a, *b, *c][port]),
             NodeKind::Remap { vals, .. } => vals.get(port).copied(),
+            NodeKind::Mix { vals, .. } => vals.get(port).copied(),
             _ => None,
         }
     }
@@ -562,6 +567,11 @@ impl NodeKind {
                 }
             }
             NodeKind::Remap { vals, .. } => {
+                if let Some(x) = vals.get_mut(port) {
+                    *x = v;
+                }
+            }
+            NodeKind::Mix { vals, .. } => {
                 if let Some(x) = vals.get_mut(port) {
                     *x = v;
                 }
@@ -707,8 +717,8 @@ impl Graph {
     /// node's output must be a float that repeats every tile.
     pub fn cache_eligibility(&self, id: NodeId, tiling: &BTreeMap<NodeId, Tiling>) -> Result<(), String> {
         match &self.nodes.get(&id).ok_or("no such node")?.kind {
-            NodeKind::Noise(_) | NodeKind::Math { .. } | NodeKind::Remap { .. } | NodeKind::Curve { .. } | NodeKind::Grid { .. } | NodeKind::Pattern(_) => {}
-            _ => return Err("only Noise, Math, Remap, Grid and pattern nodes can be cached".into()),
+            NodeKind::Noise(_) | NodeKind::Math { .. } | NodeKind::Remap { .. } | NodeKind::Mix { .. } | NodeKind::Curve { .. } | NodeKind::Grid { .. } | NodeKind::Pattern(_) => {}
+            _ => return Err("only Noise, Math, Remap, Mix, Curve, Grid and pattern nodes can be cached".into()),
         }
         // Math on a vector input yields a vector (except dot); caches hold floats.
         if matches!(self.nodes[&id].kind, NodeKind::Math { .. }) && self.yields_vector(id) {
@@ -909,6 +919,16 @@ impl Graph {
                 Some(t) => t,
                 None => Const,
             },
+            NodeKind::Mix { .. } => {
+                // The factor times the difference is nonlinear in a position; the rest follows the inputs.
+                let ts: Vec<Tiling> = (0..3).filter_map(|p| input(p, memo, stack)).collect();
+                match ts.iter().find(|t| matches!(t, Broken(_) | Coord)) {
+                    Some(Broken(r)) => Broken(r.clone()),
+                    Some(_) => Broken("Mix on a position does not tile".into()),
+                    None if ts.iter().all(|t| *t == Const) => Const,
+                    None => Periodic,
+                }
+            }
             NodeKind::Remap { .. } => {
                 // A nonlinear-looking map of position breaks tiling; the rest follows the inputs.
                 let ts: Vec<Tiling> = (0..5).filter_map(|p| input(p, memo, stack)).collect();
@@ -1054,6 +1074,20 @@ impl Graph {
                     };
                     let f = |x: f32| o0 + (x - i0) / (i1 - i0) * (o1 - o0);
                     if x0.is_finite() && x1.is_finite() { (f(x0).min(f(x1)), f(x0).max(f(x1))) } else { UNBOUNDED }
+                }
+            }
+            NodeKind::Mix { vals, clamp } => {
+                let mut operand = |port: usize| match self.input(id, port) {
+                    Some(src) => self.range_of(src, stack),
+                    None => (vals[port], vals[port]),
+                };
+                let (t, a, b) = (operand(0), operand(1), operand(2));
+                let hull = (a.0.min(b.0), a.1.max(b.1));
+                // A factor kept inside 0..1 (by the clamp or by its range) never leaves the hull of A and B.
+                if *clamp || (t.0 >= 0.0 && t.1 <= 1.0) {
+                    hull
+                } else {
+                    UNBOUNDED
                 }
             }
             NodeKind::Curve { points, .. } => {

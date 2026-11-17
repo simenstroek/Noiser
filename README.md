@@ -39,7 +39,7 @@ a node that breaks tiling gets an orange outline and says why in the details pan
 - **Math**: add, subtract, multiply, divide, min, max, power, smooth min and max, dot product, absolute, ridge. The
   operator is a dropdown on the node (the mouse wheel over it steps through them). A float with a vector
   gives a vector.
-- **Remap** (with optional clamp), **Curve** (a response curve through up to 16 points; linear, smooth, step or cubic), **Value**, **Position**, **Normal** (gradient of a field).
+- **Remap** (with optional clamp), **Mix** (blend A into B by a factor), **Curve** (a response curve through up to 16 points; linear, smooth, step or cubic), **Value**, **Position**, **Normal** (gradient of a field).
 - **Outputs**: Density and Normal.
 - Pins and wires are blue for floats and yellow for vectors.
 

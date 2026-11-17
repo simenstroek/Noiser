@@ -545,6 +545,22 @@ fn remap_matches_reference() {
 }
 
 #[test]
+fn mix_matches_reference() {
+    let Some(gpu) = gpu() else { return eprintln!("no GPU adapter; skipping") };
+    let mix = |vals: [f32; 3], clamp: bool| {
+        let mut g = Graph::default();
+        let m = g.add(NodeKind::Mix { vals, clamp }, [0.0; 2]);
+        let o = g.add(NodeKind::OutDensity, [0.0; 2]);
+        g.connect(m, o, 0);
+        eval(&gpu, &g, &[[0.3, 0.6, 0.9]])[0]
+    };
+    near(mix([0.25, 2.0, 6.0], true), 3.0, "a quarter of the way");
+    near(mix([1.5, 2.0, 6.0], false), 8.0, "extrapolates without the clamp");
+    near(mix([1.5, 2.0, 6.0], true), 6.0, "clamped at B");
+    near(mix([-1.0, 2.0, 6.0], true), 2.0, "clamped at A");
+}
+
+#[test]
 fn curve_matches_reference() {
     use crate::graph::CurveMode::*;
     let Some(gpu) = gpu() else { return eprintln!("no GPU adapter; skipping") };

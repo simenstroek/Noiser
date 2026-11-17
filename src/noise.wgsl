@@ -245,6 +245,11 @@ fn curve_eval(x: f32, base: u32, n: u32, mode: u32) -> f32 {
     return P[base + 2u * (n - 1u) + 1u];
 }
 
+// a + (b - a) * t, with t limited to 0..1 when `clamped`.
+fn mix_ab(t: f32, a: f32, b: f32, clamped: bool) -> f32 {
+    return a + (b - a) * select(t, clamp(t, 0.0, 1.0), clamped);
+}
+
 fn remap(x: f32, a: f32, b: f32, c: f32, d: f32, clamped: bool) -> f32 {
     let t = select(0.0, (x - a) / (b - a), b != a);
     let r = c + t * (d - c);

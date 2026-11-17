@@ -76,6 +76,10 @@ and `clamp`. With `t = (value − from_min) / (from_max − from_min)` (0 when t
 result is `to_min + t·(to_max − to_min)`, clamped between `min(to_min, to_max)` and `max(to_min, to_max)`
 when `clamp` is true. Type float.
 
+### `mix`
+`factor`, `a` and `b` (each a number or `{"node": id}`, floats) and `clamp`. The result is
+`a + (b − a)·t`, where `t` is `factor`, limited to 0..1 when `clamp` is true. Type float.
+
 ### `curve`
 `value` (op id or a number, float), `points` (a list of `[x, y]`, already sorted by x, 1 to 16 of them) and
 `mode` (`linear`, `smooth`, `step` or `cubic`). Below the first x the result is the first y and above the last x the
