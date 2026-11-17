@@ -144,13 +144,14 @@ fn blue(x: vec3f, period: i32, seed: u32) -> f32 {
 // ---- Dispatch and fBm ------------------------------------------------------
 
 fn noise_base(x: vec3f, period: i32, seed: u32, kind: u32, feature: u32) -> f32 {
+    // Every kind stays within [-1, 1]; Graph::density_range relies on it.
     switch kind {
-        case 1u: { return simplex(x, period, seed); }
+        case 1u: { return clamp(simplex(x, period, seed), -1.0, 1.0); }
         case 2u, 3u: { return cells(x, period, seed).z; }
         case 4u: { return worley(x, period, seed, feature); }
         case 5u: { return white(x, period, seed); }
         case 6u: { return blue(x, period, seed); }
-        default: { return perlin(x, period, seed); }
+        default: { return clamp(perlin(x, period, seed), -1.0, 1.0); }
     }
 }
 

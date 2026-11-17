@@ -90,6 +90,11 @@ impl App {
         let up = cross(right, fwd);
         let pv = &self.pv;
         let aspect = |r: egui::Rect| r.width() / r.height().max(1.0);
+        // How far the surface can move: amount × density range. Kept finite for the shader;
+        // 1e6 effectively disables the shell skip for unbounded graphs.
+        let (lo, hi) = self.graph.density_range();
+        let (a, b) = (pv.amount * lo, pv.amount * hi); // NaN when amount is 0 and the range unbounded
+        let push = if a.is_nan() || b.is_nan() { (-1e6, 1e6) } else { (a.min(b).clamp(-1e6, 1e6), a.max(b).clamp(-1e6, 1e6)) };
         Uniforms {
             cam_pos: pos,
             aspect: aspect(view3d),
@@ -112,6 +117,9 @@ impl App {
             slice_aspect: aspect(slice),
             slice_tiles: if pv.tiles_2x2 { 2.0 } else { 1.0 },
             slice_res: view::SLICE_RES,
+            push_min: push.0,
+            push_max: push.1,
+            _pad: [0.0; 2],
         }
     }
 

@@ -9,6 +9,8 @@ struct Uniforms {
     tile_size: f32, prim_size: f32, pixel: f32, cloud_density: f32,
     mode: u32, prim: u32, slice_axis: u32, slice_mode: u32,
     slice_pos: f32, slice_aspect: f32, slice_tiles: f32, slice_res: u32,
+    // Range of amount × density (Graph::density_range): how far the surface can move in / out.
+    push_min: f32, push_max: f32, _pad0: f32, _pad1: f32,
 };
 @group(0) @binding(0) var<uniform> u: Uniforms;
 @group(0) @binding(1) var<storage, read> P: array<f32>;

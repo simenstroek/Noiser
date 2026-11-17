@@ -34,6 +34,9 @@ pub struct Uniforms {
     pub slice_aspect: f32,
     pub slice_tiles: f32,
     pub slice_res: u32,
+    pub push_min: f32,
+    pub push_max: f32,
+    pub _pad: [f32; 2],
 }
 
 pub struct Gpu {

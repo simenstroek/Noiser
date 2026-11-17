@@ -31,8 +31,38 @@ fn unit_prim(p: vec3f) -> f32 {
 // The base shape slot: a primitive now, a sampled mesh SDF later.
 fn base_sdf(p: vec3f) -> f32 { return unit_prim(p / u.prim_size) * u.prim_size; }
 
+// The displaced surface lies where base_sdf is between push_min and push_max. Beyond that shell
+// (plus a margin, so the bound never looks like a hit) a bound is enough and the graph is skipped.
+const SHELL_MARGIN: f32 = 0.1;
+
+fn displaced(p: vec3f, b: f32) -> f32 {
+    return b - u.amount * graph_density(p / u.tile_size);
+}
+
+// Signed distance bound for marching: exact near the surface, conservative elsewhere.
 fn field(p: vec3f) -> f32 {
-    return base_sdf(p) - u.amount * graph_density(p / u.tile_size);
+    let b = base_sdf(p);
+    let outside = b - u.push_max; // the field is at least this
+    if (outside > SHELL_MARGIN) { return outside; }
+    let inside = b - u.push_min; // the field is at most this
+    if (inside < -SHELL_MARGIN) { return inside; }
+    return displaced(p, b);
+}
+
+// Exact inside the shape (clouds need the real interior values), zero outside it.
+fn cloud_sigma(p: vec3f) -> f32 {
+    let b = base_sdf(p);
+    if (b - u.push_max > 0.0) { return 0.0; }
+    return u.cloud_density * max(-displaced(p, b), 0.0);
+}
+
+// Ray interval inside a sphere around the origin that holds the displaced shape; x > y means a miss.
+fn bounds(ro: vec3f, rd: vec3f) -> vec2f {
+    let r = 1.4 * u.prim_size + max(u.push_max, 0.0) + SHELL_MARGIN; // 1.4 ≥ every unit primitive's extent
+    let b = dot(ro, rd);
+    let h = b * b - dot(ro, ro) + r * r;
+    if (h < 0.0) { return vec2f(1.0, 0.0); }
+    return vec2f(max(-b - sqrt(h), 0.0), -b + sqrt(h));
 }
 
 fn normal_at(p: vec3f, e: f32) -> vec3f {
@@ -54,8 +84,10 @@ fn solid(ro: vec3f, rd: vec3f, bg: vec3f) -> vec3f {
     // Pixel footprint per unit distance. Stopping and differentiating at that size
     // filters out sub-pixel noise detail instead of aliasing it into speckles.
     let pix = u.pixel / FOCAL;
-    var t = 0.0;
-    var t_out = 0.0; // last t known to be outside
+    let span = bounds(ro, rd);
+    if (span.x > span.y) { return bg; }
+    var t = span.x;
+    var t_out = t; // last t known to be outside
     var hit = false;
     for (var i = 0; i < 300; i++) {
         let d = field(ro + rd * t);
@@ -74,7 +106,7 @@ fn solid(ro: vec3f, rd: vec3f, bg: vec3f) -> vec3f {
         if (d < 0.5 * pix * t) { hit = true; break; }
         t_out = t;
         t += d * u.step_scale;
-        if (t > 20.0) { break; }
+        if (t > span.y) { break; }
     }
     if (!hit) { return bg; }
     let p = ro + rd * t;
@@ -86,24 +118,22 @@ fn solid(ro: vec3f, rd: vec3f, bg: vec3f) -> vec3f {
 
 fn cloud(ro: vec3f, rd: vec3f, bg: vec3f) -> vec3f {
     // March only through a sphere that bounds the displaced shape.
-    let r = 1.8 * u.prim_size + u.amount;
-    let b = dot(ro, rd);
-    let h = b * b - dot(ro, ro) + r * r;
-    if (h < 0.0) { return bg; }
-    let t0 = max(-b - sqrt(h), 0.0);
-    let t1 = -b + sqrt(h);
+    let span = bounds(ro, rd);
+    if (span.x > span.y) { return bg; }
+    let t0 = span.x;
+    let t1 = span.y;
     let steps = 128;
     let dt = (t1 - t0) / f32(steps);
     var trans = 1.0;
     var light = vec3f(0.0);
     for (var i = 0; i < steps; i++) {
         let p = ro + rd * (t0 + (f32(i) + 0.5) * dt);
-        let sigma = u.cloud_density * max(-field(p), 0.0);
+        let sigma = cloud_sigma(p);
         if (sigma <= 0.0) { continue; }
         // Short shadow ray toward the sun.
         var tau = 0.0;
         for (var j = 1; j < 6; j++) {
-            tau += u.cloud_density * max(-field(p + SUN * f32(j) * 0.12), 0.0) * 0.12;
+            tau += cloud_sigma(p + SUN * f32(j) * 0.12) * 0.12;
         }
         let lit = vec3f(1.0, 0.97, 0.9) * exp(-tau) + vec3f(0.25, 0.28, 0.35);
         let a = 1.0 - exp(-sigma * dt);

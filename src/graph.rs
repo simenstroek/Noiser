@@ -329,9 +329,95 @@ impl Graph {
     }
 }
 
+// ---- value range -------------------------------------------------------
+
+/// Closed interval [lo, hi]; infinite ends mean unbounded. Vectors use one interval for all components.
+pub type Range = (f32, f32);
+
+const UNBOUNDED: Range = (f32::NEG_INFINITY, f32::INFINITY);
+
+impl Graph {
+    /// A guaranteed range for the Density output, so shaders can skip the graph where the
+    /// displaced surface cannot be. Unbounded when position flows through, or on cycles.
+    pub fn density_range(&self) -> Range {
+        match self.find(|k| *k == NodeKind::OutDensity).and_then(|o| self.input(o, 0)) {
+            Some(src) => self.range_of(src, &mut Vec::new()),
+            None => (0.0, 0.0),
+        }
+    }
+
+    fn range_of(&self, id: NodeId, stack: &mut Vec<NodeId>) -> Range {
+        if stack.contains(&id) {
+            return UNBOUNDED;
+        }
+        stack.push(id);
+        let r = match &self.nodes[&id].kind {
+            NodeKind::Float(v) => (*v, *v),
+            NodeKind::Vec3(v) => (v.iter().cloned().fold(f32::MAX, f32::min), v.iter().cloned().fold(f32::MIN, f32::max)),
+            NodeKind::Position => UNBOUNDED,
+            NodeKind::Normal { .. } => (-1.0, 1.0),
+            // noise.wgsl keeps every kind within [-1, 1] (Perlin and Simplex are clamped).
+            NodeKind::Noise(n) => if n.normalize { (0.0, 1.0) } else { (-1.0, 1.0) },
+            NodeKind::Math { op, a, b } => {
+                let mut operand = |port: usize, default: f32| match self.input(id, port) {
+                    Some(src) => self.range_of(src, stack),
+                    None => (default, default),
+                };
+                let (ra, rb) = (operand(0, *a), operand(1, *b));
+                math_range(*op, ra, rb)
+            }
+            NodeKind::OutDensity | NodeKind::OutNormal => UNBOUNDED,
+        };
+        stack.pop();
+        r
+    }
+}
+
+fn math_range(op: MathOp, (a0, a1): Range, (b0, b1): Range) -> Range {
+    let span = |v: [f32; 4]| {
+        // NaN (0 × ∞) only comes from unbounded inputs, so treat it as unbounded.
+        if v.iter().any(|x| x.is_nan()) {
+            return UNBOUNDED;
+        }
+        (v.iter().cloned().fold(f32::INFINITY, f32::min), v.iter().cloned().fold(f32::NEG_INFINITY, f32::max))
+    };
+    match op {
+        MathOp::Add => (a0 + b0, a1 + b1),
+        MathOp::Subtract => (a0 - b1, a1 - b0),
+        MathOp::Multiply => span([a0 * b0, a0 * b1, a1 * b0, a1 * b1]),
+        // Safe divide returns 0 for b = 0, but b near 0 is unbounded.
+        MathOp::Divide if b0 <= 0.0 && b1 >= 0.0 => UNBOUNDED,
+        MathOp::Divide => span([a0 / b0, a0 / b1, a1 / b0, a1 / b1]),
+        MathOp::Min => (a0.min(b0), a1.min(b1)),
+        MathOp::Max => (a0.max(b0), a1.max(b1)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn density_range_follows_math() {
+        let mut g = Graph::default_graph();
+        assert_eq!(g.density_range(), (-1.0, 1.0));
+        // noise * 3 + 0.5
+        let noise = g.find(|k| matches!(k, NodeKind::Noise(_))).unwrap();
+        let out = g.find(|k| *k == NodeKind::OutDensity).unwrap();
+        let mul = g.add(NodeKind::Math { op: MathOp::Multiply, a: 0.0, b: 3.0 }, [0.0; 2]);
+        let add = g.add(NodeKind::Math { op: MathOp::Add, a: 0.0, b: 0.5 }, [0.0; 2]);
+        g.connect(noise, mul, 0);
+        g.connect(mul, add, 0);
+        g.connect(add, out, 0);
+        assert_eq!(g.density_range(), (-2.5, 3.5));
+        // Position reaching the output makes it unbounded.
+        let pos = g.find(|k| *k == NodeKind::Position).unwrap();
+        g.connect(pos, add, 1);
+        assert_eq!(g.density_range(), UNBOUNDED);
+        // Dividing by a range that spans zero is unbounded too.
+        assert_eq!(math_range(MathOp::Divide, (1.0, 1.0), (-1.0, 1.0)), UNBOUNDED);
+        assert_eq!(math_range(MathOp::Divide, (1.0, 2.0), (2.0, 4.0)), (0.25, 1.0));
+    }
 
     fn tiling_at(g: &Graph, id: NodeId) -> Tiling {
         g.tiling()[&id].clone()

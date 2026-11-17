@@ -11,6 +11,11 @@ rfd = "0.18.0"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 
+# Debug builds of egui/wgpu are many times slower; optimize dependencies but keep our own code
+# quick to compile and debuggable.
+[profile.dev.package."*"]
+opt-level = 3
+
 [dev-dependencies]
 naga = { version = "30.0.2", features = ["wgsl-in"] }
 pollster = "1.0.2"
