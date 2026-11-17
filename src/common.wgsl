@@ -20,6 +20,8 @@ struct Uniforms {
     // Viewport-only material (never exported): colour + specular, then roughness + shadows on/off.
     look_a: vec4f,
     look_b: vec4f,
+    // Viewport lighting: sun direction + intensity, sun colour + ambient strength, sky top, sky bottom.
+    light: array<vec4f, 4>,
 };
 @group(0) @binding(0) var<uniform> u: Uniforms;
 @group(0) @binding(1) var<storage, read> P: array<f32>;

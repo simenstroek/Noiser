@@ -101,10 +101,11 @@ fn normal_at(p: vec3f, e: f32) -> vec3f {
 }
 
 const FOCAL: f32 = 1.8;
-const SUN: vec3f = vec3f(0.5345, 0.7127, 0.4543); // normalize(0.6, 0.8, 0.51)
+// The sun comes from the viewport lighting settings (the default is normalize(0.6, 0.8, 0.51)).
+fn sun_dir() -> vec3f { return u.light[0].xyz; }
 
 fn background(uv: vec2f) -> vec3f {
-    return mix(vec3f(0.10, 0.10, 0.12), vec3f(0.18, 0.19, 0.22), uv.y * 0.5 + 0.5);
+    return mix(u.light[3].xyz, u.light[2].xyz, uv.y * 0.5 + 0.5);
 }
 
 fn solid(ro: vec3f, rd: vec3f, bg: vec3f) -> vec3f {
@@ -145,6 +146,7 @@ fn solid(ro: vec3f, rd: vec3f, bg: vec3f) -> vec3f {
     if (!hit) { return bg; }
     let p = ro + rd * t;
     let n = normal_at(p, max(pix * t, 1e-4));
+    let SUN = sun_dir();
     let diff = max(dot(n, SUN), 0.0);
     let sky = 0.5 + 0.5 * n.y;
     // Viewport material: colour, Blinn-Phong highlight from specular/roughness, optional soft shadow.
@@ -169,7 +171,7 @@ fn solid(ro: vec3f, rd: vec3f, bg: vec3f) -> vec3f {
         albedo = mask_color(mask_at(p));
         highlight = 0.0; // the colour must stay readable
     }
-    return albedo * (diff * sh * 0.9 + sky * 0.25) + vec3f(spec * highlight);
+    return albedo * (diff * sh * 0.9 * u.light[0].w * u.light[1].xyz + sky * 0.25 * u.light[1].w) + vec3f(spec * highlight * u.light[0].w);
 }
 
 fn cloud(ro: vec3f, rd: vec3f, bg: vec3f) -> vec3f {
@@ -189,9 +191,9 @@ fn cloud(ro: vec3f, rd: vec3f, bg: vec3f) -> vec3f {
         // Short shadow ray toward the sun.
         var tau = 0.0;
         for (var j = 1; j < 6; j++) {
-            tau += cloud_sigma(p + SUN * f32(j) * 0.12) * 0.12;
+            tau += cloud_sigma(p + sun_dir() * f32(j) * 0.12) * 0.12;
         }
-        let lit = vec3f(1.0, 0.97, 0.9) * exp(-tau) + vec3f(0.25, 0.28, 0.35);
+        let lit = vec3f(1.0, 0.97, 0.9) * u.light[1].xyz * u.light[0].w * exp(-tau) + vec3f(0.25, 0.28, 0.35) * u.light[1].w;
         let a = 1.0 - exp(-sigma * dt);
         light += trans * a * lit;
         trans *= 1.0 - a;

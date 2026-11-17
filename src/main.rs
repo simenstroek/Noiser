@@ -29,6 +29,47 @@ use view::{MAX_PARAMS, Uniforms};
 /// Primitive names, in the order `unit_prim` in raymarch.wgsl switches on.
 const PRIMS: [&str; 7] = ["Sphere", "Box", "Round box", "Torus", "Cylinder", "Capsule", "Octahedron"];
 
+/// Viewport lighting: a sun, the sky light and the background gradient. Never exported.
+#[derive(Clone, Copy, PartialEq)]
+pub struct Lighting {
+    /// Degrees around the up axis, and above the horizon.
+    pub azimuth: f32,
+    pub elevation: f32,
+    pub sun: f32,
+    pub sun_color: [f32; 3],
+    pub ambient: f32,
+    pub sky_top: [f32; 3],
+    pub sky_bottom: [f32; 3],
+}
+
+impl Default for Lighting {
+    /// The look the viewport had before lighting was adjustable: a sun at (0.6, 0.8, 0.51).
+    fn default() -> Self {
+        Lighting { azimuth: 49.6, elevation: 45.4, sun: 1.0, sun_color: [1.0; 3], ambient: 1.0, sky_top: [0.18, 0.19, 0.22], sky_bottom: [0.10, 0.10, 0.12] }
+    }
+}
+
+impl Lighting {
+    pub const PRESETS: [(&'static str, fn() -> Lighting); 4] = [
+        ("Studio", Lighting::default),
+        ("Sunset", || Lighting { azimuth: 75.0, elevation: 10.0, sun: 1.6, sun_color: [1.0, 0.6, 0.35], ambient: 0.7, sky_top: [0.12, 0.14, 0.26], sky_bottom: [0.45, 0.25, 0.18] }),
+        ("Overcast", || Lighting { azimuth: 49.6, elevation: 70.0, sun: 0.35, sun_color: [0.9, 0.95, 1.0], ambient: 2.0, sky_top: [0.42, 0.44, 0.48], sky_bottom: [0.30, 0.31, 0.34] }),
+        ("Night", || Lighting { azimuth: 200.0, elevation: 35.0, sun: 0.45, sun_color: [0.55, 0.65, 1.0], ambient: 0.5, sky_top: [0.02, 0.03, 0.07], sky_bottom: [0.01, 0.01, 0.03] }),
+    ];
+
+    /// The uniform layout: [sun direction, sun strength], [sun colour, ambient], [sky top], [sky bottom].
+    pub fn pack(&self) -> [[f32; 4]; 4] {
+        let (az, el) = (self.azimuth.to_radians(), self.elevation.to_radians());
+        let dir = [az.sin() * el.cos(), el.sin(), az.cos() * el.cos()];
+        [
+            [dir[0], dir[1], dir[2], self.sun],
+            [self.sun_color[0], self.sun_color[1], self.sun_color[2], self.ambient],
+            [self.sky_top[0], self.sky_top[1], self.sky_top[2], 0.0],
+            [self.sky_bottom[0], self.sky_bottom[1], self.sky_bottom[2], 0.0],
+        ]
+    }
+}
+
 /// Settings for the 3D and slice views (not part of the graph file).
 #[derive(Clone, PartialEq)]
 struct Preview {
@@ -41,6 +82,8 @@ struct Preview {
     render_scale: f32,
     /// Colour the mesh by its displacement mask (viewport only).
     show_mask: bool,
+    /// Viewport lighting (never exported).
+    lighting: Lighting,
     /// Viewport material (never exported).
     color: [f32; 3],
     specular: f32,
@@ -67,6 +110,7 @@ impl Default for Preview {
             max_steps: 300,
             render_scale: 1.0,
             show_mask: false,
+            lighting: Lighting::default(),
             color: [0.8, 0.78, 0.74],
             specular: 0.0,
             roughness: 0.5,
@@ -159,9 +203,12 @@ impl App {
         let (mut batch_dir, mut batch_files): (Option<std::path::PathBuf>, Vec<std::path::PathBuf>) = (None, Vec::new());
         let mut mask_terms = Vec::new();
         let mut show_mask = false;
+        let mut lighting_arg: Option<String> = None;
         while let Some(a) = args.next() {
             if a == "--mesh" {
                 mesh_arg = args.next().map(std::path::PathBuf::from);
+            } else if a == "--lighting" {
+                lighting_arg = args.next();
             } else if a == "--show-mask" {
                 show_mask = true;
             } else if a == "--open-mesh-export" {
@@ -255,6 +302,9 @@ impl App {
         }
         app.mesh_mask.terms = mask_terms;
         app.pv.show_mask = show_mask;
+        if let Some(p) = lighting_arg.and_then(|n| Lighting::PRESETS.iter().find(|(l, _)| l.eq_ignore_ascii_case(&n))) {
+            app.pv.lighting = (p.1)();
+        }
         app.mesh_export_open = open_mesh_export; // for looking at the dialog without clicking
         // `--batch-out DIR --batch-file A.obj --batch-file B.obj` starts a batch right away.
         if batch_dir.is_some() && !batch_files.is_empty() {
@@ -472,6 +522,7 @@ impl App {
             _pad_mask: 0.0,
             mask: std::array::from_fn(|i| mask.terms[i]),
             look: [[pv.color[0], pv.color[1], pv.color[2], pv.specular], [pv.roughness, pv.shadows as u32 as f32, 0.0, 0.0]],
+            light: pv.lighting.pack(),
         }
     }
 
@@ -596,6 +647,33 @@ fn preview_props(ui: &mut egui::Ui, pv: &mut Preview, mesh_loaded: bool) {
         row(ui, &mut pv.specular, d.specular, |ui, v| _ = ui.add(egui::Slider::new(v, 0.0..=1.0).text("specular")));
         row(ui, &mut pv.roughness, d.roughness, |ui, v| _ = ui.add(egui::Slider::new(v, 0.05..=1.0).text("roughness")));
         row(ui, &mut pv.shadows, d.shadows, |ui, v| _ = ui.checkbox(v, "soft shadows"));
+        ui.separator();
+        ui.heading("Lighting (viewport only)");
+        ui.horizontal(|ui| {
+            for (name, preset) in Lighting::PRESETS {
+                if ui.button(name).clicked() {
+                    pv.lighting = preset();
+                }
+            }
+        });
+        let l = &mut pv.lighting;
+        let ld = Lighting::default();
+        row(ui, &mut l.azimuth, ld.azimuth, |ui, v| _ = ui.add(egui::Slider::new(v, 0.0..=360.0).suffix("°").text("sun direction")));
+        row(ui, &mut l.elevation, ld.elevation, |ui, v| _ = ui.add(egui::Slider::new(v, -10.0..=90.0).suffix("°").text("sun height")));
+        row(ui, &mut l.sun, ld.sun, |ui, v| _ = ui.add(egui::Slider::new(v, 0.0..=3.0).text("sun strength")));
+        row(ui, &mut l.sun_color, ld.sun_color, |ui, v| {
+            ui.color_edit_button_rgb(v);
+            ui.label("sun colour");
+        });
+        row(ui, &mut l.ambient, ld.ambient, |ui, v| _ = ui.add(egui::Slider::new(v, 0.0..=3.0).text("sky light")));
+        row(ui, &mut l.sky_top, ld.sky_top, |ui, v| {
+            ui.color_edit_button_rgb(v);
+            ui.label("sky top");
+        });
+        row(ui, &mut l.sky_bottom, ld.sky_bottom, |ui, v| {
+            ui.color_edit_button_rgb(v);
+            ui.label("sky bottom");
+        });
     }
     ui.separator();
     ui.heading("Slice view");
@@ -1467,5 +1545,23 @@ mod prefs_tests {
         let p: Prefs = serde_json::from_str(r#"{"ui_scale": 9.0}"#).unwrap();
         assert_eq!(p.sane().ui_scale, 2.0);
         assert_eq!(Prefs { ui_scale: f32::NAN, backups: true }.sane().ui_scale, 1.0);
+    }
+}
+
+#[cfg(test)]
+mod lighting_tests {
+    use super::Lighting;
+
+    #[test]
+    fn default_lighting_is_the_old_fixed_sun() {
+        let p = Lighting::default().pack();
+        for (got, want) in p[0][..3].iter().zip([0.5345, 0.7127, 0.4543]) {
+            assert!((got - want).abs() < 2e-3, "{got} vs {want}");
+        }
+        assert_eq!(p[0][3], 1.0);
+        for (_, preset) in Lighting::PRESETS {
+            let d = preset().pack()[0];
+            assert!(((d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt() - 1.0).abs() < 1e-4, "the sun direction is a unit vector");
+        }
     }
 }
