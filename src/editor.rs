@@ -197,6 +197,26 @@ struct Layout {
 }
 
 impl Editor {
+    /// Pans and zooms so the given nodes (all of them when `only` is empty) fill the canvas.
+    fn frame(&mut self, canvas_size: Vec2, graph: &Graph, only: &BTreeSet<NodeId>) {
+        let mut lo = [f32::MAX; 2];
+        let mut hi = [f32::MIN; 2];
+        for (id, n) in &graph.nodes {
+            if only.is_empty() || only.contains(id) {
+                let h = HEADER_H + ROW_H * n.kind.input_count().max(2) as f32 + 60.0; // a generous guess at the body
+                lo = [lo[0].min(n.pos[0]), lo[1].min(n.pos[1])];
+                hi = [hi[0].max(n.pos[0] + NODE_W), hi[1].max(n.pos[1] + h)];
+            }
+        }
+        if lo[0] > hi[0] {
+            return;
+        }
+        let (w, h) = (hi[0] - lo[0] + 80.0, hi[1] - lo[1] + 80.0);
+        self.zoom = (canvas_size.x / w).min(canvas_size.y / h).clamp(0.2, 1.25);
+        let centre = Vec2::new((lo[0] + hi[0]) * 0.5, (lo[1] + hi[1]) * 0.5);
+        self.pan = canvas_size / (2.0 * self.zoom) - centre;
+    }
+
     fn to_screen(&self, origin: Pos2, p: [f32; 2]) -> Pos2 {
         origin + (Vec2::new(p[0], p[1]) + self.pan) * self.zoom
     }
@@ -589,6 +609,13 @@ impl Editor {
                     self.selected = new;
                 }
             }
+            if ui.input(|i| i.key_pressed(egui::Key::F) && !i.modifiers.command) {
+                let only = self.selected.clone();
+                self.frame(canvas.size(), graph, &only);
+            }
+            if ui.input(|i| i.key_pressed(egui::Key::Home)) {
+                self.frame(canvas.size(), graph, &BTreeSet::new());
+            }
             if ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::D)) {
                 if let Some(p) = pointer {
                     let at = self.to_graph(origin, p);
@@ -749,6 +776,19 @@ mod tests {
         assert!(!g.edges.iter().any(|e| e.from == ids[1]));
         let c = ids.iter().fold(0.0, |acc, id| acc + g.nodes[id].pos[0] + NODE_W * 0.5) / 2.0;
         assert!((c - 1000.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn framing_fits_the_nodes_in_the_canvas() {
+        let g = Graph::default_graph();
+        let mut ed = Editor::default();
+        let size = Vec2::new(800.0, 300.0);
+        ed.frame(size, &g, &BTreeSet::new());
+        for n in g.nodes.values() {
+            let p = ed.to_screen(Pos2::ZERO, n.pos);
+            let q = ed.to_screen(Pos2::ZERO, [n.pos[0] + NODE_W, n.pos[1] + HEADER_H]);
+            assert!(p.x >= 0.0 && p.y >= 0.0 && q.x <= size.x && q.y <= size.y, "node at {:?} is outside the canvas", n.pos);
+        }
     }
 
     #[test]
