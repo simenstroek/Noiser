@@ -266,7 +266,7 @@ fn bench_preview() {
         for _ in 0..30 {
             gpu.upload(&queue, &u, &c.params);
             let mut enc = device.create_command_encoder(&Default::default());
-            gpu.render_3d(&mut enc, size);
+            gpu.render_3d(&mut enc, size, mode == 1);
             gpu.compute_slice(&queue, &mut enc);
             queue.submit([enc.finish()]);
             let t = gpu.timer.as_mut().unwrap();

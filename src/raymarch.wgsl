@@ -222,6 +222,14 @@ fn fs(in: VsOut) -> @location(0) vec4f {
     let rd = normalize(u.cam_fwd * FOCAL + u.cam_right * in.uv.x * u.aspect + u.cam_up * in.uv.y);
     let bg = background(in.uv);
     var col: vec3f;
-    if (u.mode == 1u) { col = cloud(u.cam_pos, rd, bg); } else { col = solid(u.cam_pos, rd, bg); }
+    col = solid(u.cam_pos, rd, bg);
+    return vec4f(pow(col, vec3f(1.0 / 2.2)), 1.0);
+}
+
+// The cloud view has its own entry point (and pipeline), so each pipeline compiles only its own march.
+@fragment
+fn fs_cloud(in: VsOut) -> @location(0) vec4f {
+    let rd = normalize(u.cam_fwd * FOCAL + u.cam_right * in.uv.x * u.aspect + u.cam_up * in.uv.y);
+    let col = cloud(u.cam_pos, rd, background(in.uv));
     return vec4f(pow(col, vec3f(1.0 / 2.2)), 1.0);
 }

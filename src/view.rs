@@ -157,6 +157,7 @@ pub struct Gpu {
     device: wgpu::Device,
     format: wgpu::TextureFormat,
     raymarch: wgpu::RenderPipeline,
+    raymarch_cloud: wgpu::RenderPipeline,
     slice_cs: wgpu::ComputePipeline,
     slice_fs: wgpu::RenderPipeline,
     blit: wgpu::RenderPipeline,
@@ -189,7 +190,7 @@ impl Gpu {
     }
 
     /// Raymarches the 3D view into the offscreen target (resized to `size` pixels as needed).
-    pub fn render_3d(&mut self, encoder: &mut wgpu::CommandEncoder, size: [u32; 2]) {
+    pub fn render_3d(&mut self, encoder: &mut wgpu::CommandEncoder, size: [u32; 2], cloud: bool) {
         let size = [size[0].max(1), size[1].max(1)];
         if self.target.as_ref().is_none_or(|t| t.size != size) {
             let texture = self.device.create_texture(&wgpu::TextureDescriptor {
@@ -229,7 +230,7 @@ impl Gpu {
             occlusion_query_set: None,
             multiview_mask: None,
         });
-        pass.set_pipeline(&self.raymarch);
+        pass.set_pipeline(if cloud { &self.raymarch_cloud } else { &self.raymarch });
         pass.set_bind_group(0, &self.bind_group, &[]);
         pass.set_bind_group(1, &self.cache_bind, &[]);
         pass.set_bind_group(2, &self.mesh_bind, &[]);
@@ -280,7 +281,7 @@ impl egui_wgpu::CallbackTrait for View3d {
             t.collect(device);
         }
         gpu.upload(queue, &self.uniforms, &self.params);
-        gpu.render_3d(encoder, self.size);
+        gpu.render_3d(encoder, self.size, self.uniforms.mode == 1);
         Vec::new()
     }
 
@@ -504,15 +505,23 @@ pub fn build(device: &wgpu::Device, queue: &wgpu::Queue, format: wgpu::TextureFo
             cache: None,
         })
     };
-    let raymarch = render(&module, Some(&layout), "fs");
-    let slice_fs = render(&module, Some(&layout), "fs_slice");
-    let slice_cs = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-        label: Some("slice"),
-        layout: Some(&layout),
-        module: &module,
-        entry_point: Some("cs_slice"),
-        compilation_options: Default::default(),
-        cache: None,
+    // The driver compiles each entry point separately and takes about a second for a big graph, so the three
+    // pipelines are created on parallel threads.
+    let (raymarch, raymarch_cloud, slice_fs, slice_cs) = std::thread::scope(|scope| {
+        let cloud = scope.spawn(|| render(&module, Some(&layout), "fs_cloud"));
+        let fs = scope.spawn(|| render(&module, Some(&layout), "fs_slice"));
+        let cs = scope.spawn(|| {
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("slice"),
+                layout: Some(&layout),
+                module: &module,
+                entry_point: Some("cs_slice"),
+                compilation_options: Default::default(),
+                cache: None,
+            })
+        });
+        let raymarch = render(&module, Some(&layout), "fs");
+        (raymarch, cloud.join().expect("cloud pipeline"), fs.join().expect("slice pipeline"), cs.join().expect("slice compute pipeline"))
     });
     let blit_module = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("blit"), source: wgpu::ShaderSource::Wgsl(BLIT_WGSL.into()) });
     let blit = render(&blit_module, None, "fs");
@@ -542,6 +551,7 @@ pub fn build(device: &wgpu::Device, queue: &wgpu::Queue, format: wgpu::TextureFo
         device: device.clone(),
         format,
         raymarch,
+        raymarch_cloud,
         slice_cs,
         slice_fs,
         blit,
