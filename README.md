@@ -59,6 +59,12 @@ tiling 3D texture for the preview, and the nodes it covers get a green outline. 
 
 **Crash recovery.** Rolling backups; after a crash you are offered the last one on the next start.
 
+**Meshes.** Import a low-resolution OBJ (File menu, or `noiser.exe --mesh file.obj`) and it appears as the
+*Mesh* shape in the 3D view, shaped live by your graph. *Export displaced mesh* then writes a high-resolution
+OBJ or PLY of the same surface (as many samples along the longest side as you ask for), with small floating
+bits removed and the mesh's own size and position restored. The mesh can be made of overlapping parts. See
+`PLAN.md` for how it works and its limits.
+
 ## Controls
 
 | | |
@@ -77,7 +83,6 @@ tiling 3D texture for the preview, and the nodes it covers get a green outline. 
 
 ## Roadmap
 
-Next up is the **mesh pipeline**: import a low-resolution mesh, shape it with the noise graph, and export
-a high-resolution mesh for sculpting or baking, then batch-process many meshes with one graph. After that,
-more pattern nodes (dimples, honeycomb, Truchet, stripes, checker, gyroid, fractals), then rendering and
+Next: batch-processing many meshes with one graph (optionally a different seed for each), displacement
+masks for meshes (by position, normal, occlusion, curvature), more pattern nodes (dimples, honeycomb, Truchet, stripes, checker, gyroid, fractals), then rendering and
 material settings for the viewport. See `PLAN.md` for the details.

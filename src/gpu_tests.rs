@@ -258,7 +258,7 @@ fn bench_preview() {
             cam_pos: pos, aspect: 1.0, cam_fwd: fwd, amount: 0.25, cam_right: right, step_scale: step, cam_up: up, seed: 0,
             tile_size: 1.0, prim_size: 1.0, pixel: 2.0 / size[1] as f32, cloud_density: 8.0, mode, prim: 0,
             slice_axis: 2, slice_mode: 0, slice_pos: 0.5, slice_aspect: 1.0, slice_tiles: 1.0, slice_res: view::SLICE_RES,
-            push_min: push.0, push_max: push.1, _pad: [0.0; 2],
+            push_min: push.0, push_max: push.1, _pad: [0.0; 2], mesh_origin: [0.0; 3], mesh_voxel: 1.0,
         };
         let mut samples = Vec::new();
         for _ in 0..30 {
@@ -701,4 +701,166 @@ fn render_pattern_images() {
         let ev = export::Evaluator::new(&gpu.device, &gpu.queue, &g, 0).unwrap();
         export::run(&ev, &s, g.density_range(), &dir.join(format!("pattern_{name}.png")), &Default::default()).unwrap();
     }
+}
+
+// ---- mesh export --------------------------------------------------------------------
+
+mod mesh_export_tests {
+    use super::*;
+    use crate::mesh::{Normalization, shapes};
+    use crate::meshexport::{Displace, Format, Job, MeshEvaluator, Settings};
+    use crate::meshsdf::MeshSdf;
+    use crate::surface::RawMesh;
+    use std::sync::atomic::AtomicU32;
+
+    /// A radius-1 icosphere baked and uploaded, with an evaluator for `graph`.
+    fn evaluator(gpu: &Gpu, graph: &Graph, seed: u32) -> (MeshSdf, MeshEvaluator, wgpu::Texture) {
+        let sdf = MeshSdf::build(&shapes::icosphere(1.0, 3), 64, 0.6, &AtomicU32::new(0));
+        let (texture, view) = sdf.upload(&gpu.device, &gpu.queue);
+        let ev = MeshEvaluator::new(&gpu.device, &gpu.queue, graph, seed, view, sdf.origin, sdf.voxel).unwrap();
+        (sdf, ev, texture)
+    }
+
+    fn job<'a>(ev: &'a MeshEvaluator, d: Displace, reach: f32, res: u32) -> Job<'a> {
+        Job { ev, d, lo: [-1.0; 3], hi: [1.0; 3], reach, norm: Normalization::IDENTITY, settings: Settings { res, format: Format::Obj, cull: 0.0 } }
+    }
+
+    fn radius(p: [f32; 3]) -> f32 {
+        (p[0] * p[0] + p[1] * p[1] + p[2] * p[2]).sqrt()
+    }
+
+    /// (edges, edges that are not used exactly once in each direction, edges used only one way).
+    fn edge_stats(m: &RawMesh) -> (usize, usize, usize) {
+        let mut edges: std::collections::HashMap<(u32, u32), (u32, u32)> = std::collections::HashMap::new();
+        for t in &m.triangles {
+            for i in 0..3 {
+                let (a, b) = (t[i], t[(i + 1) % 3]);
+                let e = edges.entry((a.min(b), a.max(b))).or_default();
+                if a < b { e.0 += 1 } else { e.1 += 1 }
+            }
+        }
+        let bad = edges.values().filter(|&&c| c != (1, 1)).count();
+        let open = edges.values().filter(|&&c| c.0 == 0 || c.1 == 0).count();
+        (edges.len(), bad, open)
+    }
+
+    fn is_closed(m: &RawMesh) -> bool {
+        edge_stats(m).1 == 0
+    }
+
+    #[test]
+    fn without_displacement_the_export_is_the_mesh() {
+        let Some(gpu) = gpu() else { return eprintln!("no GPU adapter; skipping") };
+        let (_sdf, ev, _tex) = evaluator(&gpu, &single_node_graph(NodeKind::Float(0.0)), 0);
+        let d = Displace { amount: 0.0, tile_size: 1.0, prim_size: 1.0 };
+        let j = job(&ev, d, 0.0, 64);
+        let m = j.extract(&Default::default());
+        assert!(m.triangles.len() > 5000, "{} triangles", m.triangles.len());
+        assert!(is_closed(&m), "not a closed manifold");
+        let exact = 4.0 / 3.0 * std::f32::consts::PI;
+        assert!((m.signed_volume() - exact).abs() < 0.06 * exact, "volume {}", m.signed_volume());
+        let worst = m.positions.iter().map(|p| (radius(*p) - 1.0).abs()).fold(0.0, f32::max);
+        assert!(worst < 0.03, "a vertex is {worst} off the sphere");
+    }
+
+    #[test]
+    fn every_vertex_lies_on_the_zero_level_of_the_displaced_field() {
+        let Some(gpu) = gpu() else { return eprintln!("no GPU adapter; skipping") };
+        let noise = noise_graph(NoiseParams { scale: 3.0, octaves: 3, ..Default::default() });
+        let (sdf, ev, _tex) = evaluator(&gpu, &noise, 0);
+        let d = Displace { amount: 0.12, tile_size: 1.0, prim_size: 1.0 };
+        let j = job(&ev, d, 0.12, 96);
+        let h = j.grid().h;
+        let m = j.extract(&Default::default());
+        // Surface nets can leave a few non-manifold edges where a cell's corner signs are ambiguous,
+        // but never holes.
+        let (edges, bad, open) = edge_stats(&m);
+        assert_eq!(open, 0, "the surface has holes");
+        assert!(bad * 1000 < edges, "{bad} of {edges} edges are non-manifold");
+        let rs: Vec<f32> = m.positions.iter().map(|p| radius(*p)).collect();
+        let (lo, hi) = (rs.iter().cloned().fold(f32::MAX, f32::min), rs.iter().cloned().fold(f32::MIN, f32::max));
+        assert!(hi - lo > 0.05, "the noise should visibly shape the sphere: radius {lo}..{hi}");
+        assert!(lo > 0.8 && hi < 1.2, "displacement of 0.12 moved the surface to radius {lo}..{hi}");
+        // The graph's density at each vertex, from the texture-export evaluator, and the same field on the CPU.
+        let reference = crate::export::Evaluator::new(&gpu.device, &gpu.queue, &noise, 0).unwrap();
+        let sample: Vec<[f32; 3]> = m.positions.iter().step_by(7).copied().collect();
+        let density = reference.eval_points(&sample);
+        let worst = sample.iter().zip(&density).map(|(p, rho)| (sdf.sample(*p) - d.amount * rho).abs()).fold(0.0, f32::max);
+        assert!(worst < 0.7 * h, "a vertex is off the surface by {worst} (sample spacing {h})");
+    }
+
+    #[test]
+    fn shape_size_and_normalization_are_undone_in_the_written_file() {
+        let Some(gpu) = gpu() else { return eprintln!("no GPU adapter; skipping") };
+        let (_sdf, ev, _tex) = evaluator(&gpu, &single_node_graph(NodeKind::Float(0.0)), 0);
+        // Shape size 2 doubles the sphere in the preview; the mesh's own units are 3 per normalized
+        // unit and centred at x = 5, so the file should hold a sphere of radius 2 / 2 × 3 = 3 there.
+        let d = Displace { amount: 0.0, tile_size: 1.0, prim_size: 2.0 };
+        let mut j = job(&ev, d, 0.0, 64);
+        j.hi = [1.0; 3];
+        j.norm = Normalization { center: [5.0, 0.0, 0.0], scale: 3.0 };
+        let dir = std::env::temp_dir().join("noiser-mesh-export-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("sphere.obj");
+        let summary = j.run(&path, &Default::default()).unwrap();
+        assert!(summary.contains("triangles"), "{summary}");
+        let back = crate::mesh::Mesh::load_obj(&path).unwrap();
+        let worst = back.positions.iter().map(|p| (radius([p[0] - 5.0, p[1], p[2]]) - 3.0).abs()).fold(0.0, f32::max);
+        assert!(worst < 0.15, "the exported sphere is {worst} off radius 3 around (5, 0, 0)");
+        // A PLY of the same job is written too.
+        j.settings.format = Format::Ply;
+        j.run(&dir.join("sphere.ply"), &Default::default()).unwrap();
+        assert!(std::fs::metadata(dir.join("sphere.ply")).unwrap().len() > 1000);
+    }
+
+    #[test]
+    fn seeds_change_the_result_and_repeat() {
+        let Some(gpu) = gpu() else { return eprintln!("no GPU adapter; skipping") };
+        let noise = noise_graph(NoiseParams { scale: 3.0, octaves: 2, ..Default::default() });
+        let d = Displace { amount: 0.1, tile_size: 1.0, prim_size: 1.0 };
+        let run = |seed: u32| {
+            let (_sdf, ev, _tex) = evaluator(&gpu, &noise, seed);
+            job(&ev, d, 0.1, 48).extract(&Default::default())
+        };
+        let (a, a_again, b) = (run(0), run(0), run(1));
+        assert_eq!(a.positions, a_again.positions, "the same seed should give the same mesh");
+        let differs = a.positions.len() != b.positions.len() || a.positions.iter().zip(&b.positions).any(|(p, q)| p != q);
+        assert!(differs, "another seed should give another mesh");
+    }
+}
+
+/// Exports a real mesh with a real graph: `NOISER_TEST_MESH=file.obj cargo test export_a_real_mesh -- --ignored --nocapture`.
+/// Optional: NOISER_TEST_GRAPH (default SimpleTestGraph.noisegraph), NOISER_TEST_RES (256),
+/// NOISER_TEST_AMOUNT (0.25), NOISER_TEST_SEED (0). Writes target/<mesh name>_displaced.obj.
+#[test]
+#[ignore = "needs NOISER_TEST_MESH"]
+fn export_a_real_mesh() {
+    use crate::meshexport::{Displace, Format, Job, MeshEvaluator, Settings};
+    let env = |k: &str| std::env::var(k).ok();
+    let mesh_path = std::path::PathBuf::from(env("NOISER_TEST_MESH").expect("set NOISER_TEST_MESH"));
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let graph = Graph::from_json(&std::fs::read_to_string(env("NOISER_TEST_GRAPH").map_or(root.join("SimpleTestGraph.noisegraph"), Into::into)).unwrap()).unwrap();
+    let res: u32 = env("NOISER_TEST_RES").map_or(256, |v| v.parse().unwrap());
+    let amount: f32 = env("NOISER_TEST_AMOUNT").map_or(0.25, |v| v.parse().unwrap());
+    let seed: u32 = env("NOISER_TEST_SEED").map_or(0, |v| v.parse().unwrap());
+    let gpu = gpu().expect("needs a GPU");
+    let t = std::time::Instant::now();
+    let (mesh, norm) = crate::mesh::Mesh::load_obj(&mesh_path).unwrap().normalized();
+    eprintln!("loaded {} vertices, {} triangles in {:?}", mesh.positions.len(), mesh.triangles.len(), t.elapsed());
+    let t = std::time::Instant::now();
+    let pad = 0.5;
+    let sdf = crate::meshsdf::MeshSdf::build(&mesh, 128, pad, &Default::default());
+    eprintln!("distance grid {:?} in {:?}", sdf.dims, t.elapsed());
+    let (_tex, view) = sdf.upload(&gpu.device, &gpu.queue);
+    let ev = MeshEvaluator::new(&gpu.device, &gpu.queue, &graph, seed, view, sdf.origin, sdf.voxel).unwrap();
+    let push = crate::view::push_range(graph.density_range(), amount);
+    let reach = push.0.abs().max(push.1.abs()).min(pad - 0.05);
+    let (lo, hi) = mesh.bounds();
+    let settings = Settings { res, format: Format::Obj, cull: 0.01 };
+    let job = Job { ev: &ev, d: Displace { amount, tile_size: 1.0, prim_size: 1.0 }, lo, hi, reach, norm, settings };
+    eprintln!("export grid {:?}", job.grid().dims);
+    let t = std::time::Instant::now();
+    let out = root.join("target").join(format!("{}_displaced.obj", mesh_path.file_stem().unwrap().to_string_lossy()));
+    let summary = job.run(&out, &Default::default()).unwrap();
+    eprintln!("{summary}\nexport took {:?}", t.elapsed());
 }

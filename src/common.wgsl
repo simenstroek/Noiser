@@ -11,6 +11,8 @@ struct Uniforms {
     slice_pos: f32, slice_aspect: f32, slice_tiles: f32, slice_res: u32,
     // Range of amount × density (Graph::density_range): how far the surface can move in / out.
     push_min: f32, push_max: f32, _pad0: f32, _pad1: f32,
+    // The baked mesh distance grid (see meshsdf.rs): its min corner and texel size.
+    mesh_origin: vec3f, mesh_voxel: f32,
 };
 @group(0) @binding(0) var<uniform> u: Uniforms;
 @group(0) @binding(1) var<storage, read> P: array<f32>;
@@ -19,6 +21,9 @@ struct Uniforms {
 struct Slice { lo: atomic<u32>, hi: atomic<u32>, vals: array<f32> };
 @group(0) @binding(2) var<storage, read_write> slice: Slice;
 @group(0) @binding(3) var<storage, read> BN: array<f32>;
+
+// ---- mesh distance grid (group 2; a 1³ dummy until a mesh is loaded) ----
+@group(2) @binding(0) var mesh_tex: texture_3d<f32>;
 
 // ---- node caches (see cache.rs) ----
 // Up to 8 baked node values, one tile each, sampled with wrap-around. Unused slots hold a 1³ dummy.

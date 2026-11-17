@@ -1,0 +1,492 @@
+//! Signed distance to a triangle mesh. A BVH finds the closest point; the sign comes from the
+//! generalized winding number (Jacobson et al. 2013, with the fast far-field approximation of Barill
+//! et al. 2018), so it is right for meshes made of overlapping closed parts, inside-out parts and
+//! meshes with small holes, which a plain closest-feature normal test gets wrong. The result is
+//! baked into a grid that the preview and the export sample like a texture.
+
+use crate::mesh::{Mesh, V3};
+use rayon::prelude::*;
+use std::sync::atomic::{AtomicU32, Ordering};
+
+fn sub(a: V3, b: V3) -> V3 {
+    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
+}
+fn add(a: V3, b: V3) -> V3 {
+    [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
+}
+fn scale(a: V3, s: f32) -> V3 {
+    [a[0] * s, a[1] * s, a[2] * s]
+}
+fn dot(a: V3, b: V3) -> f32 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+fn cross(a: V3, b: V3) -> V3 {
+    [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]
+}
+fn length(a: V3) -> f32 {
+    dot(a, a).sqrt()
+}
+/// Which part of a triangle a closest point lies on, which decides the normal used for the sign.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Feature {
+    Face,
+    /// Edge i joins corners i and i + 1.
+    Edge(usize),
+    Vertex(usize),
+}
+
+/// The closest point to `p` on triangle `abc` (Ericson, Real-Time Collision Detection) and where it is.
+fn closest_on_triangle(p: V3, a: V3, b: V3, c: V3) -> (V3, Feature) {
+    let (ab, ac, ap) = (sub(b, a), sub(c, a), sub(p, a));
+    let (d1, d2) = (dot(ab, ap), dot(ac, ap));
+    if d1 <= 0.0 && d2 <= 0.0 {
+        return (a, Feature::Vertex(0));
+    }
+    let bp = sub(p, b);
+    let (d3, d4) = (dot(ab, bp), dot(ac, bp));
+    if d3 >= 0.0 && d4 <= d3 {
+        return (b, Feature::Vertex(1));
+    }
+    let vc = d1 * d4 - d3 * d2;
+    if vc <= 0.0 && d1 >= 0.0 && d3 <= 0.0 {
+        return (add(a, scale(ab, d1 / (d1 - d3))), Feature::Edge(0));
+    }
+    let cp = sub(p, c);
+    let (d5, d6) = (dot(ab, cp), dot(ac, cp));
+    if d6 >= 0.0 && d5 <= d6 {
+        return (c, Feature::Vertex(2));
+    }
+    let vb = d5 * d2 - d1 * d6;
+    if vb <= 0.0 && d2 >= 0.0 && d6 <= 0.0 {
+        return (add(a, scale(ac, d2 / (d2 - d6))), Feature::Edge(2));
+    }
+    let va = d3 * d6 - d5 * d4;
+    if va <= 0.0 && d4 - d3 >= 0.0 && d5 - d6 >= 0.0 {
+        let w = (d4 - d3) / ((d4 - d3) + (d5 - d6));
+        return (add(b, scale(sub(c, b), w)), Feature::Edge(1));
+    }
+    let denom = 1.0 / (va + vb + vc);
+    (add(a, add(scale(ab, vb * denom), scale(ac, vc * denom))), Feature::Face)
+}
+
+struct Node {
+    lo: V3,
+    hi: V3,
+    /// Leaf: the first slot in `order`. Inner node: the index of the right child (the left child
+    /// is the next node).
+    a: u32,
+    /// Triangles in a leaf; 0 for an inner node.
+    count: u32,
+    /// The triangles under this node are `order[first..first + total]`.
+    first: u32,
+    total: u32,
+    /// Sum of the triangles' area vectors, their area-weighted centre, and the distance from that
+    /// centre to the farthest corner: the far-field approximation of the winding number.
+    area: V3,
+    centre: V3,
+    radius: f32,
+}
+
+const LEAF_SIZE: usize = 4;
+
+fn build_bvh(tri: &[[V3; 3]], order: &mut [u32], first: u32, nodes: &mut Vec<Node>) {
+    let (mut lo, mut hi) = ([f32::INFINITY; 3], [f32::NEG_INFINITY; 3]);
+    let (mut clo, mut chi) = ([f32::INFINITY; 3], [f32::NEG_INFINITY; 3]);
+    for &t in order.iter() {
+        let t = &tri[t as usize];
+        let centroid = scale(add(t[0], add(t[1], t[2])), 1.0 / 3.0);
+        for a in 0..3 {
+            clo[a] = clo[a].min(centroid[a]);
+            chi[a] = chi[a].max(centroid[a]);
+            for v in t {
+                lo[a] = lo[a].min(v[a]);
+                hi[a] = hi[a].max(v[a]);
+            }
+        }
+    }
+    let me = nodes.len();
+    nodes.push(Node { lo, hi, a: 0, count: 0, first, total: order.len() as u32, area: [0.0; 3], centre: [0.0; 3], radius: 0.0 });
+    let axis = (0..3).max_by(|&x, &y| (chi[x] - clo[x]).total_cmp(&(chi[y] - clo[y]))).unwrap();
+    if order.len() <= LEAF_SIZE || chi[axis] <= clo[axis] {
+        nodes[me].a = first;
+        nodes[me].count = order.len() as u32;
+        return;
+    }
+    let mid = order.len() / 2;
+    let centre = |t: &u32| {
+        let t = &tri[*t as usize];
+        (t[0][axis] + t[1][axis] + t[2][axis]) / 3.0
+    };
+    order.select_nth_unstable_by(mid, |x, y| centre(x).total_cmp(&centre(y)));
+    let (left, right) = order.split_at_mut(mid);
+    build_bvh(tri, left, first, nodes);
+    nodes[me].a = nodes.len() as u32;
+    build_bvh(tri, right, first + mid as u32, nodes);
+}
+
+/// Fills in each node's winding-number data from the triangles under it.
+fn fill_far_field(nodes: &mut [Node], tri: &[[V3; 3]], order: &[u32]) {
+    for node in nodes.iter_mut() {
+        let slots = &order[node.first as usize..(node.first + node.total) as usize];
+        let (mut area, mut weighted, mut total) = ([0.0f32; 3], [0.0f32; 3], 0.0f32);
+        for &t in slots {
+            let [a, b, c] = tri[t as usize];
+            let v = scale(cross(sub(b, a), sub(c, a)), 0.5);
+            let m = length(v);
+            area = add(area, v);
+            weighted = add(weighted, scale(scale(add(a, add(b, c)), 1.0 / 3.0), m));
+            total += m;
+        }
+        node.area = area;
+        node.centre = if total > 0.0 { scale(weighted, 1.0 / total) } else { scale(add(node.lo, node.hi), 0.5) };
+        node.radius = slots.iter().flat_map(|&t| tri[t as usize]).map(|v| length(sub(v, node.centre))).fold(0.0, f32::max);
+    }
+}
+
+/// Squared distance from `p` to a box.
+fn box_distance2(lo: V3, hi: V3, p: V3) -> f32 {
+    let mut d2 = 0.0;
+    for a in 0..3 {
+        let d = (lo[a] - p[a]).max(0.0).max(p[a] - hi[a]);
+        d2 += d * d;
+    }
+    d2
+}
+
+/// The signed solid angle a triangle subtends at the origin (Van Oosterom and Strackee): positive
+/// when the origin is inside a surface wound counter-clockwise from outside.
+fn solid_angle(a: V3, b: V3, c: V3) -> f32 {
+    let (la, lb, lc) = (length(a), length(b), length(c));
+    let numerator = dot(a, cross(b, c));
+    let denominator = la * lb * lc + dot(a, b) * lc + dot(a, c) * lb + dot(b, c) * la;
+    2.0 * numerator.atan2(denominator)
+}
+
+/// How far from a cluster of triangles (in cluster radii) the winding number uses its dipole.
+const FAR: f32 = 3.0;
+
+/// Closest-point and inside/outside queries against a mesh.
+pub struct MeshQuery {
+    tri: Vec<[V3; 3]>,
+    nodes: Vec<Node>,
+    order: Vec<u32>,
+}
+
+impl MeshQuery {
+    pub fn new(mesh: &Mesh) -> MeshQuery {
+        let tri: Vec<[V3; 3]> = mesh.triangles.iter().map(|t| [mesh.positions[t[0] as usize], mesh.positions[t[1] as usize], mesh.positions[t[2] as usize]]).collect();
+        let mut order: Vec<u32> = (0..tri.len() as u32).collect();
+        let mut nodes = Vec::with_capacity(tri.len() / 2 + 1);
+        if !tri.is_empty() {
+            build_bvh(&tri, &mut order, 0, &mut nodes);
+            fill_far_field(&mut nodes, &tri, &order);
+        }
+        MeshQuery { tri, nodes, order }
+    }
+
+    /// The squared distance from `p` to the nearest triangle.
+    fn closest_distance2(&self, p: V3) -> f32 {
+        let mut best = f32::INFINITY;
+        if self.nodes.is_empty() {
+            return best;
+        }
+        let mut stack = [0u32; 96];
+        let mut top = 1;
+        while top > 0 {
+            top -= 1;
+            let node = &self.nodes[stack[top] as usize];
+            if box_distance2(node.lo, node.hi, p) >= best {
+                continue;
+            }
+            if node.count > 0 {
+                for slot in node.a..node.a + node.count {
+                    let [a, b, c] = self.tri[self.order[slot as usize] as usize];
+                    let d = sub(p, closest_on_triangle(p, a, b, c).0);
+                    best = best.min(dot(d, d));
+                }
+            } else {
+                let (left, right) = (stack[top] + 1, node.a);
+                let dl = box_distance2(self.nodes[left as usize].lo, self.nodes[left as usize].hi, p);
+                let dr = box_distance2(self.nodes[right as usize].lo, self.nodes[right as usize].hi, p);
+                // Visit the nearer child first: push it last.
+                let (far, near) = if dl <= dr { (right, left) } else { (left, right) };
+                stack[top] = far;
+                stack[top + 1] = near;
+                top += 2;
+            }
+        }
+        best
+    }
+
+    /// The generalized winding number at `p`: about 1 inside a closed surface wound outward, 0
+    /// outside, 2 inside two overlapping ones, and fractional near holes. Far clusters of triangles
+    /// are summed as one dipole.
+    pub fn winding_number(&self, p: V3) -> f32 {
+        let mut total = 0.0;
+        if self.nodes.is_empty() {
+            return total;
+        }
+        let mut stack = [0u32; 96];
+        let mut top = 1;
+        while top > 0 {
+            top -= 1;
+            let index = stack[top];
+            let node = &self.nodes[index as usize];
+            if node.count > 0 {
+                for slot in node.a..node.a + node.count {
+                    let [a, b, c] = self.tri[self.order[slot as usize] as usize];
+                    total += solid_angle(sub(a, p), sub(b, p), sub(c, p));
+                }
+                continue;
+            }
+            let r = sub(node.centre, p);
+            let r2 = dot(r, r);
+            if r2 > FAR * FAR * node.radius * node.radius {
+                total += dot(node.area, r) / (r2 * r2.sqrt());
+            } else {
+                // The left child is the next node, the right child is `a`.
+                stack[top] = index + 1;
+                stack[top + 1] = node.a;
+                top += 2;
+            }
+        }
+        total / (4.0 * std::f32::consts::PI)
+    }
+
+    /// Distance to the surface, negative inside.
+    pub fn signed_distance(&self, p: V3) -> f32 {
+        let d2 = self.closest_distance2(p);
+        if !d2.is_finite() {
+            return f32::INFINITY;
+        }
+        // Either orientation of a closed part counts as inside; overlapping parts add up.
+        if self.winding_number(p).abs() > 0.5 { -d2.sqrt() } else { d2.sqrt() }
+    }
+}
+
+/// A signed distance grid. Texel (i, j, k) has its centre at `origin + (i + 0.5, j + 0.5, k + 0.5) × voxel`
+/// (the layout of a 3D texture), x varying fastest.
+pub struct MeshSdf {
+    pub dims: [u32; 3],
+    pub origin: V3,
+    pub voxel: f32,
+    pub data: Vec<f32>,
+}
+
+impl MeshSdf {
+    /// Bakes the distance to `mesh` (already normalized) on a grid with `res` voxels along the
+    /// longest side of its bounds, padded by `pad` on every side. `progress` counts finished slabs.
+    pub fn build(mesh: &Mesh, res: u32, pad: f32, progress: &AtomicU32) -> MeshSdf {
+        let (lo, hi) = mesh.bounds();
+        let origin = [lo[0] - pad, lo[1] - pad, lo[2] - pad];
+        let extent = [hi[0] - lo[0] + 2.0 * pad, hi[1] - lo[1] + 2.0 * pad, hi[2] - lo[2] + 2.0 * pad];
+        let voxel = extent[0].max(extent[1]).max(extent[2]) / res.max(2) as f32;
+        let dims: [u32; 3] = std::array::from_fn(|a| ((extent[a] / voxel).ceil() as u32).max(1));
+        let query = MeshQuery::new(mesh);
+        let (nx, ny) = (dims[0] as usize, dims[1] as usize);
+        let mut data = vec![0.0f32; nx * ny * dims[2] as usize];
+        data.par_chunks_mut(nx * ny).enumerate().for_each(|(k, slab)| {
+            for j in 0..ny {
+                for i in 0..nx {
+                    let p = [origin[0] + (i as f32 + 0.5) * voxel, origin[1] + (j as f32 + 0.5) * voxel, origin[2] + (k as f32 + 0.5) * voxel];
+                    slab[j * nx + i] = query.signed_distance(p);
+                }
+            }
+            progress.fetch_add(1, Ordering::Relaxed);
+        });
+        MeshSdf { dims, origin, voxel, data }
+    }
+
+    /// Puts the grid on the GPU as an R32Float 3D texture.
+    pub fn upload(&self, device: &eframe::wgpu::Device, queue: &eframe::wgpu::Queue) -> (eframe::wgpu::Texture, eframe::wgpu::TextureView) {
+        use eframe::wgpu;
+        let [nx, ny, nz] = self.dims;
+        let size = wgpu::Extent3d { width: nx, height: ny, depth_or_array_layers: nz };
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("mesh distance"),
+            size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D3,
+            format: wgpu::TextureFormat::R32Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo { texture: &texture, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+            bytemuck::cast_slice(&self.data),
+            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(nx * 4), rows_per_image: Some(ny) },
+            size,
+        );
+        let view = texture.create_view(&Default::default());
+        (texture, view)
+    }
+
+    #[cfg(test)]
+    /// Distance at `p`: trilinear between texel centres, and beyond the grid the nearest texel plus
+    /// the distance to it. The shaders do the same, so a CPU check matches the GPU.
+    pub fn sample(&self, p: V3) -> f32 {
+        let dims = self.dims.map(|d| d as f32);
+        let g: V3 = std::array::from_fn(|a| (p[a] - self.origin[a]) / self.voxel - 0.5);
+        let gc: V3 = std::array::from_fn(|a| g[a].clamp(0.0, dims[a] - 1.0));
+        let i0: [usize; 3] = std::array::from_fn(|a| gc[a].floor() as usize);
+        let f: V3 = std::array::from_fn(|a| gc[a] - i0[a] as f32);
+        let i1: [usize; 3] = std::array::from_fn(|a| (i0[a] + 1).min(self.dims[a] as usize - 1));
+        let at = |x: usize, y: usize, z: usize| self.data[(z * self.dims[1] as usize + y) * self.dims[0] as usize + x];
+        let lerp = |a: f32, b: f32, t: f32| a + (b - a) * t;
+        let x = |y: usize, z: usize| lerp(at(i0[0], y, z), at(i1[0], y, z), f[0]);
+        let y = |z: usize| lerp(x(i0[1], z), x(i1[1], z), f[1]);
+        let v = lerp(y(i0[2]), y(i1[2]), f[2]);
+        let beyond = length(std::array::from_fn(|a| g[a] - gc[a])) * self.voxel;
+        v + beyond
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::mesh::shapes;
+
+    fn cheap_points(n: usize, lo: f32, hi: f32) -> Vec<V3> {
+        let mut s = 12345u32;
+        let mut next = || {
+            s = s.wrapping_mul(1664525).wrapping_add(1013904223);
+            lo + (hi - lo) * ((s >> 8) as f32 / (1u32 << 24) as f32)
+        };
+        (0..n).map(|_| [next(), next(), next()]).collect()
+    }
+
+    #[test]
+    fn closest_point_regions_of_a_triangle() {
+        let (a, b, c) = ([0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]);
+        assert_eq!(closest_on_triangle([-1.0, -1.0, 0.0], a, b, c), (a, Feature::Vertex(0)));
+        assert_eq!(closest_on_triangle([2.0, -1.0, 0.0], a, b, c), (b, Feature::Vertex(1)));
+        assert_eq!(closest_on_triangle([-1.0, 2.0, 0.0], a, b, c), (c, Feature::Vertex(2)));
+        assert_eq!(closest_on_triangle([0.5, -1.0, 3.0], a, b, c), ([0.5, 0.0, 0.0], Feature::Edge(0)));
+        assert_eq!(closest_on_triangle([1.0, 1.0, 0.0], a, b, c), ([0.5, 0.5, 0.0], Feature::Edge(1)));
+        assert_eq!(closest_on_triangle([-1.0, 0.5, 0.0], a, b, c), ([0.0, 0.5, 0.0], Feature::Edge(2)));
+        assert_eq!(closest_on_triangle([0.25, 0.25, 2.0], a, b, c), ([0.25, 0.25, 0.0], Feature::Face));
+    }
+
+    #[test]
+    fn sphere_mesh_distance_matches_the_analytic_one() {
+        let q = MeshQuery::new(&shapes::icosphere(1.0, 3));
+        let worst = cheap_points(2000, -2.5, 2.5)
+            .iter()
+            .map(|p| {
+                let exact = length(*p) - 1.0;
+                (q.signed_distance(*p) - exact).abs()
+            })
+            .fold(0.0, f32::max);
+        // A 1280-triangle sphere is a few thousandths inside the true one.
+        assert!(worst < 0.02, "worst error {worst}");
+    }
+
+    #[test]
+    fn sign_is_right_at_edges_and_corners_of_a_cube() {
+        let cube = shapes::split_cube().welded();
+        let q = MeshQuery::new(&cube);
+        // Closest feature is a vertex, an edge or a face, outside and inside.
+        for (p, want) in [
+            ([1.2, 1.2, 1.2], 0.2 * 3.0f32.sqrt()),
+            ([1.3, 1.3, 0.0], 0.3 * 2.0f32.sqrt()),
+            ([1.5, 0.2, -0.3], 0.5),
+            ([0.9, 0.9, 0.9], -0.1),
+            ([0.0, 0.0, 0.0], -1.0),
+            ([0.0, 0.95, 0.95], -0.05),
+        ] {
+            let d = q.signed_distance(p);
+            assert!((d - want).abs() < 1e-4, "{p:?}: got {d}, want {want}");
+        }
+        // Points around the corner never get the wrong sign.
+        for p in cheap_points(2000, -1.6, 1.6) {
+            let inside = p.iter().all(|c| c.abs() < 1.0);
+            let d = q.signed_distance(p);
+            assert_eq!(d < 0.0, inside, "{p:?}: distance {d}");
+        }
+    }
+
+    fn moved(mut m: Mesh, by: V3) -> Mesh {
+        for p in &mut m.positions {
+            *p = add(*p, by);
+        }
+        m
+    }
+
+    fn merged(a: Mesh, b: Mesh) -> Mesh {
+        let base = a.positions.len() as u32;
+        let mut m = a;
+        m.positions.extend(b.positions);
+        m.triangles.extend(b.triangles.iter().map(|t| t.map(|i| i + base)));
+        m
+    }
+
+    #[test]
+    fn winding_number_is_one_inside_zero_outside_and_the_far_field_matches_the_exact_sum() {
+        let mesh = shapes::icosphere(1.0, 3);
+        let q = MeshQuery::new(&mesh);
+        assert!((q.winding_number([0.1, 0.2, -0.1]) - 1.0).abs() < 0.02);
+        assert!(q.winding_number([1.6, 0.4, 0.2]).abs() < 0.02);
+        for p in cheap_points(400, -2.5, 2.5) {
+            let exact: f32 = q.tri.iter().map(|t| solid_angle(sub(t[0], p), sub(t[1], p), sub(t[2], p))).sum::<f32>() / (4.0 * std::f32::consts::PI);
+            let fast = q.winding_number(p);
+            assert!((fast - exact).abs() < 0.03, "{p:?}: fast {fast}, exact {exact}");
+        }
+    }
+
+    #[test]
+    fn overlapping_and_nested_parts_are_inside_where_they_should_be() {
+        // A small ball entirely inside a big one: its surface is internal, so a closest-feature sign
+        // test calls the points next to it "outside". The winding number says they are inside.
+        let nested = merged(shapes::icosphere(1.0, 3), moved(shapes::icosphere(0.3, 2), [0.5, 0.0, 0.0]));
+        let q = MeshQuery::new(&nested);
+        assert!(q.signed_distance([0.85, 0.0, 0.0]) < 0.0, "next to the inner ball, inside the big one");
+        assert!(q.signed_distance([0.0, 0.0, 0.0]) < 0.0);
+        assert!(q.signed_distance([1.4, 0.0, 0.0]) > 0.0);
+        // Two overlapping balls: every point not close to a surface is classified like the exact union.
+        let (ca, cb) = ([-0.5, 0.0, 0.0], [0.5, 0.0, 0.0]);
+        let two = merged(moved(shapes::icosphere(1.0, 3), ca), moved(shapes::icosphere(1.0, 3), cb));
+        let q = MeshQuery::new(&two);
+        let mut checked = 0;
+        for p in cheap_points(3000, -2.0, 2.0) {
+            let (da, db) = (length(sub(p, ca)) - 1.0, length(sub(p, cb)) - 1.0);
+            if da.abs() < 0.05 || db.abs() < 0.05 {
+                continue;
+            }
+            checked += 1;
+            assert_eq!(q.signed_distance(p) < 0.0, da < 0.0 || db < 0.0, "{p:?}: balls say {da} and {db}");
+        }
+        assert!(checked > 2000);
+    }
+
+    #[test]
+    fn inside_out_and_holey_meshes_still_have_an_inside() {
+        let mut flipped = shapes::split_cube().welded();
+        for t in &mut flipped.triangles {
+            t.swap(1, 2);
+        }
+        let q = MeshQuery::new(&flipped);
+        assert!(q.signed_distance([0.0; 3]) < 0.0, "an inside-out cube is still a solid");
+        assert!(q.signed_distance([1.5, 0.0, 0.0]) > 0.0);
+        // A cube missing one face (two triangles): still mostly enclosed, so the middle is inside.
+        let mut open = shapes::split_cube().welded();
+        open.triangles.truncate(open.triangles.len() - 2);
+        let q = MeshQuery::new(&open);
+        assert!(q.signed_distance([0.0; 3]) < 0.0, "a cube with a missing face");
+        assert!(q.signed_distance([0.0, 0.0, 3.0]) > 0.0);
+    }
+
+    #[test]
+    fn baked_grid_matches_the_query_and_extends_past_its_edge() {
+        let mesh = shapes::icosphere(1.0, 2);
+        let sdf = MeshSdf::build(&mesh, 48, 0.3, &AtomicU32::new(0));
+        assert!(sdf.dims.iter().all(|&d| d >= 40), "{:?}", sdf.dims);
+        let q = MeshQuery::new(&mesh);
+        let worst = cheap_points(500, -1.1, 1.1).iter().map(|p| (sdf.sample(*p) - q.signed_distance(*p)).abs()).fold(0.0, f32::max);
+        assert!(worst < 0.03, "grid vs exact: {worst}");
+        // Far outside the grid, the distance keeps growing roughly like the real one.
+        let far = sdf.sample([4.0, 0.0, 0.0]);
+        assert!((far - 3.0).abs() < 0.15, "got {far}");
+        assert!(sdf.sample([0.0; 3]) < -0.9);
+    }
+}

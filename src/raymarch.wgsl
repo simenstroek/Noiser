@@ -28,8 +28,12 @@ fn unit_prim(p: vec3f) -> f32 {
     }
 }
 
-// The base shape slot: a primitive now, a sampled mesh SDF later.
-fn base_sdf(p: vec3f) -> f32 { return unit_prim(p / u.prim_size) * u.prim_size; }
+// The base shape slot: a primitive, or (prim 7) the baked distance to a loaded mesh. The mesh is
+// normalized to a bounding sphere of radius 1 like the unit primitives, and scales with prim_size.
+fn base_sdf(p: vec3f) -> f32 {
+    if (u.prim == 7u) { return mesh_sdf_at(mesh_tex, p / u.prim_size, u.mesh_origin, u.mesh_voxel) * u.prim_size; }
+    return unit_prim(p / u.prim_size) * u.prim_size;
+}
 
 // The displaced surface lies where base_sdf is between push_min and push_max. Beyond that shell
 // (plus a margin, so the bound never looks like a hit) a bound is enough and the graph is skipped.

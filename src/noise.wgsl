@@ -267,3 +267,22 @@ fn bricks(q: vec3f, s: u32) -> f32 {
     // Same scaling as grid_dist: tile-space distance over the covering radius, as -1..1.
     return length(from_c * inv) / (0.5 * length(inv)) * 2.0 - 1.0;
 }
+
+// ---- Mesh distance grid ----------------------------------------------------------------
+
+// Distance to a baked mesh (meshsdf.rs): trilinear between texel centres, and beyond the grid the
+// nearest texel plus the distance to it. `origin` is the grid's min corner and `voxel` a texel's size.
+// Takes the texture as an argument so the preview and the export can bind it in different places.
+fn mesh_sdf_at(t: texture_3d<f32>, p: vec3f, origin: vec3f, voxel: f32) -> f32 {
+    let dims = vec3i(textureDimensions(t));
+    let g = (p - origin) / voxel - 0.5;
+    let gc = clamp(g, vec3f(0.0), vec3f(dims) - vec3f(1.0));
+    let i0 = vec3i(floor(gc));
+    let f = gc - vec3f(i0);
+    let i1 = min(i0 + vec3i(1), dims - vec3i(1));
+    let c00 = mix(textureLoad(t, vec3i(i0.x, i0.y, i0.z), 0).x, textureLoad(t, vec3i(i1.x, i0.y, i0.z), 0).x, f.x);
+    let c10 = mix(textureLoad(t, vec3i(i0.x, i1.y, i0.z), 0).x, textureLoad(t, vec3i(i1.x, i1.y, i0.z), 0).x, f.x);
+    let c01 = mix(textureLoad(t, vec3i(i0.x, i0.y, i1.z), 0).x, textureLoad(t, vec3i(i1.x, i0.y, i1.z), 0).x, f.x);
+    let c11 = mix(textureLoad(t, vec3i(i0.x, i1.y, i1.z), 0).x, textureLoad(t, vec3i(i1.x, i1.y, i1.z), 0).x, f.x);
+    return mix(mix(c00, c10, f.y), mix(c01, c11, f.y), f.z) + length(g - gc) * voxel;
+}

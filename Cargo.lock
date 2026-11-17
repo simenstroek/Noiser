@@ -1760,9 +1760,11 @@ dependencies = [
  "image",
  "naga",
  "pollster",
+ "rayon",
  "rfd",
  "serde",
  "serde_json",
+ "tobj",
 ]
 
 [[package]]
@@ -2517,6 +2519,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "rayon"
+version = "1.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fb39b166781f92d482534ef4b4b1b2568f42613b53e5b6c160e24cfbfa30926d"
+dependencies = [
+ "either",
+ "rayon-core",
+]
+
+[[package]]
 name = "rayon-core"
 version = "1.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3064,6 +3076,15 @@ dependencies = [
  "arrayref",
  "bytemuck",
  "strict-num",
+]
+
+[[package]]
+name = "tobj"
+version = "4.0.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6eb8e04167c1c0c76b5de63226fd733485ad63ef71e40de31e16272f47b099e2"
+dependencies = [
+ "ahash",
 ]
 
 [[package]]

@@ -8,6 +8,11 @@ mod codegen;
 mod editor;
 mod export;
 mod graph;
+mod mesh;
+mod meshapp;
+mod meshexport;
+mod meshsdf;
+mod surface;
 mod noiser_file;
 #[cfg(test)]
 mod gpu_tests;
@@ -84,6 +89,17 @@ struct App {
     export: export::Settings,
     export_job: Option<ExportJob>,
     caches: cache::Caches,
+    /// The loaded mesh and its distance grid, and a bake running on a worker thread.
+    mesh: Option<meshapp::MeshState>,
+    mesh_job: Option<meshapp::MeshJob>,
+    /// Bumped whenever the grid on the GPU changes, so a freshly built pipeline knows to rebind it.
+    mesh_gen: u64,
+    /// Grid settings for the next bake (see the Mesh section of the panel).
+    mesh_res: u32,
+    mesh_pad: f32,
+    mesh_export_open: bool,
+    mesh_export: meshexport::Settings,
+    mesh_export_job: Option<meshapp::MeshExportJob>,
 }
 
 /// An export running on a worker thread.
@@ -96,7 +112,17 @@ impl App {
     fn new(cc: &eframe::CreationContext) -> Self {
         egui_extras::install_image_loaders(&cc.egui_ctx);
         // `noiser path.noisegraph` opens that graph.
-        let (graph, path, status) = match std::env::args().nth(1).map(std::path::PathBuf::from) {
+        // `noiser [graph.noisegraph] [--mesh file.obj]`
+        let mut args = std::env::args().skip(1);
+        let (mut graph_arg, mut mesh_arg) = (None, None);
+        while let Some(a) = args.next() {
+            if a == "--mesh" {
+                mesh_arg = args.next().map(std::path::PathBuf::from);
+            } else if graph_arg.is_none() {
+                graph_arg = Some(std::path::PathBuf::from(a));
+            }
+        }
+        let (graph, path, status) = match graph_arg {
             Some(p) => match std::fs::read_to_string(&p).map_err(|e| e.to_string()).and_then(|s| Graph::from_json(&s)) {
                 Ok(g) => (g, Some(p.clone()), format!("Opened {}", p.display())),
                 Err(e) => (Graph::default_graph(), None, format!("Could not open {}: {e}", p.display())),
@@ -121,7 +147,7 @@ impl App {
             }
         });
         let session = root.and_then(|r| backup::Session::start(&r).ok());
-        Self {
+        let mut app = Self {
             rs: cc.wgpu_render_state.clone().expect("Noiser needs the wgpu renderer"),
             saved: graph.clone(),
             graph,
@@ -140,7 +166,19 @@ impl App {
             export: export::Settings::default(),
             export_job: None,
             caches: cache::Caches::default(),
+            mesh: None,
+            mesh_job: None,
+            mesh_gen: 0,
+            mesh_res: meshapp::DEFAULT_RES,
+            mesh_pad: meshapp::DEFAULT_PAD,
+            mesh_export_open: false,
+            mesh_export: meshexport::Settings::default(),
+            mesh_export_job: None,
+        };
+        if let Some(p) = mesh_arg {
+            app.start_mesh_load(p);
         }
+        app
     }
 
     fn export_window(&mut self, ctx: &egui::Context) {
@@ -311,6 +349,7 @@ impl App {
         // How far the surface can move: amount × density range. Kept finite for the shader;
         // 1e6 effectively disables the shell skip for unbounded graphs.
         let push = view::push_range(range, pv.amount);
+        let (mesh_origin, mesh_voxel) = self.mesh.as_ref().map_or(([0.0; 3], 1.0), |m| (m.sdf.origin, m.sdf.voxel));
         Uniforms {
             cam_pos: pos,
             aspect: aspect(view3d),
@@ -326,7 +365,7 @@ impl App {
             pixel: 2.0 / view3d.height().max(1.0),
             cloud_density: pv.cloud_density,
             mode: pv.cloud as u32,
-            prim: pv.prim,
+            prim: if pv.prim == meshapp::MESH_PRIM && self.mesh.is_none() { 0 } else { pv.prim },
             slice_axis: pv.slice_axis,
             slice_mode: pv.heatmap as u32,
             slice_pos: pv.slice_pos,
@@ -336,6 +375,8 @@ impl App {
             push_min: push.0,
             push_max: push.1,
             _pad: [0.0; 2],
+            mesh_origin,
+            mesh_voxel,
         }
     }
 
@@ -405,7 +446,7 @@ fn row<T: PartialEq>(ui: &mut egui::Ui, value: &mut T, default: T, widget: impl 
     });
 }
 
-fn preview_props(ui: &mut egui::Ui, pv: &mut Preview) {
+fn preview_props(ui: &mut egui::Ui, pv: &mut Preview, mesh_loaded: bool) {
     let d = Preview::default();
     ui.heading("3D view");
     row(ui, &mut pv.cloud, d.cloud, |ui, v| {
@@ -413,9 +454,13 @@ fn preview_props(ui: &mut egui::Ui, pv: &mut Preview) {
         ui.selectable_value(v, true, "Cloud");
     });
     row(ui, &mut pv.prim, d.prim, |ui, v| {
-        egui::ComboBox::from_label("shape").selected_text(PRIMS[*v as usize]).show_ui(ui, |ui| {
+        let shown = PRIMS.get(*v as usize).copied().unwrap_or("Mesh");
+        egui::ComboBox::from_label("shape").selected_text(shown).show_ui(ui, |ui| {
             for (i, name) in PRIMS.iter().enumerate() {
                 ui.selectable_value(v, i as u32, *name);
+            }
+            if mesh_loaded {
+                ui.selectable_value(v, meshapp::MESH_PRIM, "Mesh");
             }
         });
     });
@@ -655,6 +700,8 @@ impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let cpu_start = std::time::Instant::now();
         self.recovery_prompt(&ui.ctx().clone());
+        self.poll_mesh_job(&ui.ctx().clone());
+        self.mesh_export_window(&ui.ctx().clone());
         self.export_window(&ui.ctx().clone());
         if let Some(s) = self.session.as_mut().filter(|_| self.graph != self.saved) {
             if s.backup(&self.graph, self.path.as_deref()) {
@@ -683,6 +730,15 @@ impl eframe::App for App {
                         self.save(true);
                     }
                     ui.separator();
+                    if ui.button("Import mesh (OBJ)…").clicked() {
+                        if let Some(p) = rfd::FileDialog::new().add_filter("OBJ mesh", &["obj"]).pick_file() {
+                            self.start_mesh_load(p);
+                        }
+                    }
+                    if ui.add_enabled(self.mesh.is_some(), egui::Button::new("Export displaced mesh…")).clicked() {
+                        self.mesh_export_open = true;
+                    }
+                    ui.separator();
                     if ui.button("Export…").clicked() {
                         self.export_open = true;
                     }
@@ -695,7 +751,8 @@ impl eframe::App for App {
         });
         egui::Panel::right("props").default_size(320.0).show(ui, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| {
-                preview_props(ui, &mut self.pv);
+                preview_props(ui, &mut self.pv, self.mesh.is_some());
+                self.mesh_props(ui);
                 ui.separator();
                 let sel: Vec<_> = self.editor.selected.iter().copied().collect();
                 match sel.as_slice() {
@@ -766,6 +823,9 @@ impl eframe::App for App {
         if let Some(gpu) = self.rs.renderer.write().callback_resources.get_mut::<view::Gpu>() {
             if gpu.cache_gen != self.caches.generation {
                 gpu.set_caches(&self.caches.views(), self.caches.generation);
+            }
+            if gpu.mesh_gen != self.mesh_gen {
+                gpu.set_mesh(self.mesh.as_ref().map(|m| &m.view), self.mesh_gen);
             }
         }
         egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| {

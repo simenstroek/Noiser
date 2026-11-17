@@ -133,6 +133,19 @@ Node graph (centre) · 3D view (primitive picker, solid/cloud, displacement amou
 
 ---
 
+### Mesh pipeline (built 2026-11-17, milestone 7)
+How it works (files: `mesh.rs`, `meshsdf.rs`, `meshapp.rs`, `meshexport.rs`, `surface.rs`):
+1. **Import** (OBJ via `tobj`): objects are merged, faces triangulated, vertices at the same position welded, and the mesh normalized (centred, bounding sphere radius 1, like the unit primitives; the export undoes it). `noiser.exe --mesh file.obj` loads one at startup.
+2. **Mesh to distance grid** (CPU, rayon): a BVH finds the closest triangle, and the sign comes from the **generalized winding number** (Barill et al. fast far-field sum, `|w| > 0.5` is inside), not a closest-feature normal test, so meshes made of overlapping closed parts, inside-out parts and meshes with small holes get a sensible inside. Baked at 128 voxels along the longest side by default plus a padding (default 0.5 of the mesh radius) that must cover how far the noise can push the surface; the panel warns when it doesn't. 63k triangles take about 5 s, 240 take under a second.
+3. **Preview**: the grid is an R32Float 3D texture (bind group 2), read with `textureLoad` and manual trilinear (no filtering feature needed), and beyond the grid the distance keeps growing. "Mesh" is shape 7 in the shape list; `base_sdf` is `mesh_sdf_at(...)`, so displacement, tile size, shape size, seed and the cache all work as for the primitives.
+4. **Export**: `field = mesh_distance - amount * graph_density(p / tile_size)`, the preview's own formula, evaluated on the GPU in slabs of 8 layers (`MeshEvaluator`), streamed into **surface nets** (`surface_nets`, never holds the whole grid). Vertex normals are the field's gradient. Small floating parts are dropped by **surface area relative to the largest part** (default 1%), so several large parts all stay. OBJ or binary PLY. The grid resolution is the "samples along the longest side" setting: 240 triangles became 700k at 200 × 263 × 204 samples in 4.5 s.
+5. **Checked**: unit tests on the BVH, the winding number against the exact sum, closed meshes and outward orientation; GPU tests that a sphere exports as the sphere, every exported vertex lies on the zero level of the displaced field, shape size and normalization are undone in the written file, and seeds change and repeat. `tools/render_obj.py` renders an OBJ with Blender's Workbench for a look; `NOISER_TEST_MESH=file.obj cargo test export_a_real_mesh -- --ignored --nocapture` runs the pipeline headless on a real file.
+
+Differences from the sketch in 3a, and known limits:
+- **Surface nets instead of Dual Contouring.** Simpler and robust; it rounds sharp edges by about a voxel and, where a cell's corner signs are ambiguous, leaves a few non-manifold edges (7 in 110k on a noisy sphere, never holes). A DC mesher (QEF per cell, sharp features) is the upgrade if sharp edges matter.
+- **Overlapping parts keep their internal faces in the distance**, so near an internal face the distance is small even though both sides are inside. With large displacement that can open thin internal cavities (separate inner surfaces, usually culled as small parts). Cleaning the mesh (boolean union or remesh) first avoids it.
+- No UVs, vertex colors or materials survive: the output is a new surface. The mask terms (position gradient, normal, occlusion, thickness, curvature) below are not built yet.
+
 ### Displacement control and island culling (requested 2026-11-17, for milestone 7)
 `d(p) = base_sdf(p) − amount · mask(p) · noise(p)`, where `mask` is a **weighted sum of terms**, each with its own weight and remap/clamp:
 - **Position gradient** along X/Y/Z (a ramp over the object's bounds).

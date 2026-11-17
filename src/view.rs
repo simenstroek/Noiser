@@ -40,6 +40,9 @@ pub struct Uniforms {
     pub push_min: f32,
     pub push_max: f32,
     pub _pad: [f32; 2],
+    /// Min corner and texel size of the mesh distance grid.
+    pub mesh_origin: [f32; 3],
+    pub mesh_voxel: f32,
 }
 
 /// How far the surface can move in/out: amount × the graph's density range, kept finite for
@@ -155,6 +158,11 @@ pub struct Gpu {
     cache_bind: wgpu::BindGroup,
     /// Which set of cache textures cache_bind holds (see set_caches).
     pub cache_gen: u64,
+    mesh_layout: wgpu::BindGroupLayout,
+    mesh_dummy: wgpu::TextureView,
+    mesh_bind: wgpu::BindGroup,
+    /// Which mesh grid mesh_bind holds (see set_mesh).
+    pub mesh_gen: u64,
     target: Option<Target>,
     pub timer: Option<Timer>,
 }
@@ -210,6 +218,7 @@ impl Gpu {
         pass.set_pipeline(&self.raymarch);
         pass.set_bind_group(0, &self.bind_group, &[]);
         pass.set_bind_group(1, &self.cache_bind, &[]);
+        pass.set_bind_group(2, &self.mesh_bind, &[]);
         pass.draw(0..3, 0..1);
     }
 
@@ -224,6 +233,7 @@ impl Gpu {
         pass.set_pipeline(&self.slice_cs);
         pass.set_bind_group(0, &self.bind_group, &[]);
         pass.set_bind_group(1, &self.cache_bind, &[]);
+        pass.set_bind_group(2, &self.mesh_bind, &[]);
         let groups = SLICE_RES.div_ceil(8);
         pass.dispatch_workgroups(groups, groups, 1);
         drop(pass);
@@ -295,6 +305,7 @@ impl egui_wgpu::CallbackTrait for SliceView {
         pass.set_pipeline(&gpu.slice_fs);
         pass.set_bind_group(0, &gpu.bind_group, &[]);
         pass.set_bind_group(1, &gpu.cache_bind, &[]);
+        pass.set_bind_group(2, &gpu.mesh_bind, &[]);
         pass.draw(0..3, 0..1);
     }
 }
@@ -313,7 +324,22 @@ fn cache_bind_group(device: &wgpu::Device, layout: &wgpu::BindGroupLayout, sampl
     device.create_bind_group(&wgpu::BindGroupDescriptor { label: Some("caches"), layout, entries: &entries })
 }
 
+fn mesh_bind_group(device: &wgpu::Device, layout: &wgpu::BindGroupLayout, view: &wgpu::TextureView) -> wgpu::BindGroup {
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("mesh"),
+        layout,
+        entries: &[wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(view) }],
+    })
+}
+
 impl Gpu {
+    /// Binds the mesh distance grid (None goes back to the dummy). `generation` identifies it so the
+    /// app can tell when a freshly built pipeline still needs it.
+    pub fn set_mesh(&mut self, view: Option<&wgpu::TextureView>, generation: u64) {
+        self.mesh_bind = mesh_bind_group(&self.device, &self.mesh_layout, view.unwrap_or(&self.mesh_dummy));
+        self.mesh_gen = generation;
+    }
+
     /// Binds the cache textures, in slot order. `generation` identifies this set so the app can
     /// tell when a freshly built pipeline still needs them.
     pub fn set_caches(&mut self, views: &[Option<&wgpu::TextureView>], generation: u64) {
@@ -411,9 +437,25 @@ pub fn build(device: &wgpu::Device, queue: &wgpu::Queue, format: wgpu::TextureFo
     });
     let cache_dummy = crate::cache::texture(device, 1).create_view(&Default::default());
     let cache_bind = cache_bind_group(device, &cache_layout, &cache_sampler, &[], &cache_dummy);
+    // Group 2: the mesh distance grid, read with textureLoad (no filtering needed).
+    let mesh_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("mesh"),
+        entries: &[wgpu::BindGroupLayoutEntry {
+            binding: 0,
+            visibility: stages,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                view_dimension: wgpu::TextureViewDimension::D3,
+                multisampled: false,
+            },
+            count: None,
+        }],
+    });
+    let mesh_dummy = crate::cache::texture(device, 1).create_view(&Default::default());
+    let mesh_bind = mesh_bind_group(device, &mesh_layout, &mesh_dummy);
     let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: None,
-        bind_group_layouts: &[Some(&bgl), Some(&cache_layout)],
+        bind_group_layouts: &[Some(&bgl), Some(&cache_layout), Some(&mesh_layout)],
         immediate_size: 0,
     });
     let render = |module: &wgpu::ShaderModule, layout: Option<&wgpu::PipelineLayout>, fs: &str| {
@@ -486,6 +528,10 @@ pub fn build(device: &wgpu::Device, queue: &wgpu::Queue, format: wgpu::TextureFo
         cache_sampler,
         cache_dummy,
         cache_gen: 0,
+        mesh_layout,
+        mesh_dummy,
+        mesh_bind,
+        mesh_gen: 0,
         target: None,
         timer: Timer::new(device, queue),
     }
