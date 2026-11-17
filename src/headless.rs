@@ -56,7 +56,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
                 let mut found: Vec<PathBuf> = std::fs::read_dir(&dir)
                     .map_err(|e| format!("{}: {e}", dir.display()))?
                     .filter_map(|e| e.ok().map(|e| e.path()))
-                    .filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("obj")))
+                    .filter(|p| crate::meshformats::is_mesh_file(p))
                     .collect();
                 found.sort();
                 o.files.extend(found);

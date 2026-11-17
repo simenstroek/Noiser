@@ -372,7 +372,7 @@ pub struct FileJob<'a> {
 impl FileJob<'_> {
     /// Loads `input`, displaces it like the preview would and writes the result to `output`.
     pub fn run(&self, input: &Path, output: &Path, progress: &Progress) -> Result<String, String> {
-        let (mesh, norm) = crate::mesh::Mesh::load_obj(input)?.normalized();
+        let (mesh, norm) = crate::meshformats::load(input)?.normalized();
         let sdf = crate::meshsdf::MeshSdf::build(&mesh, self.grid_res, self.grid_pad, &Default::default());
         let (_texture, view) = sdf.upload(self.device, self.queue); // keep the texture alive for the whole job
         let (lo, hi) = mesh.bounds();

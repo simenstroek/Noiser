@@ -58,7 +58,7 @@ impl App {
         let (tx, rx) = mpsc::channel();
         let label = format!("Loading {name}…");
         std::thread::spawn(move || {
-            let baked = Mesh::load_obj(&path).map(|mesh| {
+            let baked = crate::meshformats::load(&path).map(|mesh| {
                 let (normalized, norm) = mesh.normalized();
                 let sdf = MeshSdf::build(&normalized, res, pad, &AtomicU32::new(0));
                 Baked { name, normalized: Arc::new(normalized), norm, sdf, res, pad, new_file: true }
@@ -115,7 +115,7 @@ impl App {
         ui.heading("Mesh");
         ui.horizontal(|ui| {
             if ui.button("Import mesh (OBJ)…").clicked() {
-                if let Some(p) = rfd::FileDialog::new().add_filter("OBJ mesh", &["obj"]).pick_file() {
+                if let Some(p) = rfd::FileDialog::new().add_filter("Mesh (OBJ, PLY, STL)", &["obj", "ply", "stl"]).pick_file() {
                     self.start_mesh_load(p);
                 }
             }
@@ -306,7 +306,7 @@ impl App {
             ui.label("Shapes every mesh with the same graph and writes a high-resolution mesh for each.");
             ui.horizontal(|ui| {
                 if ui.button("Add meshes (OBJ)…").clicked() {
-                    if let Some(files) = rfd::FileDialog::new().add_filter("OBJ mesh", &["obj"]).pick_files() {
+                    if let Some(files) = rfd::FileDialog::new().add_filter("Mesh (OBJ, PLY, STL)", &["obj", "ply", "stl"]).pick_files() {
                         for f in files {
                             if !self.batch_files.contains(&f) {
                                 self.batch_files.push(f);

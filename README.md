@@ -60,7 +60,7 @@ tiling 3D texture for the preview, and the nodes it covers get a green outline. 
 
 **Crash recovery.** Rolling backups; after a crash you are offered the last one on the next start.
 
-**Meshes.** Import a low-resolution OBJ (File menu, or `noiser.exe --mesh file.obj`) and it appears as the
+**Meshes.** Import a low-resolution OBJ, PLY or STL (File menu, drag and drop, or `noiser.exe --mesh file.obj`) and it appears as the
 *Mesh* shape in the 3D view, shaped live by your graph. *Export displaced mesh* then writes a high-resolution
 OBJ or PLY of the same surface (as many samples along the longest side as you ask for), with small floating
 bits removed and the mesh's own size and position restored. The mesh can be made of overlapping parts. A

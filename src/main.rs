@@ -14,6 +14,7 @@ mod mesh;
 mod meshapp;
 mod meshmask;
 mod meshexport;
+mod meshformats;
 mod meshsdf;
 mod surface;
 mod noiser_file;
@@ -965,7 +966,7 @@ impl eframe::App for App {
         // Files dropped on the window: .obj becomes the mesh, anything else is opened as a graph.
         for f in ctx.input(|i| i.raw.dropped_files.clone()) {
             { let p = f.path().to_path_buf();
-                if p.extension().is_some_and(|e| e.eq_ignore_ascii_case("obj")) {
+                if meshformats::is_mesh_file(&p) {
                     self.start_mesh_load(p);
                 } else {
                     self.open_path(p);
@@ -1103,7 +1104,7 @@ impl eframe::App for App {
                     }
                     ui.separator();
                     if ui.button("Import mesh (OBJ)…").clicked() {
-                        if let Some(p) = rfd::FileDialog::new().add_filter("OBJ mesh", &["obj"]).pick_file() {
+                        if let Some(p) = rfd::FileDialog::new().add_filter("Mesh (OBJ, PLY, STL)", &["obj", "ply", "stl"]).pick_file() {
                             self.start_mesh_load(p);
                         }
                     }
