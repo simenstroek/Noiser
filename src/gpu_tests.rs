@@ -1083,6 +1083,18 @@ mod batch_tests {
     }
 
     #[test]
+    fn amount_variation_is_repeatable_bounded_and_off_at_zero() {
+        use crate::meshexport::amount_factor;
+        assert!((0..20).all(|i| amount_factor(3, i, 0.0) == 1.0));
+        let f: Vec<f32> = (0..200).map(|i| amount_factor(3, i, 0.25)).collect();
+        assert!(f.iter().all(|x| (0.75..=1.25).contains(x)));
+        assert_eq!(f, (0..200).map(|i| amount_factor(3, i, 0.25)).collect::<Vec<_>>());
+        let (lo, hi) = (f.iter().cloned().fold(9.0, f32::min), f.iter().cloned().fold(0.0, f32::max));
+        assert!(lo < 0.8 && hi > 1.2, "the spread is used: {lo}..{hi}");
+        assert_ne!(amount_factor(3, 5, 0.25), amount_factor(4, 5, 0.25), "a different seed gives different amounts");
+    }
+
+    #[test]
     fn seed_modes_are_distinct_repeatable_and_exact() {
         assert_eq!((0..4).map(|i| SeedMode::Same.seed_for(7, i)).collect::<Vec<_>>(), [7, 7, 7, 7]);
         assert_eq!((0..4).map(|i| SeedMode::Increment.seed_for(7, i)).collect::<Vec<_>>(), [7, 8, 9, 10]);

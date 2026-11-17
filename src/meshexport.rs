@@ -349,6 +349,16 @@ impl SeedMode {
     }
 }
 
+/// A repeatable per-mesh factor for the displacement amount: 1 plus or minus up to `spread` (0.2 is 20 %),
+/// from the global seed and the mesh's index. 1 exactly when `spread` is 0.
+pub fn amount_factor(base: u32, index: usize, spread: f32) -> f32 {
+    let mut z = ((base as u64) << 32 | index as u64).wrapping_add(0xD1B5_4A32_D192_ED03);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    let unit = ((z ^ (z >> 31)) >> 11) as f64 / (1u64 << 53) as f64; // [0, 1)
+    1.0 + spread * (unit as f32 * 2.0 - 1.0)
+}
+
 /// How far the surface can move: the displacement's reach, limited to what a distance grid padded
 /// by `grid_pad` covers (it keeps 0.05 of margin).
 pub fn reach(graph: &Graph, amount: f32, mask: (f32, f32), grid_pad: f32) -> f32 {

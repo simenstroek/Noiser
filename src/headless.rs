@@ -10,7 +10,7 @@ use std::io::Write;
 use std::path::PathBuf;
 
 pub const USAGE: &str = "usage: noiser --headless GRAPH.noisegraph --batch-out DIR (--batch-file F.obj ... | --batch-dir SRC)
-  [--amount 0.25] [--tile 1.0] [--size 1.0] [--seed 0] [--seed-mode same|increment|random]
+  [--amount 0.25] [--amount-var 0.2] [--tile 1.0] [--size 1.0] [--seed 0] [--seed-mode same|increment|random]
   [--res 256] [--grid-res 128] [--format obj|ply] [--cull 0.01] [--mask KIND ...]";
 
 #[derive(Debug)]
@@ -23,6 +23,7 @@ struct Options {
     size: f32,
     seed: u32,
     mode: SeedMode,
+    amount_var: f32,
     settings: Settings,
     grid_res: u32,
     mask: MaskSettings,
@@ -38,6 +39,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
         size: 1.0,
         seed: 0,
         mode: SeedMode::Same,
+        amount_var: 0.0,
         settings: Settings::default(),
         grid_res: 128,
         mask: MaskSettings::default(),
@@ -64,6 +66,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
             "--amount" => o.amount = float(value("a number")?)?,
             "--tile" => o.tile = float(value("a number")?)?,
             "--size" => o.size = float(value("a number")?)?,
+            "--amount-var" => o.amount_var = float(value("a fraction like 0.2")?)?.clamp(0.0, 0.5),
             "--cull" => o.settings.cull = float(value("a number")?)?,
             "--seed" => o.seed = whole(value("a number")?)?,
             "--res" => o.settings.res = whole(value("a number")?)?,
@@ -138,6 +141,7 @@ fn run(args: &[String], log: &mut Log) -> Result<usize, String> {
         let seed = o.mode.seed_for(o.seed, i);
         let label = if o.mode == SeedMode::Same { stem.clone() } else { format!("{stem}_seed{seed}") };
         let output = crate::meshapp::unique_path(&o.out, &format!("{label}_displaced"), o.settings.format.extension());
+        let d = Displace { amount: d.amount * crate::meshexport::amount_factor(o.seed, i, o.amount_var), ..d };
         let job = FileJob { device: &device, queue: &queue, graph: &graph, seed, d, settings: o.settings.clone(), grid_res: o.grid_res, grid_pad: 0.5 };
         let started = std::time::Instant::now();
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| job.run(input, &output, &Progress::default())));

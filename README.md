@@ -77,7 +77,7 @@ reported and the rest continue; nothing is ever overwritten. From a script:
 `noiser.exe graph.noisegraph --batch-out DIR --batch-file a.obj --batch-file b.obj`.
 
 **Headless.** `noiser.exe --headless graph.noisegraph --batch-out DIR --batch-dir SRC` does the same without a window
-(options: `--amount`, `--tile`, `--size`, `--seed`, `--seed-mode same|increment|random`, `--res`, `--grid-res`,
+(options: `--amount`, `--amount-var 0.2` (each mesh varies its displacement by up to 20 %), `--tile`, `--size`, `--seed`, `--seed-mode same|increment|random`, `--res`, `--grid-res`,
 `--format obj|ply`, `--cull`, `--mask KIND`). Progress goes to the console and to `noiser-batch.log` in the output
 folder; the exit code is 1 if any mesh failed.
 

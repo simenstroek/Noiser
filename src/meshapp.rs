@@ -352,6 +352,7 @@ impl App {
                 ui.selectable_value(v, SeedMode::Increment, "Seed + 1 each");
                 ui.selectable_value(v, SeedMode::Random, "Random each");
             });
+            crate::row(ui, &mut self.batch_amount_var, 0.0, |ui, v| _ = ui.add(egui::Slider::new(v, 0.0..=0.5).custom_formatter(|x, _| format!("±{:.0}%", x * 100.0)).text("vary displacement")));
             let base = self.pv.seed;
             ui.weak(match self.batch_seeds {
                 SeedMode::Same => format!("Every mesh uses the global seed ({base})."),
@@ -384,7 +385,7 @@ impl App {
         let Some(dir) = self.batch_dir.clone() else { return };
         let files = self.batch_files.clone();
         let total = files.len();
-        let (graph, base, mode) = (self.graph.clone(), self.pv.seed, self.batch_seeds);
+        let (graph, base, mode, var) = (self.graph.clone(), self.pv.seed, self.batch_seeds, self.batch_amount_var);
         let d = Displace { amount: self.pv.amount, tile_size: self.pv.tile_size, prim_size: self.pv.prim_size, mask: self.mesh_mask.pack() };
         let settings = self.mesh_export.clone();
         let (grid_res, grid_pad) = (self.mesh_res, self.mesh_pad);
@@ -407,6 +408,7 @@ impl App {
                 let seed = mode.seed_for(base, i);
                 let label = if mode == SeedMode::Same { stem.clone() } else { format!("{stem}_seed{seed}") };
                 let output = unique_path(&dir, &format!("{label}_displaced"), settings.format.extension());
+                let d = Displace { amount: d.amount * meshexport::amount_factor(base, i, var), ..d };
                 let job = FileJob { device: &device, queue: &queue, graph: &graph, seed, d, settings: settings.clone(), grid_res, grid_pad };
                 // One bad file (or a GPU error inside it) must not stop the rest.
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| job.run(input, &output, &fp)));

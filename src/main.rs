@@ -171,6 +171,8 @@ struct App {
     batch_files: Vec<std::path::PathBuf>,
     batch_dir: Option<std::path::PathBuf>,
     batch_seeds: meshexport::SeedMode,
+    /// Batch: each mesh's displacement amount varies by up to this fraction.
+    batch_amount_var: f32,
     batch_job: Option<meshapp::BatchJob>,
     /// How strongly the noise displaces each part of a mesh (see meshmask.rs).
     mesh_mask: meshmask::MaskSettings,
@@ -292,6 +294,7 @@ impl App {
             batch_files: Vec::new(),
             batch_dir: None,
             batch_seeds: meshexport::SeedMode::Same,
+            batch_amount_var: 0.0,
             batch_job: None,
             mesh_mask: meshmask::MaskSettings::default(),
             history: history::History::new(&saved_for_history),
