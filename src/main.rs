@@ -781,10 +781,11 @@ fn node_props(ui: &mut egui::Ui, kind: &mut NodeKind) {
 }
 
 const PICKS_KEY: &str = "node_picks";
-const SHORTCUTS: [(&str, &str); 12] = [
+const SHORTCUTS: [(&str, &str); 13] = [
     ("Ctrl+Z", "Undo"),
     ("Ctrl+Y / Ctrl+Shift+Z", "Redo"),
     ("Ctrl+D", "Duplicate the selected nodes at the cursor (graph editor)"),
+    ("Drop a file on the window", "A .noisegraph opens as the graph, an .obj loads as the mesh"),
     ("F / Home", "Frame the selected nodes / all nodes (graph editor)"),
     ("Ctrl+C / Ctrl+V", "Copy the selection, paste at the cursor; works between two Noiser windows"),
     ("Delete / Backspace", "Delete the selected nodes (graph editor)"),
@@ -864,6 +865,16 @@ impl eframe::App for App {
             });
         });
         let ctx = ui.ctx().clone();
+        // Files dropped on the window: .obj becomes the mesh, anything else is opened as a graph.
+        for f in ctx.input(|i| i.raw.dropped_files.clone()) {
+            { let p = f.path().to_path_buf();
+                if p.extension().is_some_and(|e| e.eq_ignore_ascii_case("obj")) {
+                    self.start_mesh_load(p);
+                } else {
+                    self.open_path(p);
+                }
+            }
+        }
         // Window title: the file and an asterisk for unsaved changes.
         let dirty = self.graph != self.saved;
         let title = match (&self.path, dirty) {
