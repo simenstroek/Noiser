@@ -129,6 +129,12 @@ struct App {
     shortcuts_open: bool,
     prefs: Prefs,
     prefs_open: bool,
+    /// Last window title sent, so it is only sent when it changes.
+    title: String,
+    /// The window was asked to close with unsaved changes; waiting for Save / Discard / Cancel.
+    close_prompt: bool,
+    /// Set once the user chose to discard (or saved), so the close goes through.
+    close_ok: bool,
 }
 
 /// An export running on a worker thread.
@@ -229,6 +235,9 @@ impl App {
             shortcuts_open: false,
             prefs: prefs.clone(),
             prefs_open: false,
+            title: String::new(),
+            close_prompt: false,
+            close_ok: false,
             recent: cc.storage.and_then(|s| s.get_string(RECENT_KEY)).and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default(),
         };
         if let Some(p) = mesh_arg {
@@ -854,6 +863,44 @@ impl eframe::App for App {
             });
         });
         let ctx = ui.ctx().clone();
+        // Window title: the file and an asterisk for unsaved changes.
+        let dirty = self.graph != self.saved;
+        let title = match (&self.path, dirty) {
+            (None, false) => "Noiser".to_string(),
+            (p, d) => format!("Noiser - {}{}", p.as_ref().and_then(|p| p.file_name()).map_or("untitled".into(), |n| n.to_string_lossy()), if d { " *" } else { "" }),
+        };
+        if title != self.title {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
+            self.title = title;
+        }
+        // Closing with unsaved changes asks first.
+        if ctx.input(|i| i.viewport().close_requested()) && dirty && !self.close_ok {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            self.close_prompt = true;
+        }
+        if self.close_prompt {
+            egui::Window::new("Unsaved changes").collapsible(false).resizable(false).anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0]).show(&ctx, |ui| {
+                ui.label("The graph has changes that are not saved.");
+                ui.horizontal(|ui| {
+                    if ui.button("Save").clicked() {
+                        self.save(false);
+                        if self.graph == self.saved {
+                            self.close_ok = true;
+                            self.close_prompt = false;
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                        }
+                    }
+                    if ui.button("Discard").clicked() {
+                        self.close_ok = true;
+                        self.close_prompt = false;
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    }
+                    if ui.button("Cancel").clicked() {
+                        self.close_prompt = false;
+                    }
+                });
+            });
+        }
         egui::Window::new("Preferences").open(&mut self.prefs_open).collapsible(false).resizable(false).show(&ctx, |ui| {
             let r = ui.add(egui::Slider::new(&mut self.prefs.ui_scale, 0.75..=2.0).text("Interface scale"));
             r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Slider, true, "Interface scale"));
