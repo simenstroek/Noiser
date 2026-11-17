@@ -20,10 +20,14 @@ pub enum MathOp {
     SmoothMax,
     /// Dot product of two vectors, as a float.
     Dot,
+    /// |a| (unary): billow when applied to noise.
+    Absolute,
+    /// 1 - |a| (unary): ridged noise when applied to noise.
+    Ridge,
 }
 
 impl MathOp {
-    pub const ALL: [MathOp; 10] = [
+    pub const ALL: [MathOp; 12] = [
         MathOp::Add,
         MathOp::Subtract,
         MathOp::Multiply,
@@ -34,6 +38,8 @@ impl MathOp {
         MathOp::SmoothMin,
         MathOp::SmoothMax,
         MathOp::Dot,
+        MathOp::Absolute,
+        MathOp::Ridge,
     ];
 
     /// Name shown in the operator dropdown.
@@ -49,12 +55,19 @@ impl MathOp {
             MathOp::SmoothMin => "Smooth minimum",
             MathOp::SmoothMax => "Smooth maximum",
             MathOp::Dot => "Dot product",
+            MathOp::Absolute => "Absolute",
+            MathOp::Ridge => "Ridge (1 − |a|)",
         }
     }
 
     /// Smooth min and max take a third input, the blend width.
     pub fn is_smooth(self) -> bool {
         matches!(self, MathOp::SmoothMin | MathOp::SmoothMax)
+    }
+
+    /// Absolute and Ridge use only the first input.
+    pub fn is_unary(self) -> bool {
+        matches!(self, MathOp::Absolute | MathOp::Ridge)
     }
 }
 
@@ -143,51 +156,125 @@ pub enum PatternKind {
     /// A brick wall: rows of bricks, each row shifted along the row by a fraction of a brick.
     #[default]
     Bricks,
+    /// Round dimples (or the distance to the nearest point) on a cubic, body-centred or face-centred lattice.
+    Dimples,
+    /// A checkerboard in 2D (extruded along an axis) or 3D.
+    Checker,
+    /// Parallel bands along a direction: sine, triangle, sawtooth or square waves.
+    Stripes,
+    /// A triply periodic minimal surface: gyroid, Schwarz P or diamond.
+    Gyroid,
+}
+
+impl PatternKind {
+    pub const ALL: [PatternKind; 5] = [PatternKind::Bricks, PatternKind::Dimples, PatternKind::Checker, PatternKind::Stripes, PatternKind::Gyroid];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            PatternKind::Bricks => "Bricks",
+            PatternKind::Dimples => "Dimples",
+            PatternKind::Checker => "Checker",
+            PatternKind::Stripes => "Stripes",
+            PatternKind::Gyroid => "Gyroid",
+        }
+    }
+
+    /// The name the `.noiser` format uses.
+    pub fn file_name(self) -> &'static str {
+        match self {
+            PatternKind::Bricks => "bricks",
+            PatternKind::Dimples => "dimples",
+            PatternKind::Checker => "checker",
+            PatternKind::Stripes => "stripes",
+            PatternKind::Gyroid => "gyroid",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PatternOutput {
-    /// Distance to the centre of the brick the point is in, scaled to [-1, 1]: -1 at the centre, +1
-    /// at the brick corners. (With no row offset this is the Grid node's centre distance.)
+    /// A measured value: the distance to the centre of the brick or dimple (-1 at the centre, +1 at
+    /// the farthest point), or a gyroid's field.
     #[default]
     Distance = 0,
-    /// -1 on the brick face and +1 in the mortar between bricks (`gap`, `bevel`).
+    /// The shape itself: -1 on the brick face and +1 in the mortar, a dimple's profile, or a gyroid's thin shell.
     Shape = 1,
-    /// A flat random value in [-1, 1] per brick.
+    /// A flat random value in [-1, 1] per cell.
     CellValue = 2,
 }
 
 /// Settings of a `Pattern` node. Every field has a default so files and code stay valid when
-/// more pattern kinds add fields.
+/// more pattern kinds add fields; each kind reads the ones it needs.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PatternParams {
     pub kind: PatternKind,
-    /// Bricks per tile per axis: along a row, rows, layers (see `axes`). Whole numbers tile.
+    /// Cells per tile per axis (bricks along a row, rows, layers; see `axes`). Whole numbers tile.
     pub counts: [f32; 3],
-    /// Extrude a 2D brick wall along `axis` instead of stacking 3D layers.
+    /// Extrude a 2D pattern along `axis` instead of using all three axes.
     pub mode2d: bool,
     /// The extrusion axis in 2D mode: 0 = X, 1 = Y, 2 = Z.
     pub axis: u32,
-    /// Row k is shifted along the row by (k mod steps) / steps of a brick: 1 stacks bricks in a grid,
-    /// 2 is a running bond, 3 shifts by thirds.
+    /// Bricks: row k is shifted along the row by (k mod steps) / steps of a brick: 1 stacks bricks in
+    /// a grid, 2 is a running bond, 3 shifts by thirds.
     pub steps: u32,
-    /// Mortar width and edge softness, as fractions of half a brick (Shape output).
+    /// Bricks: mortar width and edge softness, as fractions of half a brick.
     pub gap: f32,
     pub bevel: f32,
     pub output: PatternOutput,
     /// Overrides the global seed (Cell value output).
     pub seed: Option<u32>,
+    /// Which lattice (Dimples: cubic, body-centred, face-centred), wave (Stripes: sine, triangle,
+    /// sawtooth, square) or surface (Gyroid: gyroid, Schwarz P, diamond).
+    pub variant: u32,
+    /// Dimples: the dimple radius as a fraction of the room each one has (1 touches its neighbours).
+    pub radius: f32,
+    /// Dimples: the profile (sphere cap, cone, smooth bowl, flat disc).
+    pub profile: u32,
+    /// Stripes: the direction the phase runs along; whole numbers tile.
+    pub dir: [f32; 3],
+    /// Stripes: the share of each period that is +1 (square wave); Gyroid: the shell thickness.
+    pub width: f32,
+    /// Checker, Stripes: how soft the edges are, 0 (hard) to 1.
+    pub softness: f32,
 }
 
 impl Default for PatternParams {
     fn default() -> Self {
-        // 8 bricks per row and 16 rows: bricks twice as wide as tall, as in a wall.
-        Self { kind: PatternKind::Bricks, counts: [8.0, 16.0, 8.0], mode2d: true, axis: 2, steps: 2, gap: 0.1, bevel: 0.1, output: PatternOutput::Distance, seed: None }
+        PatternParams::for_kind(PatternKind::Bricks)
     }
 }
 
 impl PatternParams {
+    /// A new node of this kind, with settings that make a sensible first look.
+    pub fn for_kind(kind: PatternKind) -> PatternParams {
+        // 8 bricks per row and 16 rows: bricks twice as wide as tall, as in a wall.
+        let base = PatternParams {
+            kind,
+            counts: [8.0, 16.0, 8.0],
+            mode2d: true,
+            axis: 2,
+            steps: 2,
+            gap: 0.1,
+            bevel: 0.1,
+            output: PatternOutput::Distance,
+            seed: None,
+            variant: 0,
+            radius: 0.9,
+            profile: 0,
+            dir: [1.0, 0.0, 0.0],
+            width: 0.5,
+            softness: 0.1,
+        };
+        match kind {
+            PatternKind::Bricks => base,
+            PatternKind::Dimples => PatternParams { counts: [4.0; 3], mode2d: false, variant: 1, output: PatternOutput::Shape, ..base },
+            PatternKind::Checker => PatternParams { counts: [8.0; 3], softness: 0.05, ..base },
+            PatternKind::Stripes => PatternParams { counts: [8.0, 1.0, 1.0], mode2d: false, ..base },
+            PatternKind::Gyroid => PatternParams { counts: [2.0; 3], mode2d: false, width: 0.25, ..base },
+        }
+    }
+
     /// (axis along a row, axis rows stack along, axis of layers in 3D). In 2D mode the pattern is
     /// extruded along `axis` and the other two axes, in order, are the row and the stacking axis.
     pub fn axes(&self) -> (usize, usize, Option<usize>) {
@@ -203,8 +290,46 @@ impl PatternParams {
 
     /// The axes whose counts matter.
     pub fn used_axes(&self) -> Vec<usize> {
-        let (r, s, l) = self.axes();
-        [Some(r), Some(s), l].into_iter().flatten().collect()
+        match self.kind {
+            PatternKind::Stripes => vec![0],
+            PatternKind::Dimples | PatternKind::Gyroid => vec![0, 1, 2],
+            PatternKind::Bricks | PatternKind::Checker => {
+                let (r, s, l) = self.axes();
+                [Some(r), Some(s), l].into_iter().flatten().collect()
+            }
+        }
+    }
+
+    /// Why this pattern would not repeat once per tile, in plain words, or None if it does.
+    pub fn tiling_problem(&self) -> Option<String> {
+        let whole = |a: usize| self.counts[a].fract() == 0.0;
+        match self.kind {
+            PatternKind::Stripes => {
+                if !whole(0) || self.dir.iter().any(|d| d.fract() != 0.0) {
+                    return Some("the stripe count or direction is not a whole number".into());
+                }
+            }
+            _ => {
+                if self.used_axes().iter().any(|a| !whole(*a)) {
+                    return Some(format!("{} counts are not whole numbers", self.kind.name().to_lowercase()));
+                }
+            }
+        }
+        match self.kind {
+            PatternKind::Bricks => {
+                let rows = self.counts[self.axes().1];
+                if self.steps > 1 && (rows as u32) % self.steps != 0 {
+                    return Some(format!("the number of rows ({rows}) must be a multiple of the row-offset steps ({})", self.steps));
+                }
+            }
+            PatternKind::Checker => {
+                if let Some(a) = self.used_axes().into_iter().find(|a| (self.counts[*a] as u32) % 2 != 0) {
+                    return Some(format!("a checker needs an even count on every used axis ({} is odd)", self.counts[a]));
+                }
+            }
+            _ => {}
+        }
+        None
     }
 }
 
@@ -298,7 +423,7 @@ impl NodeKind {
     pub fn input_count(&self) -> usize {
         match self {
             NodeKind::Float(_) | NodeKind::Vec3(_) | NodeKind::Position => 0,
-            NodeKind::Math { op, .. } => if op.is_smooth() { 3 } else { 2 },
+            NodeKind::Math { op, .. } => if op.is_smooth() { 3 } else if op.is_unary() { 1 } else { 2 },
             NodeKind::Remap { .. } => 5,
             NodeKind::Normal { .. } | NodeKind::Noise(_) | NodeKind::Grid { .. } | NodeKind::Pattern(_) | NodeKind::OutDensity | NodeKind::OutNormal => 1,
         }
@@ -614,12 +739,8 @@ impl Graph {
                 }
             }
             NodeKind::Pattern(p) => {
-                let used = p.used_axes();
-                let rows = p.counts[p.axes().1];
-                if used.iter().any(|a| !is_whole(p.counts[*a])) {
-                    Broken("brick counts are not whole numbers".into())
-                } else if p.steps > 1 && (rows as u32) % p.steps != 0 {
-                    Broken(format!("the number of rows ({rows}) must be a multiple of the row-offset steps ({})", p.steps))
+                if let Some(why) = p.tiling_problem() {
+                    Broken(why)
                 } else {
                     match input(0, memo, stack) {
                         None | Some(Coord | Periodic) => Periodic,
@@ -787,6 +908,10 @@ fn math_range(op: MathOp, (a0, a1): Range, (b0, b1): Range, (_, k1): Range) -> R
             // Every component lies in the range, so |dot| <= 3 * max|a| * max|b|.
             let m = 3.0 * a0.abs().max(a1.abs()) * b0.abs().max(b1.abs());
             if m.is_finite() { (-m, m) } else { UNBOUNDED }
+        }
+        MathOp::Absolute | MathOp::Ridge => {
+            let abs = (if a0 <= 0.0 && a1 >= 0.0 { 0.0 } else { a0.abs().min(a1.abs()) }, a0.abs().max(a1.abs()));
+            if op == MathOp::Absolute { abs } else { (1.0 - abs.1, 1.0 - abs.0) }
         }
     }
 }
@@ -1015,6 +1140,69 @@ mod tests {
         assert_eq!(g.density_range(), (-1.0, 1.0));
         let min: NodeKind = serde_json::from_str(r#"{"Pattern":{"steps":3}}"#).unwrap();
         assert!(matches!(min, NodeKind::Pattern(q) if q.steps == 3 && q.counts == [8.0, 16.0, 8.0] && q.mode2d));
+    }
+
+    #[test]
+    fn unary_math_ops_have_one_input_and_the_right_ranges() {
+        let mut g = Graph::default_graph(); // 0 Position → 1 Noise(-1..1) → 2 OutDensity
+        let m = g.add(NodeKind::Math { op: MathOp::Absolute, a: 0.0, b: 0.0, c: 0.5 }, [0.0; 2]);
+        assert_eq!(g.nodes[&m].kind.input_count(), 1);
+        g.connect(1, m, 0);
+        g.connect(m, 2, 0);
+        assert_eq!(g.density_range(), (0.0, 1.0)); // |[-1, 1]|
+        g.nodes.get_mut(&m).unwrap().kind = NodeKind::Math { op: MathOp::Ridge, a: 0.0, b: 0.0, c: 0.5 };
+        assert_eq!(g.density_range(), (0.0, 1.0)); // 1 - |[-1, 1]|
+        assert_eq!(math_range(MathOp::Absolute, (2.0, 5.0), (0.0, 0.0), (0.0, 0.0)), (2.0, 5.0));
+        assert_eq!(math_range(MathOp::Absolute, (-5.0, -2.0), (0.0, 0.0), (0.0, 0.0)), (2.0, 5.0));
+        assert_eq!(math_range(MathOp::Ridge, (2.0, 5.0), (0.0, 0.0), (0.0, 0.0)), (-4.0, -1.0));
+        // Switching from Add to Absolute drops a link into B.
+        let add = g.add(NodeKind::Math { op: MathOp::Add, a: 0.0, b: 0.0, c: 0.5 }, [0.0; 2]);
+        g.connect(1, add, 0);
+        g.connect(0, add, 1);
+        g.nodes.get_mut(&add).unwrap().kind = NodeKind::Math { op: MathOp::Absolute, a: 0.0, b: 0.0, c: 0.5 };
+        g.prune_edges();
+        assert!(g.input(add, 1).is_none());
+        // |noise| still tiles; |position| does not.
+        assert_eq!(g.tiling()[&m], Tiling::Periodic);
+        let on_position = g.add(NodeKind::Math { op: MathOp::Absolute, a: 0.0, b: 0.0, c: 0.5 }, [0.0; 2]);
+        g.connect(0, on_position, 0);
+        assert!(matches!(g.tiling()[&on_position], Tiling::Broken(_)));
+    }
+
+    #[test]
+    fn pattern_tiling_rules_per_kind() {
+        let mut g = Graph::default_graph();
+        let tiling = |g: &mut Graph, p: PatternParams| {
+            let id = g.add(NodeKind::Pattern(p), [0.0; 2]);
+            let t = g.tiling()[&id].clone();
+            g.remove(id);
+            t
+        };
+        let with = |kind: PatternKind, f: &dyn Fn(&mut PatternParams)| {
+            let mut p = PatternParams::for_kind(kind);
+            f(&mut p);
+            p
+        };
+        for kind in PatternKind::ALL {
+            assert_eq!(tiling(&mut g, PatternParams::for_kind(kind)), Tiling::Periodic, "{kind:?} should tile by default");
+        }
+        // A checker needs even counts on the axes it uses; the extrusion axis does not count.
+        assert!(matches!(tiling(&mut g, with(PatternKind::Checker, &|p| p.counts[0] = 7.0)), Tiling::Broken(r) if r.contains("even")));
+        assert_eq!(tiling(&mut g, with(PatternKind::Checker, &|p| p.counts[2] = 7.0)), Tiling::Periodic);
+        assert!(matches!(tiling(&mut g, with(PatternKind::Checker, &|p| { p.counts[2] = 7.0; p.mode2d = false; })), Tiling::Broken(_)));
+        // Stripes need a whole count and a whole direction.
+        assert!(matches!(tiling(&mut g, with(PatternKind::Stripes, &|p| p.counts[0] = 4.5)), Tiling::Broken(r) if r.contains("stripe")));
+        assert!(matches!(tiling(&mut g, with(PatternKind::Stripes, &|p| p.dir = [1.0, 0.5, 0.0])), Tiling::Broken(_)));
+        assert_eq!(tiling(&mut g, with(PatternKind::Stripes, &|p| p.dir = [2.0, -3.0, 1.0])), Tiling::Periodic);
+        // Dimples and gyroids need whole counts on all three axes.
+        for kind in [PatternKind::Dimples, PatternKind::Gyroid] {
+            assert!(matches!(tiling(&mut g, with(kind, &|p| p.counts[1] = 2.5)), Tiling::Broken(_)), "{kind:?}");
+        }
+        // Every kind survives a save and load.
+        for kind in PatternKind::ALL {
+            let n = NodeKind::Pattern(PatternParams::for_kind(kind));
+            assert_eq!(serde_json::from_str::<NodeKind>(&serde_json::to_string(&n).unwrap()).unwrap(), n);
+        }
     }
 
     #[test]

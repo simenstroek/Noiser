@@ -87,9 +87,7 @@ pub fn title(kind: &NodeKind) -> String {
         NodeKind::Math { .. } => "Math".into(), // the operator is the dropdown on the node
         NodeKind::Remap { .. } => "Remap".into(),
         NodeKind::Grid { .. } => "Grid".into(),
-        NodeKind::Pattern(p) => match p.kind {
-            crate::graph::PatternKind::Bricks => "Bricks".into(),
-        },
+        NodeKind::Pattern(p) => p.kind.name().into(),
         NodeKind::Position => "Position".into(),
         NodeKind::Normal { .. } => "Normal".into(),
         NodeKind::Noise(n) => n.kind.name().into(),
@@ -141,7 +139,11 @@ fn palette() -> Vec<(&'static str, NodeKind)> {
             ("Math", NodeKind::Math { op: MathOp::Add, a: 0.0, b: 0.0, c: 0.5 }),
             ("Remap", NodeKind::Remap { vals: [0.0, 0.0, 1.0, 0.0, 1.0], clamp: false }),
             ("Grid", NodeKind::Grid { counts: [8.0; 3], corners: false }),
-            ("Bricks", NodeKind::Pattern(crate::graph::PatternParams::default())),
+            ("Bricks", NodeKind::Pattern(crate::graph::PatternParams::for_kind(crate::graph::PatternKind::Bricks))),
+            ("Dimples", NodeKind::Pattern(crate::graph::PatternParams::for_kind(crate::graph::PatternKind::Dimples))),
+            ("Checker", NodeKind::Pattern(crate::graph::PatternParams::for_kind(crate::graph::PatternKind::Checker))),
+            ("Stripes", NodeKind::Pattern(crate::graph::PatternParams::for_kind(crate::graph::PatternKind::Stripes))),
+            ("Gyroid", NodeKind::Pattern(crate::graph::PatternParams::for_kind(crate::graph::PatternKind::Gyroid))),
             ("Position", NodeKind::Position),
             ("Normal", NodeKind::Normal { flip: false }),
             ("Density Output", NodeKind::OutDensity),

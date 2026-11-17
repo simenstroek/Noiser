@@ -85,6 +85,8 @@ pub fn compile_with(g: &Graph, caches: &BTreeMap<NodeId, u32>) -> Result<Compile
                 params.extend(counts);
                 params.push(if *corners { 1.0 } else { 0.0 });
             }
+            // 18 slots: counts (3), steps, gap, bevel, output, 2D, axis, seed (-1 = global), variant,
+            // radius, profile, direction (3), width, softness. Each kind reads the ones it uses.
             NodeKind::Pattern(p) => params.extend([
                 p.counts[0],
                 p.counts[1],
@@ -96,6 +98,14 @@ pub fn compile_with(g: &Graph, caches: &BTreeMap<NodeId, u32>) -> Result<Compile
                 if p.mode2d { 1.0 } else { 0.0 },
                 p.axis as f32,
                 p.seed.map_or(-1.0, |s| s as f32),
+                p.variant as f32,
+                p.radius,
+                p.profile as f32,
+                p.dir[0],
+                p.dir[1],
+                p.dir[2],
+                p.width,
+                p.softness,
             ]),
             NodeKind::Noise(n) => params.extend([
                 n.scale,
@@ -266,6 +276,8 @@ impl Gen<'_> {
                     MathOp::SmoothMin => format!("{}({a}, {b}, {k})", if v { "smin3" } else { "smin" }),
                     MathOp::SmoothMax => format!("{}({a}, {b}, {k})", if v { "smax3" } else { "smax" }),
                     MathOp::Dot => format!("dot({a}, {b})"),
+                    MathOp::Absolute => format!("abs({a})"),
+                    MathOp::Ridge => format!("{} - abs({a})", convert("1.0", Ty::F, opty)),
                 };
                 (ty, e)
             }
@@ -279,9 +291,14 @@ impl Gen<'_> {
             }
             NodeKind::Pattern(p) => {
                 let q = self.operand(id, 0, Ty::V, "p");
-                match p.kind {
-                    PatternKind::Bricks => (Ty::F, format!("bricks({q}, {s}u)")),
-                }
+                let function = match p.kind {
+                    PatternKind::Bricks => "bricks",
+                    PatternKind::Dimples => "dimples",
+                    PatternKind::Checker => "checker",
+                    PatternKind::Stripes => "stripes",
+                    PatternKind::Gyroid => "gyroid",
+                };
+                (Ty::F, format!("{function}({q}, {s}u)"))
             }
             NodeKind::Normal { flip } => {
                 let sign = if *flip { "-" } else { "" };

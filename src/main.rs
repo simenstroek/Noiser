@@ -613,65 +613,15 @@ fn node_props(ui: &mut egui::Ui, kind: &mut NodeKind) {
                     }
                 });
             });
+            if *op == MathOp::Ridge {
+                ui.weak("1 − |a|. Ridge of noise gives ridged noise; Absolute gives billow.");
+            }
         }
         NodeKind::Remap { clamp, .. } => {
             row(ui, clamp, false, |ui, c| _ = ui.checkbox(c, "clamp to the output range"));
             ui.weak("The input values sit on the node.");
         }
-        NodeKind::Pattern(p) => {
-            use graph::PatternOutput::*;
-            let d = graph::PatternParams::default();
-            let (row_axis, stack_axis, layer_axis) = p.axes();
-            row(ui, &mut p.mode2d, d.mode2d, |ui, v| _ = ui.checkbox(v, "2D (extruded)"));
-            if p.mode2d {
-                row(ui, &mut p.axis, d.axis, |ui, v| {
-                    ui.label("extrude along");
-                    for (a, name) in [(0, "X"), (1, "Y"), (2, "Z")] {
-                        ui.selectable_value(v, a, name);
-                    }
-                });
-            }
-            let names = ["X", "Y", "Z"];
-            row(ui, &mut p.counts, d.counts, |ui, c| {
-                let mut count = |ui: &mut egui::Ui, axis: usize, what: &str| {
-                    ui.add(egui::DragValue::new(&mut c[axis]).range(1.0..=64.0).speed(0.1).prefix(format!("{what} ({}) ", names[axis])));
-                };
-                count(ui, row_axis, "per row");
-                count(ui, stack_axis, "rows");
-                if let Some(l) = layer_axis {
-                    count(ui, l, "layers");
-                }
-            });
-            row(ui, &mut p.steps, d.steps, |ui, v| {
-                ui.add(egui::Slider::new(v, 1..=4).text("row offset steps"))
-                    .on_hover_text("1 stacks the bricks in a grid, 2 is a running bond (each row shifted half a brick), 3 shifts by thirds.\nThe number of rows must be a multiple of this to tile.");
-            });
-            row(ui, &mut p.output, d.output, |ui, v| {
-                ui.selectable_value(v, Distance, "Distance");
-                ui.selectable_value(v, Shape, "Shape");
-                ui.selectable_value(v, CellValue, "Cell value");
-            });
-            match p.output {
-                Distance => _ = ui.weak("Distance to the centre of the brick: -1 at the centre, +1 at the corners."),
-                Shape => {
-                    row(ui, &mut p.gap, d.gap, |ui, v| _ = ui.add(egui::Slider::new(v, 0.0..=0.5).text("mortar gap")));
-                    row(ui, &mut p.bevel, d.bevel, |ui, v| _ = ui.add(egui::Slider::new(v, 0.0..=0.5).text("edge softness")));
-                    ui.weak("-1 on the brick face, +1 in the mortar.");
-                }
-                CellValue => {
-                    row(ui, &mut p.seed, d.seed, |ui, seed| {
-                        let mut locked = seed.is_some();
-                        ui.checkbox(&mut locked, "seed override");
-                        if locked {
-                            ui.add(egui::DragValue::new(seed.get_or_insert(0)));
-                        } else {
-                            *seed = None;
-                        }
-                    });
-                    ui.weak("A flat random value per brick.");
-                }
-            }
-        }
+        NodeKind::Pattern(p) => pattern_props(ui, p),
         NodeKind::Grid { counts, corners } => {
             row(ui, counts, [8.0; 3], |ui, v| {
                 for (c, label) in v.iter_mut().zip(["X ", "Y ", "Z "]) {
@@ -947,4 +897,164 @@ fn main() -> eframe::Result {
         ..Default::default()
     };
     eframe::run_native("Noiser", options, Box::new(|cc| Ok(Box::new(App::new(cc)))))
+}
+
+/// A row of cell counts for the axes a pattern uses, labelled by what they count.
+fn pattern_counts(ui: &mut egui::Ui, p: &mut graph::PatternParams, labels: [&str; 3]) {
+    let d = graph::PatternParams::for_kind(p.kind);
+    let used = p.used_axes();
+    let names = ["X", "Y", "Z"];
+    row(ui, &mut p.counts, d.counts, |ui, c| {
+        for a in used {
+            ui.add(egui::DragValue::new(&mut c[a]).range(1.0..=64.0).speed(0.1).prefix(format!("{} ({}) ", labels[a], names[a])));
+        }
+    });
+}
+
+fn pattern_2d(ui: &mut egui::Ui, p: &mut graph::PatternParams) {
+    let d = graph::PatternParams::for_kind(p.kind);
+    row(ui, &mut p.mode2d, d.mode2d, |ui, v| _ = ui.checkbox(v, "2D (extruded)"));
+    if p.mode2d {
+        row(ui, &mut p.axis, d.axis, |ui, v| {
+            ui.label("extrude along");
+            for (a, name) in [(0, "X"), (1, "Y"), (2, "Z")] {
+                ui.selectable_value(v, a, name);
+            }
+        });
+    }
+}
+
+/// The controls of a Pattern node: the kind, then the settings that kind has.
+fn pattern_props(ui: &mut egui::Ui, p: &mut graph::PatternParams) {
+    use graph::{PatternKind, PatternOutput::*};
+    let before = p.kind;
+    egui::ComboBox::from_label("pattern").selected_text(p.kind.name()).show_ui(ui, |ui| {
+        for k in PatternKind::ALL {
+            ui.selectable_value(&mut p.kind, k, k.name());
+        }
+    });
+    if p.kind != before {
+        // A new kind starts from its own defaults, keeping only the seed override.
+        let seed = p.seed;
+        *p = graph::PatternParams::for_kind(p.kind);
+        p.seed = seed;
+    }
+    let d = graph::PatternParams::for_kind(p.kind);
+    match p.kind {
+        PatternKind::Bricks => {
+            pattern_2d(ui, p);
+            let (row_axis, stack_axis, layer_axis) = p.axes();
+            let names = ["X", "Y", "Z"];
+            row(ui, &mut p.counts, d.counts, |ui, c| {
+                let mut count = |ui: &mut egui::Ui, axis: usize, what: &str| {
+                    ui.add(egui::DragValue::new(&mut c[axis]).range(1.0..=64.0).speed(0.1).prefix(format!("{what} ({}) ", names[axis])));
+                };
+                count(ui, row_axis, "per row");
+                count(ui, stack_axis, "rows");
+                if let Some(l) = layer_axis {
+                    count(ui, l, "layers");
+                }
+            });
+            row(ui, &mut p.steps, d.steps, |ui, v| {
+                ui.add(egui::Slider::new(v, 1..=4).text("row offset steps"))
+                    .on_hover_text("1 stacks the bricks in a grid, 2 is a running bond (each row shifted half a brick), 3 shifts by thirds.\nThe number of rows must be a multiple of this to tile.");
+            });
+            row(ui, &mut p.output, d.output, |ui, v| {
+                ui.selectable_value(v, Distance, "Distance");
+                ui.selectable_value(v, Shape, "Shape");
+                ui.selectable_value(v, CellValue, "Cell value");
+            });
+            match p.output {
+                Distance => _ = ui.weak("Distance to the centre of the brick: -1 at the centre, +1 at the corners."),
+                Shape => {
+                    row(ui, &mut p.gap, d.gap, |ui, v| _ = ui.add(egui::Slider::new(v, 0.0..=0.5).text("mortar gap")));
+                    row(ui, &mut p.bevel, d.bevel, |ui, v| _ = ui.add(egui::Slider::new(v, 0.0..=0.5).text("edge softness")));
+                    ui.weak("-1 on the brick face, +1 in the mortar.");
+                }
+                CellValue => {
+                    pattern_seed(ui, p, &d);
+                    ui.weak("A flat random value per brick.");
+                }
+            }
+        }
+        PatternKind::Dimples => {
+            pattern_counts(ui, p, ["cells", "cells", "cells"]);
+            row(ui, &mut p.variant, d.variant, |ui, v| {
+                ui.selectable_value(v, 0, "Cubic");
+                ui.selectable_value(v, 1, "Body-centred");
+                ui.selectable_value(v, 2, "Face-centred");
+            });
+            row(ui, &mut p.output, d.output, |ui, v| {
+                ui.selectable_value(v, Distance, "Distance");
+                ui.selectable_value(v, Shape, "Dimples");
+            });
+            if p.output == Shape {
+                row(ui, &mut p.radius, d.radius, |ui, v| _ = ui.add(egui::Slider::new(v, 0.1..=1.2).text("radius")).on_hover_text("1 makes neighbouring dimples touch"));
+                row(ui, &mut p.profile, d.profile, |ui, v| {
+                    ui.selectable_value(v, 0, "Sphere cap");
+                    ui.selectable_value(v, 1, "Cone");
+                    ui.selectable_value(v, 2, "Smooth bowl");
+                    ui.selectable_value(v, 3, "Flat disc");
+                });
+                ui.weak("-1 at the centre of a dimple, +1 on the flat between them. A body-centred or face-centred lattice with a radius near 0.9 is a golf ball.");
+            } else {
+                ui.weak("Distance to the nearest lattice point: -1 at a point, +1 as far from any as the lattice gets.");
+            }
+        }
+        PatternKind::Checker => {
+            pattern_2d(ui, p);
+            pattern_counts(ui, p, ["cells", "cells", "cells"]);
+            row(ui, &mut p.softness, d.softness, |ui, v| _ = ui.add(egui::Slider::new(v, 0.0..=1.0).text("edge softness")));
+            ui.weak("+1 and -1 cells. Every used count must be even to tile.");
+        }
+        PatternKind::Stripes => {
+            row(ui, &mut p.counts[0], d.counts[0], |ui, v| _ = ui.add(egui::DragValue::new(v).range(1.0..=64.0).speed(0.1).prefix("stripes per tile ")));
+            row(ui, &mut p.dir, d.dir, |ui, v| {
+                for (c, name) in v.iter_mut().zip(["X ", "Y ", "Z "]) {
+                    ui.add(egui::DragValue::new(c).range(-8.0..=8.0).speed(0.1).prefix(name));
+                }
+            });
+            ui.weak("Direction the stripes run along; whole numbers tile, (1, 1, 0) is a diagonal.");
+            row(ui, &mut p.variant, d.variant, |ui, v| {
+                ui.selectable_value(v, 0, "Sine");
+                ui.selectable_value(v, 1, "Triangle");
+                ui.selectable_value(v, 2, "Sawtooth");
+                ui.selectable_value(v, 3, "Square");
+            });
+            if p.variant == 3 {
+                row(ui, &mut p.width, d.width, |ui, v| _ = ui.add(egui::Slider::new(v, 0.0..=1.0).text("width")));
+                row(ui, &mut p.softness, d.softness, |ui, v| _ = ui.add(egui::Slider::new(v, 0.0..=1.0).text("edge softness")));
+            }
+        }
+        PatternKind::Gyroid => {
+            pattern_counts(ui, p, ["periods", "periods", "periods"]);
+            row(ui, &mut p.variant, d.variant, |ui, v| {
+                ui.selectable_value(v, 0, "Gyroid");
+                ui.selectable_value(v, 1, "Schwarz P");
+                ui.selectable_value(v, 2, "Diamond");
+            });
+            row(ui, &mut p.output, d.output, |ui, v| {
+                ui.selectable_value(v, Distance, "Field");
+                ui.selectable_value(v, Shape, "Shell");
+            });
+            if p.output == Shape {
+                row(ui, &mut p.width, d.width, |ui, v| _ = ui.add(egui::Slider::new(v, 0.0..=0.95).text("thickness")));
+                ui.weak("-1 in a thin sheet around the surface, +1 away from it.");
+            } else {
+                ui.weak("The field itself, scaled to -1..1; its zero level is the surface.");
+            }
+        }
+    }
+}
+
+fn pattern_seed(ui: &mut egui::Ui, p: &mut graph::PatternParams, d: &graph::PatternParams) {
+    row(ui, &mut p.seed, d.seed, |ui, seed| {
+        let mut locked = seed.is_some();
+        ui.checkbox(&mut locked, "seed override");
+        if locked {
+            ui.add(egui::DragValue::new(seed.get_or_insert(0)));
+        } else {
+            *seed = None;
+        }
+    });
 }

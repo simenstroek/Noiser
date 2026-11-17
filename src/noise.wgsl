@@ -347,3 +347,117 @@ fn mesh_mask(t: texture_3d<f32>, p: vec3f, origin: vec3f, voxel: f32, blo: vec3f
     }
     return sum;
 }
+
+// Pattern params are at P[s..s+18]: counts (3), steps, gap, bevel, output, 2D, axis, seed (-1 = global),
+// variant, radius, profile, direction (3), width, softness. See PatternParams.
+
+// A checkerboard. counts are cells per tile (one period of the wave spans two cells, so tiling needs
+// even counts); softness widens the edges between cells. In 2D the pattern is extruded along `axis`.
+fn checker(q: vec3f, s: u32) -> f32 {
+    let counts = max(vec3f(P[s], P[s + 1u], P[s + 2u]), vec3f(1e-3));
+    let flat2d = P[s + 7u] > 0.5;
+    let axis = u32(P[s + 8u]);
+    let soft = max(P[s + 17u], 1e-4);
+    let f = fract(q * counts * 0.5);
+    // A triangle wave: 0 at the cell borders, +1 and -1 at the cell centres.
+    let tri = 4.0 * abs(fract(f - vec3f(0.25)) - vec3f(0.5)) - vec3f(1.0);
+    var w = clamp(tri / soft, vec3f(-1.0), vec3f(1.0));
+    if (flat2d) { w[axis] = 1.0; }
+    return w.x * w.y * w.z;
+}
+
+// Parallel bands: phase = dot(q, dir) * count (tiles when both are whole). Waves: 0 sine, 1 triangle,
+// 2 sawtooth, 3 square (`width` is the share of each period that is +1, softened by `softness`).
+fn stripes(q: vec3f, s: u32) -> f32 {
+    let count = P[s];
+    let wave = u32(P[s + 10u]);
+    let dir = vec3f(P[s + 13u], P[s + 14u], P[s + 15u]);
+    let width = P[s + 16u];
+    let soft = max(P[s + 17u], 1e-4);
+    let f = fract(dot(q, dir) * count);
+    switch wave {
+        case 1u: { return 1.0 - 4.0 * abs(f - 0.5); }
+        case 2u: { return 2.0 * f - 1.0; }
+        case 3u: {
+            let d = abs(f - 0.5); // 0 at the middle of the period
+            return 1.0 - 2.0 * ramp01(0.5 * width - 0.25 * soft, 0.5 * width + 0.25 * soft, d);
+        }
+        default: { return sin(6.2831853 * f); }
+    }
+}
+
+// Round dimples on a lattice. Params: counts (cubic cells per tile), variant (0 cubic, 1 body-centred,
+// 2 face-centred), output (0 distance, 1 dimple profile), radius, profile (0 sphere cap, 1 cone,
+// 2 smooth bowl, 3 flat disc). The nearest lattice point is searched among the 27 surrounding cells.
+fn dimples(q: vec3f, s: u32) -> f32 {
+    let n = max(vec3f(P[s], P[s + 1u], P[s + 2u]), vec3f(1e-3));
+    let lattice = u32(P[s + 10u]);
+    let mode = u32(P[s + 6u]);
+    let radius = max(P[s + 11u], 1e-3);
+    let profile = u32(P[s + 12u]);
+    let base = vec3i(floor(q * n));
+    var points = array<vec3f, 4>(vec3f(0.5), vec3f(0.0), vec3f(0.0, 0.5, 0.5), vec3f(0.5, 0.0, 0.5));
+    var count = 1u;
+    if (lattice == 1u) { points[0] = vec3f(0.0); points[1] = vec3f(0.5); count = 2u; }
+    if (lattice == 2u) { points[0] = vec3f(0.0); points[1] = vec3f(0.0, 0.5, 0.5); points[2] = vec3f(0.5, 0.0, 0.5); points[3] = vec3f(0.5, 0.5, 0.0); count = 4u; }
+    var best = 1e9;
+    for (var z = -1; z <= 1; z++) {
+        for (var y = -1; y <= 1; y++) {
+            for (var x = -1; x <= 1; x++) {
+                let cell = vec3f(base + vec3i(x, y, z));
+                for (var k = 0u; k < count; k++) {
+                    let d = q - (cell + points[k]) / n;
+                    best = min(best, dot(d, d));
+                }
+            }
+        }
+    }
+    let dist = sqrt(best);
+    let inv = 1.0 / n;
+    let edge = min(inv.x, min(inv.y, inv.z));
+    if (mode == 1u) {
+        // How much room each dimple has: half the distance to its nearest neighbour.
+        var nearest = edge;
+        if (lattice == 1u) { nearest = 0.8660254 * edge; }
+        if (lattice == 2u) { nearest = 0.7071068 * edge; }
+        let t = dist / (radius * 0.5 * nearest);
+        var depth = 0.0;
+        if (t < 1.0) {
+            switch profile {
+                case 1u: { depth = 1.0 - t; }
+                case 2u: { depth = 1.0 - ramp01(0.0, 1.0, t); }
+                case 3u: { depth = 1.0; }
+                default: { depth = sqrt(1.0 - t * t); }
+            }
+        }
+        return 1.0 - 2.0 * depth;
+    }
+    // Distance over how far the lattice's farthest point is from its nearest point (the covering radius).
+    var cover = 0.5 * length(inv);
+    let isotropic = length(inv) * 0.57735027; // the cubic edge of a lattice with the same cell volume
+    if (lattice == 1u) { cover = 0.5590170 * isotropic; }
+    if (lattice == 2u) { cover = 0.5 * isotropic; }
+    return clamp(dist / cover * 2.0 - 1.0, -1.0, 1.0);
+}
+
+// Triply periodic minimal surfaces: variant 0 gyroid, 1 Schwarz P, 2 diamond. `counts` are periods per
+// tile per axis (whole numbers tile). Output 0 is the field, scaled by its largest value to [-1, 1];
+// output 1 is a thin shell around its zero level (`width` is the thickness): -1 in the sheet, +1 away.
+fn gyroid(q: vec3f, s: u32) -> f32 {
+    let n = vec3f(P[s], P[s + 1u], P[s + 2u]);
+    let variant = u32(P[s + 10u]);
+    let mode = u32(P[s + 6u]);
+    let width = clamp(P[s + 16u], 0.0, 0.999);
+    let a = 6.2831853 * q * n;
+    let sn = sin(a);
+    let cs = cos(a);
+    var f = sn.x * cs.y + sn.y * cs.z + sn.z * cs.x; // gyroid
+    var peak = GYROID_PEAK;
+    if (variant == 1u) { f = cs.x + cs.y + cs.z; peak = 3.0; }
+    if (variant == 2u) { f = sn.x * sn.y * sn.z + sn.x * cs.y * cs.z + cs.x * sn.y * cs.z + cs.x * cs.y * sn.z; peak = DIAMOND_PEAK; }
+    let field = clamp(f / peak, -1.0, 1.0);
+    if (mode == 1u) { return clamp((abs(field) - width) / (1.0 - width) * 2.0 - 1.0, -1.0, 1.0); }
+    return field;
+}
+const GYROID_PEAK: f32 = 1.5;
+const DIAMOND_PEAK: f32 = 1.4142136;

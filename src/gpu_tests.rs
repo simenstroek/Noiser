@@ -476,6 +476,19 @@ fn new_math_ops_match_reference() {
     g.connect(w, m, 2);
     g.connect(m, o, 0);
     near(eval(&gpu, &g, &at)[0], 1.2 + 0.6f32.powi(3) * 0.5 / 6.0, "linked blend width");
+    near(math(Absolute, -2.5, 9.0, 0.5), 2.5, "absolute of a negative");
+    near(math(Absolute, 2.5, 9.0, 0.5), 2.5, "absolute of a positive");
+    near(math(Ridge, 0.25, 9.0, 0.5), 0.75, "ridge");
+    near(math(Ridge, -0.25, 9.0, 0.5), 0.75, "ridge is symmetric");
+    near(math(Ridge, 3.0, 9.0, 0.5), -2.0, "ridge below zero past 1");
+    // On a vector the unary ops act per component: |(−1, 2, −6)| averages to 3.
+    let mut g = Graph::default();
+    let v = g.add(NodeKind::Vec3([-1.0, 2.0, -6.0]), [0.0; 2]);
+    let m = g.add(NodeKind::Math { op: Absolute, a: 0.0, b: 0.0, c: 0.5 }, [0.0; 2]);
+    let o = g.add(NodeKind::OutDensity, [0.0; 2]);
+    g.connect(v, m, 0);
+    g.connect(m, o, 0);
+    near(eval(&gpu, &g, &at)[0], 3.0, "absolute of a vector");
     // Dot product of two vectors.
     let mut g = Graph::default();
     let a = g.add(NodeKind::Vec3([1.0, 2.0, 3.0]), [0.0; 2]);
@@ -686,6 +699,7 @@ fn bricks_2d_extrudes_along_the_chosen_axis() {
 fn render_pattern_images() {
     use crate::export::{self, Format, Kind, Settings};
     use crate::graph::PatternOutput::{CellValue, Distance, Shape};
+    use crate::graph::PatternOutput;
     let gpu = gpu().expect("needs a GPU");
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target");
     let s = Settings { kind: Kind::Image2d, res: 384, format: Format::Png8, ..Default::default() };
@@ -696,6 +710,10 @@ fn render_pattern_images() {
         ("bricks_thirds", bricks_graph(|p| { p.output = Shape; p.steps = 3; p.counts = [6.0, 24.0, 8.0]; })),
         ("grid_centres", single_node_graph(NodeKind::Grid { counts: [8.0; 3], corners: false })),
         ("grid_corners", single_node_graph(NodeKind::Grid { counts: [8.0; 3], corners: true })),
+        ("checker", single_node_graph(NodeKind::Pattern(crate::graph::PatternParams::for_kind(crate::graph::PatternKind::Checker)))),
+        ("stripes_square", single_node_graph(NodeKind::Pattern({ let mut p = crate::graph::PatternParams::for_kind(crate::graph::PatternKind::Stripes); p.variant = 3; p.dir = [1.0, 1.0, 0.0]; p.counts[0] = 6.0; p.width = 0.4; p }))),
+        ("dimples_golf", single_node_graph(NodeKind::Pattern(crate::graph::PatternParams::for_kind(crate::graph::PatternKind::Dimples)))),
+        ("gyroid_shell", single_node_graph(NodeKind::Pattern({ let mut p = crate::graph::PatternParams::for_kind(crate::graph::PatternKind::Gyroid); p.output = PatternOutput::Shape; p.counts = [3.0; 3]; p }))),
     ];
     for (name, g) in graphs {
         let ev = export::Evaluator::new(&gpu.device, &gpu.queue, &g, 0).unwrap();
@@ -1006,5 +1024,173 @@ mod batch_tests {
         // A missing file is an error, not a panic.
         let job = FileJob { device: &gpu.device, queue: &gpu.queue, graph: &noise, seed: 0, d: Displace { amount: 0.1, tile_size: 1.0, prim_size: 1.0, mask: crate::meshmask::PackedMask::NONE }, settings: Settings::default(), grid_res: 32, grid_pad: 0.5 };
         assert!(job.run(&dir.join("nope.obj"), &dir.join("x.obj"), &Default::default()).is_err());
+    }
+}
+
+// ---- more patterns: checker, stripes, dimples, gyroid ---------------------------------
+
+mod pattern_family_tests {
+    use super::*;
+    use crate::graph::{PatternKind, PatternOutput, PatternParams};
+
+    fn pattern(kind: PatternKind, f: impl FnOnce(&mut PatternParams)) -> Graph {
+        let mut p = PatternParams::for_kind(kind);
+        f(&mut p);
+        single_node_graph(NodeKind::Pattern(p))
+    }
+
+    /// Range inside [-1, 1] and (optionally) filling it, no NaN, and the same values one tile later
+    /// on every axis (a few points right on an edge may fall either side).
+    fn check(gpu: &Gpu, g: &Graph, what: &str, fills: bool) {
+        let pts = points(20000, 11);
+        let v = eval(gpu, g, &pts);
+        assert!(v.iter().all(|x| x.is_finite()), "{what}: NaN or infinity");
+        let (lo, hi) = (v.iter().cloned().fold(f32::MAX, f32::min), v.iter().cloned().fold(f32::MIN, f32::max));
+        assert!(lo >= -1.0001 && hi <= 1.0001, "{what}: range {lo}..{hi}");
+        if fills {
+            assert!(lo < -0.9 && hi > 0.9, "{what}: range {lo}..{hi} does not fill -1..1");
+        }
+        for axis in 0..3 {
+            let moved: Vec<[f32; 3]> = pts.iter().map(|p| { let mut q = *p; q[axis] += 1.0; q }).collect();
+            let w = eval(gpu, g, &moved);
+            let off = v.iter().zip(&w).filter(|(a, b)| (*a - *b).abs() > 2e-3).count();
+            assert!(off <= 4, "{what}, axis {axis}: {off} of {} points differ one tile later", pts.len());
+        }
+    }
+
+    #[test]
+    fn checker_stripes_dimples_and_gyroid_stay_in_range_and_tile() {
+        use PatternKind::*;
+        let Some(gpu) = gpu() else { return eprintln!("no GPU adapter; skipping") };
+        for (soft, flat) in [(0.0, true), (0.3, true), (0.05, false), (1.0, false)] {
+            check(&gpu, &pattern(Checker, |p| { p.softness = soft; p.mode2d = flat; }), &format!("checker soft {soft} 2d={flat}"), soft <= 0.3); // very soft edges rarely reach +-0.9 in random samples
+        }
+        for wave in 0..4 {
+            for dir in [[1.0, 0.0, 0.0], [1.0, 1.0, 0.0], [1.0, 2.0, -1.0]] {
+                check(&gpu, &pattern(Stripes, |p| { p.variant = wave; p.dir = dir; p.counts[0] = 5.0; }), &format!("stripes wave {wave} dir {dir:?}"), true);
+            }
+        }
+        for lattice in 0..3 {
+            check(&gpu, &pattern(Dimples, |p| { p.variant = lattice; p.output = PatternOutput::Distance; }), &format!("dimple distance, lattice {lattice}"), true);
+            for profile in 0..4 {
+                check(&gpu, &pattern(Dimples, |p| { p.variant = lattice; p.profile = profile; p.output = PatternOutput::Shape; }), &format!("dimples lattice {lattice} profile {profile}"), true);
+            }
+        }
+        for surface in 0..3 {
+            for output in [PatternOutput::Distance, PatternOutput::Shape] {
+                check(&gpu, &pattern(Gyroid, |p| { p.variant = surface; p.output = output; }), &format!("gyroid {surface} {output:?}"), true);
+            }
+        }
+    }
+
+    #[test]
+    fn checker_cells_alternate_and_stripes_follow_their_wave() {
+        use PatternKind::*;
+        let Some(gpu) = gpu() else { return eprintln!("no GPU adapter; skipping") };
+        // 8 cells per tile: cell (i, j) has its centre at ((i + 0.5) / 8, (j + 0.5) / 8).
+        let c = |i: f32, j: f32, k: f32| [(i + 0.5) / 8.0, (j + 0.5) / 8.0, (k + 0.5) / 8.0];
+        let v = eval(&gpu, &pattern(Checker, |_| {}), &[c(0.0, 0.0, 0.3), c(1.0, 0.0, 0.7), c(1.0, 1.0, 0.1), c(2.0, 1.0, 0.9)]);
+        for (got, want, what) in [(v[0], 1.0, "cell (0,0)"), (v[1], -1.0, "cell (1,0)"), (v[2], 1.0, "cell (1,1)"), (v[3], -1.0, "cell (2,1)")] {
+            near(got, want, what);
+        }
+        // In 3D the third axis flips it too.
+        let v = eval(&gpu, &pattern(Checker, |p| p.mode2d = false), &[c(0.0, 0.0, 0.0), c(0.0, 0.0, 1.0), c(1.0, 0.0, 1.0)]);
+        near(v[0], 1.0, "3D cell (0,0,0)");
+        near(v[1], -1.0, "3D cell (0,0,1)");
+        near(v[2], 1.0, "3D cell (1,0,1)");
+
+        // 4 stripes along X. A quarter of the way through a period: sine peaks, triangle is 0, sawtooth -0.5.
+        let at = |phase: f32| [phase / 4.0, 0.4, 0.6];
+        let stripe = |wave: u32, f: &dyn Fn(&mut PatternParams)| {
+            let g = pattern(Stripes, |p| { p.variant = wave; p.counts[0] = 4.0; f(p) });
+            eval(&gpu, &g, &[at(0.25), at(0.5), at(0.75)])
+        };
+        let s = stripe(0, &|_| {});
+        near(s[0], 1.0, "sine at 1/4");
+        near(s[1], 0.0, "sine at 1/2");
+        near(s[2], -1.0, "sine at 3/4");
+        let t = stripe(1, &|_| {});
+        near(t[0], 0.0, "triangle at 1/4");
+        near(t[1], 1.0, "triangle at 1/2");
+        let w = stripe(2, &|_| {});
+        near(w[0], -0.5, "sawtooth at 1/4");
+        near(w[2], 0.5, "sawtooth at 3/4");
+        // Square with a duty of 0.5 and hard edges: +1 around the middle of the period, -1 at its ends.
+        let q = stripe(3, &|p| { p.width = 0.5; p.softness = 0.0; });
+        near(q[1], 1.0, "square at 1/2");
+        let ends = eval(&gpu, &pattern(Stripes, |p| { p.variant = 3; p.counts[0] = 4.0; p.width = 0.5; p.softness = 0.0; }), &[at(0.05), at(0.95)]);
+        near(ends[0], -1.0, "square near the start of a period");
+        near(ends[1], -1.0, "square near the end of a period");
+        // A diagonal runs along (1, 1, 0): moving along (1, -1, 0) changes nothing.
+        let d = pattern(Stripes, |p| { p.variant = 0; p.dir = [1.0, 1.0, 0.0]; p.counts[0] = 3.0; });
+        let v = eval(&gpu, &d, &[[0.3, 0.2, 0.1], [0.4, 0.1, 0.1], [0.5, 0.0, 0.9]]);
+        near(v[0], v[1], "along the stripe");
+        near(v[0], v[2], "along the stripe, another z");
+    }
+
+    #[test]
+    fn dimple_lattices_have_their_dimples_where_they_should() {
+        use PatternKind::*;
+        let Some(gpu) = gpu() else { return eprintln!("no GPU adapter; skipping") };
+        // 4 cubic cells per tile: cell edge 0.25. Lattice points: cubic at cell centres, body-centred
+        // at the corners and centres, face-centred at the corners and face centres.
+        let a = 0.25;
+        let cases: [(u32, Vec<[f32; 3]>); 3] = [
+            (0, vec![[0.5 * a, 0.5 * a, 0.5 * a], [1.5 * a, 2.5 * a, 0.5 * a]]),
+            (1, vec![[0.0, 0.0, 0.0], [0.5 * a, 0.5 * a, 0.5 * a], [a, 2.0 * a, 0.0]]),
+            (2, vec![[0.0, 0.0, 0.0], [0.0, 0.5 * a, 0.5 * a], [0.5 * a, 0.0, 0.5 * a], [a, 0.5 * a, 0.5 * a]]),
+        ];
+        for (lattice, centres) in cases {
+            let distance = eval(&gpu, &pattern(Dimples, |p| { p.variant = lattice; p.output = PatternOutput::Distance; }), &centres);
+            let shape = eval(&gpu, &pattern(Dimples, |p| { p.variant = lattice; p.output = PatternOutput::Shape; p.radius = 0.9; }), &centres);
+            for k in 0..centres.len() {
+                near(distance[k], -1.0, &format!("lattice {lattice}: distance at point {k}"));
+                near(shape[k], -1.0, &format!("lattice {lattice}: dimple depth at point {k}"));
+            }
+        }
+        // Far from every dimple, with a radius below 1, the surface is flat: a cubic cell's corner.
+        let flat = eval(&gpu, &pattern(Dimples, |p| { p.variant = 0; p.output = PatternOutput::Shape; p.radius = 0.8; }), &[[0.0, 0.0, 0.0], [a, a, a]]);
+        near(flat[0], 1.0, "between cubic dimples");
+        near(flat[1], 1.0, "between cubic dimples, another corner");
+        // And a radius of 0.5 leaves flat ground a quarter of the way to the next point.
+        let half = eval(&gpu, &pattern(Dimples, |p| { p.variant = 0; p.output = PatternOutput::Shape; p.radius = 0.5; p.profile = 3; }), &[[0.5 * a + 0.3 * a, 0.5 * a, 0.5 * a], [0.5 * a + 0.1 * a, 0.5 * a, 0.5 * a]]);
+        near(half[0], 1.0, "outside a flat-bottomed dimple of radius 0.5");
+        near(half[1], -1.0, "inside a flat-bottomed dimple of radius 0.5");
+
+        // A cubic lattice's distance is the Grid node's cell-centre distance, anisotropic counts included.
+        let pts = points(4000, 3);
+        let cubic = pattern(Dimples, |p| { p.counts = [8.0, 4.0, 2.0]; p.variant = 0; p.output = PatternOutput::Distance; });
+        let grid = single_node_graph(NodeKind::Grid { counts: [8.0, 4.0, 2.0], corners: false });
+        let (x, y) = (eval(&gpu, &cubic, &pts), eval(&gpu, &grid, &pts));
+        let worst = x.iter().zip(&y).map(|(a, b)| (a - b).abs()).fold(0.0, f32::max);
+        assert!(worst < 1e-4, "cubic dimple distance differs from Grid by {worst}");
+        // A golf ball (body-centred, sphere cap, radius 0.9) is mostly flat ground between pits.
+        let golf = eval(&gpu, &pattern(Dimples, |_| {}), &points(20000, 4));
+        let flat_share = golf.iter().filter(|v| **v > 0.999).count() as f32 / golf.len() as f32;
+        assert!((0.25..0.7).contains(&flat_share), "flat share {flat_share}");
+    }
+
+    #[test]
+    fn gyroid_surfaces_have_their_known_values() {
+        use PatternKind::*;
+        let Some(gpu) = gpu() else { return eprintln!("no GPU adapter; skipping") };
+        let origin = [[0.0, 0.0, 0.0]];
+        // At the origin: the gyroid is 0, Schwarz P is at its maximum 3, the diamond is 0.
+        for (surface, want) in [(0, 0.0), (1, 1.0), (2, 0.0)] {
+            let v = eval(&gpu, &pattern(Gyroid, |p| p.variant = surface), &origin);
+            near(v[0], want, &format!("surface {surface} at the origin"));
+        }
+        // A shell is -1 where the field is 0 (the origin for the gyroid) and +1 where it is largest.
+        let shell = pattern(Gyroid, |p| { p.output = PatternOutput::Shape; p.width = 0.2; });
+        near(eval(&gpu, &shell, &origin)[0], -1.0, "gyroid shell at its surface");
+        let p_shell = pattern(Gyroid, |p| { p.variant = 1; p.output = PatternOutput::Shape; p.width = 0.2; });
+        near(eval(&gpu, &p_shell, &origin)[0], 1.0, "Schwarz P shell where the field peaks");
+        // The field really reaches 1 (the normalization constants are the true extremes).
+        for surface in 0..3 {
+            let v = eval(&gpu, &pattern(Gyroid, |p| { p.variant = surface; p.counts = [1.0; 3]; }), &points(40000, 8));
+            let hi = v.iter().cloned().fold(f32::MIN, f32::max);
+            let lo = v.iter().cloned().fold(f32::MAX, f32::min);
+            assert!(hi > 0.97 && lo < -0.97 && hi <= 1.0001 && lo >= -1.0001, "surface {surface}: {lo}..{hi}");
+        }
     }
 }

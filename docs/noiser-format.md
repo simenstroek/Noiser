@@ -54,7 +54,7 @@ A constant: `value` is a number (float) or `[x, y, z]` (vector).
 
 ### `math`
 `fn` is one of `add`, `subtract`, `multiply`, `divide`, `min`, `max`, `power`, `smooth_min`,
-`smooth_max`, `dot`. Operands `a` and `b` are
+`smooth_max`, `dot`, `absolute`, `ridge`. Operands `a` and `b` are
 either `{"node": id}` or a number. The result is a vector if either operand is a vector, and
 then both operands are converted to vectors and the op applies per component.
 
@@ -65,6 +65,7 @@ then both operands are converted to vectors and the op applies per component.
   otherwise `h = max(k − |a − b|, 0) / k` and the result is `min(a, b) − h³·k/6` (Blender's polynomial
   smooth minimum). `smooth_max(a, b, k) = −smooth_min(−a, −b, k)`.
 - `dot` converts both operands to vectors and returns the float `a·b`. Its `type` is `float`.
+- `absolute` and `ridge` are unary (`b` is ignored): `|a|` and `1 − |a|`, per component.
 
 ### `remap`
 `value`, `from_min`, `from_max`, `to_min`, `to_max` (each a number or `{"node": id}`, converted to float),
@@ -80,7 +81,7 @@ when `clamp` is true. Type float.
 corners for `center`, the cell centres for `corner`). Tiles when every count is a whole number. Type float.
 
 ### `pattern`
-`kind` selects the pattern; version 1 has `bricks`. Common fields: `position` (op id or `null` for
+`kind` selects the pattern; version 1 has `bricks`, `checker`, `stripes`, `dimples` and `gyroid`. Common fields: `position` (op id or `null` for
 `p`) and `seed` (resolved, as for `noise`). Output is a float in [-1, 1].
 
 **`bricks`**: a brick wall. Fields `counts` `[nx, ny, nz]`, `mode2d`, `axis`, `steps`, `gap`,
@@ -106,6 +107,34 @@ Per point `q` (the noise-space position): `x = q·counts` (per component), `row 
 
 Tiles when the counts of the used axes are whole and, if `steps > 1`, `counts[s]` is a multiple of
 `steps`.
+
+**`checker`**: fields `counts`, `mode2d`, `axis`, `softness`. `counts` are cells per tile (one period of
+the wave spans two cells, so every used count must be even to tile). With `f = fract(q · counts / 2)`
+per component, `tri = 4·|fract(f − 0.25) − 0.5| − 1` is a triangle wave (0 at cell borders, ±1 at
+cell centres) and `w = clamp(tri / max(softness, 1e-4), −1, 1)`. The result is `w.x · w.y · w.z`; in 2D mode
+`w[axis]` is 1. The axes used are those of `mode2d` (see `bricks`).
+
+**`stripes`**: fields `counts[0]` (stripes per tile), `dir`, `variant`, `width`, `softness`. With
+`f = fract(dot(q, dir) · counts[0])` (whole `dir` and count tile): `variant` 0 sine `sin(2π f)`; 1 triangle
+`1 − 4|f − ½|`; 2 sawtooth `2f − 1`; 3 square `1 − 2·ramp(½·width − ¼·softness, ½·width + ¼·softness, |f − ½|)`
+where `ramp(lo, hi, x) = t²(3 − 2t)` with `t = clamp((x − lo) / max(hi − lo, 1e-4), 0, 1)`.
+
+**`dimples`**: fields `counts` (cubic cells per tile), `variant` (lattice: 0 cubic, 1 body-centred, 2
+face-centred), `output` (`distance` or `shape`), `radius`, `profile`. Lattice points are at
+`(cell + b) / counts` for cells `floor(q·counts) + (−1..1)³`, with `b` in cell units: cubic `(½, ½, ½)`;
+body-centred `(0,0,0)`, `(½,½,½)`; face-centred `(0,0,0)`, `(0,½,½)`, `(½,0,½)`, `(½,½,0)`. `dist` is the
+distance from `q` to the nearest point and `inv = 1 / counts`. `distance`: `dist / cover · 2 − 1`, clamped,
+with `cover = ½|inv|` (cubic), `0.5590170 · |inv|/√3` (body-centred) or `0.5 · |inv|/√3` (face-centred).
+`shape`: with `edge = min(inv)`, `nearest` is `edge`, `0.8660254 · edge` or `0.7071068 · edge`, and
+`t = dist / (radius · ½ · nearest)`; the depth is 0 for `t ≥ 1` and otherwise `sqrt(1 − t²)` (profile 0, sphere
+cap), `1 − t` (1, cone), `1 − ramp(0, 1, t)` (2, smooth bowl) or 1 (3, flat disc); the result is `1 − 2·depth`.
+For the cubic lattice `distance` equals the `grid` op's centre distance.
+
+**`gyroid`**: fields `counts` (periods per tile per axis, whole to tile), `variant`, `output`, `width`. With
+`a = 2π · q · counts`, `s = sin a`, `c = cos a`: the field is `s.x c.y + s.y c.z + s.z c.x` (variant 0, peak 1.5),
+`c.x + c.y + c.z` (1, Schwarz P, peak 3) or `s.x s.y s.z + s.x c.y c.z + c.x s.y c.z + c.x c.y s.z` (2, diamond, peak √2);
+`field = clamp(f / peak, −1, 1)`. `distance` returns the field; `shape` returns
+`clamp((|field| − w) / (1 − w) · 2 − 1, −1, 1)` with `w = clamp(width, 0, 0.999)`.
 
 ### `noise`
 Fields: `kind`, `position` (op id or `null` for `p`), `scale`, `normalize`, `octaves`,
