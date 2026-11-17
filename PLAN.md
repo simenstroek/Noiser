@@ -200,3 +200,6 @@ Differences from the sketch in 3a, and known limits:
 | Blender | The add-on targets 5.2 and 5.3 only. |
 | Hardware | wgpu GPU required. No CPU fallback. |
 | Code location | Clone + builds in `E:\_Noiser`, source synced via github.com/simenstroek/Noiser. The canonical `PLAN.md` lives in the repo; the Drive copy is a snapshot. |
+
+### Viewport material (2026-11-17)
+Built: Material section in the Preview panel (colour, specular, roughness, soft shadows). Uniform-only (`look` in `Uniforms`), viewport only, never exported; defaults reproduce the old shading exactly. Soft shadows are a 40-step distance-field march toward the sun, only run when enabled. Not built: environment map, lighting setups, half-res rendering, mesh vertex-colour masks.

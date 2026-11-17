@@ -50,6 +50,8 @@ pub struct Uniforms {
     pub mesh_hi: [f32; 3],
     pub _pad_mask: f32,
     pub mask: [[f32; 4]; 12],
+    /// [colour rgb, specular strength], [roughness, shadows (0/1), unused, unused]: viewport only.
+    pub look: [[f32; 4]; 2],
 }
 
 /// How far the surface can move in/out: amount × the displacement mask × the graph's density range,

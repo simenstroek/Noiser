@@ -133,7 +133,23 @@ fn solid(ro: vec3f, rd: vec3f, bg: vec3f) -> vec3f {
     let n = normal_at(p, max(pix * t, 1e-4));
     let diff = max(dot(n, SUN), 0.0);
     let sky = 0.5 + 0.5 * n.y;
-    return vec3f(0.8, 0.78, 0.74) * (diff * 0.9 + sky * 0.25);
+    // Viewport material: colour, Blinn-Phong highlight from specular/roughness, optional soft shadow.
+    var sh = 1.0;
+    if (u.look_b.y > 0.5) {
+        var tt = 0.02 + 0.01 * t;
+        for (var k = 0; k < 40; k++) {
+            let dd = field(p + n * 0.01 + SUN * tt);
+            sh = min(sh, 8.0 * dd / tt);
+            tt += clamp(dd, 0.01, 0.2);
+            if (sh < 0.0 || tt > 3.0) { break; }
+        }
+        sh = clamp(sh, 0.0, 1.0);
+    }
+    let rough = max(u.look_b.x, 0.05);
+    let shin = 2.0 / (rough * rough);
+    let h = normalize(SUN - rd);
+    let spec = u.look_a.w * pow(max(dot(n, h), 0.0), shin) * (0.15 + 0.85 * sh) * select(0.0, 1.0, diff > 0.0);
+    return u.look_a.xyz * (diff * sh * 0.9 + sky * 0.25) + vec3f(spec);
 }
 
 fn cloud(ro: vec3f, rd: vec3f, bg: vec3f) -> vec3f {

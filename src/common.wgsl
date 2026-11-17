@@ -17,6 +17,9 @@ struct Uniforms {
     mesh_lo: vec3f, mask_n: u32,
     mesh_hi: vec3f, _pm: f32,
     mask: array<vec4f, 12>,
+    // Viewport-only material (never exported): colour + specular, then roughness + shadows on/off.
+    look_a: vec4f,
+    look_b: vec4f,
 };
 @group(0) @binding(0) var<uniform> u: Uniforms;
 @group(0) @binding(1) var<storage, read> P: array<f32>;

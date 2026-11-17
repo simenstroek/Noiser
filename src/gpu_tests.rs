@@ -259,6 +259,7 @@ fn bench_preview() {
             tile_size: 1.0, prim_size: 1.0, pixel: 2.0 / size[1] as f32, cloud_density: 8.0, mode, prim: 0,
             slice_axis: 2, slice_mode: 0, slice_pos: 0.5, slice_aspect: 1.0, slice_tiles: 1.0, slice_res: view::SLICE_RES,
             push_min: push.0, push_max: push.1, _pad: [0.0; 2], mesh_origin: [0.0; 3], mesh_voxel: 1.0, mesh_lo: [0.0; 3], mask_n: 0, mesh_hi: [0.0; 3], _pad_mask: 0.0, mask: [[0.0; 4]; 12],
+            look: [[0.8, 0.78, 0.74, 0.0], [0.5, 0.0, 0.0, 0.0]],
         };
         let mut samples = Vec::new();
         for _ in 0..30 {
