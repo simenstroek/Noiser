@@ -138,6 +138,9 @@ impl App {
         let (name, tris, dims, grid_res, grid_pad) = (m.name.clone(), m.normalized.triangles.len(), m.sdf.dims, m.res, m.pad);
         ui.label(format!("{name}: {tris} triangles"));
         ui.weak(format!("distance grid {}×{}×{}", dims[0], dims[1], dims[2]));
+        if self.mesh.as_ref().is_some_and(|m| m.sdf.open) {
+            ui.weak("Open surface (terrain, sheet): the side its normals face is outside. Raise the grid resolution for fine detail.");
+        }
         crate::row(ui, &mut self.mesh_res, DEFAULT_RES, |ui, v| _ = ui.add(egui::Slider::new(v, 32..=384).text("grid resolution")));
         crate::row(ui, &mut self.mesh_pad, DEFAULT_PAD, |ui, v| _ = ui.add(egui::Slider::new(v, 0.1..=2.0).text("grid padding")));
         if (self.mesh_res, self.mesh_pad) != (grid_res, grid_pad) && self.mesh_job.is_none() && ui.button("Rebuild distance grid").clicked() {

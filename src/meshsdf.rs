@@ -355,6 +355,8 @@ pub struct MeshSdf {
     pub origin: V3,
     pub voxel: f32,
     pub data: Vec<f32>,
+    /// The mesh is an open surface (terrain, sheet): inside is the side opposite its normals.
+    pub open: bool,
 }
 
 impl MeshSdf {
@@ -378,7 +380,7 @@ impl MeshSdf {
             }
             progress.fetch_add(1, Ordering::Relaxed);
         });
-        MeshSdf { dims, origin, voxel, data }
+        MeshSdf { dims, origin, voxel, data, open: query.open }
     }
 
     /// Puts the grid on the GPU as an R32Float 3D texture.
