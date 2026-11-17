@@ -123,6 +123,7 @@ struct App {
     history: history::History,
     /// Most recently opened or saved graph files, newest first (kept across runs).
     recent: Vec<std::path::PathBuf>,
+    shortcuts_open: bool,
 }
 
 /// An export running on a worker thread.
@@ -217,6 +218,7 @@ impl App {
             batch_job: None,
             mesh_mask: meshmask::MaskSettings::default(),
             history: history::History::new(&saved_for_history),
+            shortcuts_open: false,
             recent: cc.storage.and_then(|s| s.get_string(RECENT_KEY)).and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default(),
         };
         if let Some(p) = mesh_arg {
@@ -752,6 +754,18 @@ fn node_props(ui: &mut egui::Ui, kind: &mut NodeKind) {
 }
 
 const PICKS_KEY: &str = "node_picks";
+const SHORTCUTS: [(&str, &str); 10] = [
+    ("Ctrl+Z", "Undo"),
+    ("Ctrl+Y / Ctrl+Shift+Z", "Redo"),
+    ("Ctrl+D", "Duplicate the selected nodes at the cursor (graph editor)"),
+    ("Delete / Backspace", "Delete the selected nodes (graph editor)"),
+    ("Right-click canvas", "Add node menu; type to search, Enter adds the first match"),
+    ("Drag from a pin to empty space", "Add a node already wired up"),
+    ("Drag on empty canvas", "Box select (Shift/Ctrl adds)"),
+    ("Middle-drag", "Pan the graph editor"),
+    ("Mouse wheel", "Zoom the graph editor or the 3D view; moves the slice through the tile"),
+    ("Drag in the 3D view", "Orbit (wheel zooms)"),
+];
 const RECENT_KEY: &str = "recent_files";
 
 /// Moves `path` to the front of the recent list, without duplicates, at most 10 long.
@@ -784,6 +798,15 @@ impl eframe::App for App {
         self.poll_mesh_job(&ui.ctx().clone());
         self.mesh_export_window(&ui.ctx().clone());
         self.batch_window(&ui.ctx().clone());
+        egui::Window::new("Keyboard shortcuts").open(&mut self.shortcuts_open).collapsible(false).resizable(false).show(ui.ctx(), |ui| {
+            egui::Grid::new("shortcuts").striped(true).show(ui, |ui| {
+                for (k, what) in SHORTCUTS {
+                    ui.monospace(k);
+                    ui.label(what);
+                    ui.end_row();
+                }
+            });
+        });
         self.export_window(&ui.ctx().clone());
         if let Some(s) = self.session.as_mut().filter(|_| self.graph != self.saved) {
             if s.backup(&self.graph, self.path.as_deref()) {
@@ -861,6 +884,12 @@ impl eframe::App for App {
                     }
                     if ui.add_enabled(self.export_job.is_none(), egui::Button::new("Export Math Function (.noiser)…")).clicked() {
                         self.export_function();
+                    }
+                });
+                ui.menu_button("Help", |ui| {
+                    if ui.button("Keyboard shortcuts").clicked() {
+                        self.shortcuts_open = true;
+                        ui.close();
                     }
                 });
                 ui.weak(&self.status);
