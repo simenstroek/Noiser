@@ -576,6 +576,19 @@ impl Editor {
                     graph.remove(id);
                 }
             }
+            if ui.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Copy))) {
+                if let Some(t) = clipboard_text(graph, &self.selected) {
+                    ui.ctx().copy_text(t);
+                }
+            }
+            let pasted = ui.input(|i| i.events.iter().find_map(|e| if let egui::Event::Paste(t) = e { Some(t.clone()) } else { None }));
+            if let (Some(t), Some(p)) = (pasted, pointer) {
+                let at = self.to_graph(origin, p);
+                let new = paste_text(graph, &t, [at.x, at.y]);
+                if !new.is_empty() {
+                    self.selected = new;
+                }
+            }
             if ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::D)) {
                 if let Some(p) = pointer {
                     let at = self.to_graph(origin, p);
@@ -651,24 +664,55 @@ impl Editor {
 
 /// Copies `nodes` (and the links between them) so their centre lands on `at`. Returns the copies.
 pub fn duplicate(graph: &mut Graph, nodes: &BTreeSet<NodeId>, at: [f32; 2]) -> BTreeSet<NodeId> {
-    let src: Vec<_> = nodes.iter().filter_map(|id| graph.nodes.get(id).map(|n| (*id, n.clone()))).collect();
-    if src.is_empty() {
+    let src = graph.clone();
+    merge(graph, &src, nodes, at)
+}
+
+/// Adds copies of `nodes` of `src` (and the links between them) to `graph`, centred on `at`.
+fn merge(graph: &mut Graph, src: &Graph, nodes: &BTreeSet<NodeId>, at: [f32; 2]) -> BTreeSet<NodeId> {
+    let picked: Vec<_> = nodes.iter().filter_map(|id| src.nodes.get(id).map(|n| (*id, n.clone()))).collect();
+    if picked.is_empty() {
         return BTreeSet::new();
     }
     // Centre of the copied nodes, measured at their (approximate) middles.
     let mid = |n: &crate::graph::Node| [n.pos[0] + NODE_W * 0.5, n.pos[1] + HEADER_H];
-    let c = src.iter().fold([0.0, 0.0], |acc, (_, n)| [acc[0] + mid(n)[0], acc[1] + mid(n)[1]]);
-    let c = [c[0] / src.len() as f32, c[1] / src.len() as f32];
+    let c = picked.iter().fold([0.0, 0.0], |acc, (_, n)| [acc[0] + mid(n)[0], acc[1] + mid(n)[1]]);
+    let c = [c[0] / picked.len() as f32, c[1] / picked.len() as f32];
     let mut map = BTreeMap::new();
-    for (old, n) in &src {
+    for (old, n) in &picked {
         let id = graph.add(n.kind.clone(), [n.pos[0] + at[0] - c[0], n.pos[1] + at[1] - c[1]]);
         map.insert(*old, id);
     }
-    let internal: Vec<_> = graph.edges.iter().filter_map(|e| Some((*map.get(&e.from)?, *map.get(&e.to)?, e.port))).collect();
+    let internal: Vec<_> = src.edges.iter().filter_map(|e| Some((*map.get(&e.from)?, *map.get(&e.to)?, e.port))).collect();
     for (from, to, port) in internal {
         graph.connect(from, to, port);
     }
     map.into_values().collect()
+}
+
+/// The selection as text for the clipboard: a small graph of the selected nodes and the links between
+/// them (the output nodes are left out). None when nothing copyable is selected.
+pub fn clipboard_text(graph: &Graph, nodes: &BTreeSet<NodeId>) -> Option<String> {
+    let mut sub = graph.clone();
+    let keep: Vec<_> = nodes.iter().copied().filter(|id| graph.nodes.get(id).is_some_and(|n| !matches!(n.kind, NodeKind::OutDensity | NodeKind::OutNormal))).collect();
+    if keep.is_empty() {
+        return None;
+    }
+    sub.nodes.retain(|id, _| keep.contains(id));
+    sub.edges.retain(|e| keep.contains(&e.from) && keep.contains(&e.to));
+    Some(sub.to_json())
+}
+
+/// Pastes clipboard text made by `clipboard_text` (from this or another Noiser) centred on `at`.
+/// Returns the new nodes; empty when the text is not a graph.
+pub fn paste_text(graph: &mut Graph, text: &str, at: [f32; 2]) -> BTreeSet<NodeId> {
+    match Graph::from_json(text) {
+        Ok(src) => {
+            let all: BTreeSet<NodeId> = src.nodes.iter().filter(|(_, n)| !matches!(n.kind, NodeKind::OutDensity | NodeKind::OutNormal)).map(|(id, _)| *id).collect();
+            merge(graph, &src, &all, at)
+        }
+        Err(_) => BTreeSet::new(),
+    }
 }
 
 /// The add-menu entries whose label contains `query` (case-insensitive); all of them when it is empty.
@@ -705,6 +749,19 @@ mod tests {
         assert!(!g.edges.iter().any(|e| e.from == ids[1]));
         let c = ids.iter().fold(0.0, |acc, id| acc + g.nodes[id].pos[0] + NODE_W * 0.5) / 2.0;
         assert!((c - 1000.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn clipboard_round_trip_pastes_nodes_and_links() {
+        let g = Graph::default_graph(); // 0 Position -> 1 Noise -> 2 OutDensity, 3 OutNormal
+        let text = clipboard_text(&g, &BTreeSet::from([0, 1, 2])).unwrap();
+        let mut other = Graph::default();
+        let new = paste_text(&mut other, &text, [100.0, 100.0]);
+        assert_eq!(new.len(), 2, "the output node is not copied");
+        let ids: Vec<_> = new.iter().copied().collect();
+        assert!(other.edges.iter().any(|e| e.from == ids[0] && e.to == ids[1]));
+        assert!(paste_text(&mut other, "not a graph", [0.0; 2]).is_empty());
+        assert!(clipboard_text(&g, &BTreeSet::from([2])).is_none());
     }
 
     /// Drag a wire from Position's output onto empty space, then pick Math from the menu.

@@ -772,10 +772,11 @@ fn node_props(ui: &mut egui::Ui, kind: &mut NodeKind) {
 }
 
 const PICKS_KEY: &str = "node_picks";
-const SHORTCUTS: [(&str, &str); 10] = [
+const SHORTCUTS: [(&str, &str); 11] = [
     ("Ctrl+Z", "Undo"),
     ("Ctrl+Y / Ctrl+Shift+Z", "Redo"),
     ("Ctrl+D", "Duplicate the selected nodes at the cursor (graph editor)"),
+    ("Ctrl+C / Ctrl+V", "Copy the selection, paste at the cursor; works between two Noiser windows"),
     ("Delete / Backspace", "Delete the selected nodes (graph editor)"),
     ("Right-click canvas", "Add node menu; type to search, Enter adds the first match"),
     ("Drag from a pin to empty space", "Add a node already wired up"),
