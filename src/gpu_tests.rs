@@ -556,6 +556,14 @@ fn curve_matches_reference() {
     near(curve(0.125, Smooth), 1.0 + 2.0 * (3.0 * 0.0625 - 2.0 * 0.015625), "smoothstep off the midpoint");
     near(curve(0.25, Step), 1.0, "step holds the left value");
     near(curve(0.75, Step), 3.0, "step second segment");
+    // Cubic: slopes 4 (end), 0 (a peak), -6 (end); hand-computed Hermite values.
+    near(curve(0.25, Cubic), 2.25, "cubic first segment");
+    near(curve(0.75, Cubic), 1.875, "cubic second segment");
+    near(curve(0.5, Cubic), 3.0, "cubic passes through a point");
+    for i in 0..=40 {
+        let v = curve(i as f32 / 40.0, Cubic);
+        assert!((-1e-4..=3.0001).contains(&v), "cubic overshoots its points at {i}: {v}");
+    }
 }
 
 #[test]

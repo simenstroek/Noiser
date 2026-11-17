@@ -75,9 +75,13 @@ when `clamp` is true. Type float.
 
 ### `curve`
 `value` (op id or a number, float), `points` (a list of `[x, y]`, already sorted by x, 1 to 16 of them) and
-`mode` (`linear`, `smooth` or `step`). Below the first x the result is the first y and above the last x the
+`mode` (`linear`, `smooth`, `step` or `cubic`). Below the first x the result is the first y and above the last x the
 last y. Between points i and i+1, with `t = (value − x_i) / (x_i+1 − x_i)`: `linear` gives `mix(y_i, y_i+1, t)`,
-`smooth` the same with `t` replaced by `t²(3 − 2t)`, and `step` gives `y_i`. Type float.
+`smooth` the same with `t` replaced by `t²(3 − 2t)`, `step` gives `y_i`, and `cubic` is a cubic Hermite
+spline with `h = x_i+1 − x_i`, `t` as above and slopes `m_k` at the points: with secants `d_k`, an end point
+has `m = d` of its one segment, an inner point has `m = 0` if `d_k−1·d_k ≤ 0`, else the weighted harmonic mean
+`(w1 + w2) / (w1/d_k−1 + w2/d_k)` with `w1 = 2h_k + h_k−1`, `w2 = h_k + 2h_k−1` (so the curve never leaves the
+range of its points); the value is `(2t³−3t²+1)·y_i + (t³−2t²+t)·h·m_i + (−2t³+3t²)·y_i+1 + (t³−t²)·h·m_i+1`. Type float.
 
 ### `grid`
 `position` (op id or `null` for `p`), `counts` `[nx, ny, nz]` (cells per tile on each axis) and `reference`

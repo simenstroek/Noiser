@@ -14,15 +14,18 @@ pub enum CurveMode {
     Smooth,
     /// Each y holds until the next point.
     Step,
+    /// A smooth cubic through the points that never overshoots them (monotone cubic Hermite).
+    Cubic,
 }
 
 impl CurveMode {
-    pub const ALL: [CurveMode; 3] = [CurveMode::Linear, CurveMode::Smooth, CurveMode::Step];
+    pub const ALL: [CurveMode; 4] = [CurveMode::Linear, CurveMode::Smooth, CurveMode::Step, CurveMode::Cubic];
     pub fn label(self) -> &'static str {
         match self {
             CurveMode::Linear => "Linear",
             CurveMode::Smooth => "Smooth",
             CurveMode::Step => "Step",
+            CurveMode::Cubic => "Cubic",
         }
     }
 }

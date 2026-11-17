@@ -201,7 +201,26 @@ fn smax3(a: vec3f, b: vec3f, k: f32) -> vec3f { return -smin3(-a, -b, k); }
 
 // Linear map of x from [a, b] to [c, d]; an empty input range gives c.
 // A curve through the points stored at P[base...] as (x, y) pairs, sorted by x; n points.
-// mode: 0 linear, 1 smooth (smoothstep), 2 step.
+// mode: 0 linear, 1 smooth (smoothstep), 2 step, 3 cubic (monotone cubic Hermite, Fritsch-Butland
+// slopes, so the curve never overshoots its points).
+fn curve_secant(base: u32, i: u32) -> f32 {
+    return (P[base + 2u * i + 3u] - P[base + 2u * i + 1u]) / max(P[base + 2u * i + 2u] - P[base + 2u * i], 1e-12);
+}
+
+fn curve_slope(base: u32, n: u32, k: u32) -> f32 {
+    if (n < 2u) { return 0.0; }
+    if (k == 0u) { return curve_secant(base, 0u); }
+    if (k == n - 1u) { return curve_secant(base, n - 2u); }
+    let d0 = curve_secant(base, k - 1u);
+    let d1 = curve_secant(base, k);
+    if (d0 * d1 <= 0.0) { return 0.0; }
+    let h0 = P[base + 2u * k] - P[base + 2u * (k - 1u)];
+    let h1 = P[base + 2u * (k + 1u)] - P[base + 2u * k];
+    let w0 = 2.0 * h1 + h0;
+    let w1 = h1 + 2.0 * h0;
+    return (w0 + w1) / (w0 / d0 + w1 / d1);
+}
+
 fn curve_eval(x: f32, base: u32, n: u32, mode: u32) -> f32 {
     if (x <= P[base]) { return P[base + 1u]; }
     for (var i = 1u; i < n; i++) {
@@ -213,6 +232,13 @@ fn curve_eval(x: f32, base: u32, n: u32, mode: u32) -> f32 {
             if (mode == 2u) { return y0; }
             var t = (x - x0) / max(x1 - x0, 1e-12);
             if (mode == 1u) { t = t * t * (3.0 - 2.0 * t); }
+            if (mode == 3u) {
+                let h = x1 - x0;
+                let t2 = t * t;
+                let t3 = t2 * t;
+                return (2.0 * t3 - 3.0 * t2 + 1.0) * y0 + (t3 - 2.0 * t2 + t) * h * curve_slope(base, n, i - 1u)
+                     + (-2.0 * t3 + 3.0 * t2) * y1 + (t3 - t2) * h * curve_slope(base, n, i);
+            }
             return mix(y0, y1, t);
         }
     }
