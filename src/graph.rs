@@ -730,6 +730,39 @@ impl Graph {
     }
 
     /// Position → Perlin → Density, plus an unconnected Normal output.
+    /// Names of the example graphs offered by File > New from template.
+    pub const TEMPLATES: [&'static str; 5] = ["Clouds", "Ridged mountains", "Cracked rock", "Brick wall", "Gyroid foam"];
+
+    /// An example graph, wired to both outputs. Unknown names give the default graph.
+    pub fn template(name: &str) -> Self {
+        let mut g = Graph::default();
+        let noise = |kind, scale: f32, octaves| NodeKind::Noise(NoiseParams { kind, scale, octaves, ..NoiseParams::default() });
+        let last = match name {
+            "Clouds" => g.add(noise(NoiseKind::Perlin, 4.0, 5), [200.0, 0.0]),
+            "Ridged mountains" => {
+                let n = g.add(noise(NoiseKind::Simplex, 4.0, 6), [200.0, 0.0]);
+                let r = g.add(NodeKind::Math { op: MathOp::Ridge, a: 0.0, b: 0.0, c: 0.5 }, [400.0, 0.0]);
+                g.connect(n, r, 0);
+                r
+            }
+            "Cracked rock" => {
+                let cells = g.add(NodeKind::Noise(NoiseParams { kind: NoiseKind::Worley, feature: WorleyFeature::F2MinusF1, scale: 6.0, ..NoiseParams::default() }), [200.0, 0.0]);
+                let grain = g.add(noise(NoiseKind::Simplex, 12.0, 4), [200.0, 200.0]);
+                let sum = g.add(NodeKind::Math { op: MathOp::Add, a: 0.0, b: 0.0, c: 0.5 }, [400.0, 80.0]);
+                g.connect(cells, sum, 0);
+                g.connect(grain, sum, 1);
+                sum
+            }
+            "Brick wall" => g.add(NodeKind::Pattern(PatternParams::for_kind(PatternKind::Bricks)), [200.0, 0.0]),
+            "Gyroid foam" => g.add(NodeKind::Pattern(PatternParams::for_kind(PatternKind::Gyroid)), [200.0, 0.0]),
+            _ => return Graph::default_graph(),
+        };
+        let out = g.add(NodeKind::OutDensity, [600.0, 0.0]);
+        g.add(NodeKind::OutNormal, [600.0, 120.0]);
+        g.connect(last, out, 0);
+        g
+    }
+
     pub fn default_graph() -> Self {
         let mut g = Graph::default();
         let pos = g.add(NodeKind::Position, [0.0, 0.0]);

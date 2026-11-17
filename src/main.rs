@@ -966,6 +966,18 @@ impl eframe::App for App {
                         self.editor.preview = None;
                         self.path = None;
                     }
+                    ui.menu_button("New from template", |ui| {
+                        for name in Graph::TEMPLATES {
+                            if ui.button(name).clicked() {
+                                self.graph = Graph::template(name);
+                                self.saved = self.graph.clone();
+                                self.editor.selected.clear();
+                                self.editor.preview = None;
+                                self.path = None;
+                                ui.close();
+                            }
+                        }
+                    });
                     if ui.button("Open…").clicked() {
                         self.open();
                     }

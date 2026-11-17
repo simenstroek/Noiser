@@ -376,6 +376,15 @@ mod tests {
     use super::*;
     use crate::graph::{MathOp, NoiseParams};
 
+    #[test]
+    fn every_template_is_a_valid_graph_that_compiles() {
+        for name in Graph::TEMPLATES {
+            let g = Graph::template(name);
+            assert!(Graph::from_json(&g.to_json()).is_ok(), "{name}");
+            validate(&compile(&g).unwrap());
+        }
+    }
+
     /// Parses and validates a full shader made of the noise lib, the generated graph, and a stub entry point.
     fn validate(c: &Compiled) {
         let src = format!(
