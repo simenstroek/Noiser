@@ -83,6 +83,8 @@ impl Mesh {
             .iter()
             .map(|t| [remap[t[0] as usize], remap[t[1] as usize], remap[t[2] as usize]])
             .filter(|t| t[0] != t[1] && t[1] != t[2] && t[0] != t[2])
+            // A vertex with NaN or infinite coordinates would poison the bounds and the distance grid.
+            .filter(|t| t.iter().all(|&i| positions[i as usize].iter().all(|x| x.is_finite())))
             .collect();
         Mesh { positions, triangles }
     }
@@ -182,6 +184,16 @@ pub mod shapes {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn triangles_with_non_finite_vertices_are_dropped() {
+        let mut m = shapes::icosphere(1.0, 1);
+        let before = m.triangles.len();
+        m.positions[0][2] = f32::NAN;
+        let w = m.welded();
+        assert!(w.triangles.len() < before && !w.triangles.is_empty());
+        assert!(w.triangles.iter().all(|t| t.iter().all(|&i| w.positions[i as usize].iter().all(|x| x.is_finite()))));
+    }
 
     #[test]
     fn welding_merges_split_vertices_and_keeps_the_surface() {
