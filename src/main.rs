@@ -1171,12 +1171,18 @@ impl eframe::App for App {
                 match sel.as_slice() {
                     [id] if self.graph.nodes.contains_key(id) => {
                         let node = self.graph.nodes.get_mut(id).unwrap();
+                        let has_output_kind = editor::has_output(&node.kind);
                         ui.heading(editor::title(&node.kind));
                         node_props(ui, &mut node.kind);
                         // Below the controls: appearing above them mid-drag shifted the slider out from
                         // under the cursor and ended the drag.
                         if let Some(Tiling::Broken(why)) = tiling.get(id) {
                             ui.colored_label(editor::ORANGE, format!("Does not tile: {why}"));
+                        }
+                        let (lo, hi) = self.graph.node_range(*id);
+                        if has_output_kind {
+                            let show = |x: f32| if x.is_finite() { format!("{x:.3}") } else if x < 0.0 { "-∞".into() } else { "∞".into() };
+                            ui.weak(format!("Output stays within {} … {}", show(lo), show(hi)));
                         }
                         cache_props(ui, &mut self.graph, *id, &tiling, self.caches.bytes());
                     }

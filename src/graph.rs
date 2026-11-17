@@ -1090,6 +1090,11 @@ impl Graph {
         }
     }
 
+    /// The interval a node's output stays within (infinite ends when unbounded); vectors use one interval for all components.
+    pub fn node_range(&self, id: NodeId) -> Range {
+        if self.nodes.contains_key(&id) { self.range_of(id, &mut Vec::new()) } else { (0.0, 0.0) }
+    }
+
     fn range_of(&self, id: NodeId, stack: &mut Vec<NodeId>) -> Range {
         if stack.contains(&id) {
             return UNBOUNDED;
