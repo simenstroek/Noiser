@@ -144,6 +144,8 @@ fn palette() -> Vec<(&'static str, NodeKind)> {
             ("Checker", NodeKind::Pattern(crate::graph::PatternParams::for_kind(crate::graph::PatternKind::Checker))),
             ("Stripes", NodeKind::Pattern(crate::graph::PatternParams::for_kind(crate::graph::PatternKind::Stripes))),
             ("Gyroid", NodeKind::Pattern(crate::graph::PatternParams::for_kind(crate::graph::PatternKind::Gyroid))),
+            ("Fractal", NodeKind::Pattern(crate::graph::PatternParams::for_kind(crate::graph::PatternKind::Fractal))),
+            ("Truchet", NodeKind::Pattern(crate::graph::PatternParams::for_kind(crate::graph::PatternKind::Truchet))),
             ("Position", NodeKind::Position),
             ("Normal", NodeKind::Normal { flip: false }),
             ("Density Output", NodeKind::OutDensity),

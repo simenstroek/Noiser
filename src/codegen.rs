@@ -85,8 +85,8 @@ pub fn compile_with(g: &Graph, caches: &BTreeMap<NodeId, u32>) -> Result<Compile
                 params.extend(counts);
                 params.push(if *corners { 1.0 } else { 0.0 });
             }
-            // 18 slots: counts (3), steps, gap, bevel, output, 2D, axis, seed (-1 = global), variant,
-            // radius, profile, direction (3), width, softness. Each kind reads the ones it uses.
+            // 19 slots: counts (3), steps, gap, bevel, output, 2D, axis, seed (-1 = global), variant,
+            // radius, profile, direction (3), width, softness, iterations. Each kind reads the ones it uses.
             NodeKind::Pattern(p) => params.extend([
                 p.counts[0],
                 p.counts[1],
@@ -106,6 +106,7 @@ pub fn compile_with(g: &Graph, caches: &BTreeMap<NodeId, u32>) -> Result<Compile
                 p.dir[2],
                 p.width,
                 p.softness,
+                p.iterations as f32,
             ]),
             NodeKind::Noise(n) => params.extend([
                 n.scale,
@@ -297,6 +298,8 @@ impl Gen<'_> {
                     PatternKind::Checker => "checker",
                     PatternKind::Stripes => "stripes",
                     PatternKind::Gyroid => "gyroid",
+                    PatternKind::Fractal => "fractal",
+                    PatternKind::Truchet => "truchet",
                 };
                 (Ty::F, format!("{function}({q}, {s}u)"))
             }

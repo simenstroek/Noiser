@@ -81,7 +81,7 @@ when `clamp` is true. Type float.
 corners for `center`, the cell centres for `corner`). Tiles when every count is a whole number. Type float.
 
 ### `pattern`
-`kind` selects the pattern; version 1 has `bricks`, `checker`, `stripes`, `dimples` and `gyroid`. Common fields: `position` (op id or `null` for
+`kind` selects the pattern; version 1 has `bricks`, `checker`, `stripes`, `dimples`, `gyroid`, `fractal` and `truchet`. Common fields: `position` (op id or `null` for
 `p`) and `seed` (resolved, as for `noise`). Output is a float in [-1, 1].
 
 **`bricks`**: a brick wall. Fields `counts` `[nx, ny, nz]`, `mode2d`, `axis`, `steps`, `gap`,
@@ -135,6 +135,23 @@ For the cubic lattice `distance` equals the `grid` op's centre distance.
 `c.x + c.y + c.z` (1, Schwarz P, peak 3) or `s.x s.y s.z + s.x c.y c.z + c.x s.y c.z + c.x c.y s.z` (2, diamond, peak √2);
 `field = clamp(f / peak, −1, 1)`. `distance` returns the field; `shape` returns
 `clamp((|field| − w) / (1 − w) · 2 − 1, −1, 1)` with `w = clamp(width, 0, 0.999)`.
+
+**`fractal`**: fields `counts` (cells per tile, whole to tile), `variant` (0 Menger sponge, 1 Sierpinski
+tetrahedron), `iterations` (1 to 6; values above 6 are clamped). With `p = (fract(q · counts) − ½) · 2` (the
+cell as [−1, 1]³): `menger(p)` starts from the cube's distance `|max(|p| − 1, 0)| + min(max(q.x, q.y, q.z), 0)` and for each
+iteration `m` (with `s` starting at 1) takes `a = (p·s mod 2) − 1`, multiplies `s` by 3, `r = |1 − 3|a||` and sets
+`d = max(d, (min(max(r.x, r.y), max(r.y, r.z), max(r.z, r.x)) − 1) / s)`. `sierpinski(p)` folds
+`z` each iteration (if `z.x + z.y < 0` then `z.xy = −z.yx`; if `z.x + z.z < 0` then `z.xz = −z.zx`; if `z.y + z.z < 0`
+then `z.zy = −z.yz`, applied in that order) and sets `z = 2z − 1`, then returns `(max(−z.x − z.y − z.z, z.x + z.y − z.z,
+−z.x + z.y + z.z, z.x − z.y + z.z) − 1) / √3`. The result is `clamp(d · k, −1, 1)` with `k = 3^iterations` for the sponge and
+3 for the tetrahedron: −1 in the solid, +1 in the empty space.
+
+**`truchet`**: fields `counts`, `mode2d`, `axis`, `variant` (0 arcs, 1 diagonals), `width`, `softness`, `seed`. The
+plane is the row and stacking axes of `mode2d` (see `bricks`), extruded along the third. Per cell,
+`flip = hash3(wrapped cell, seed).x > 0.5` (the cell wrapped by `counts` as for `bricks`, the extrusion axis 0),
+`uv = fract(x)` on the two axes with `uv.x = 1 − uv.x` when flipped. Arcs: `d = min(|‖uv‖ − ½|, |‖uv − (1,1)‖ − ½|)`;
+diagonals: `d = |uv.x − uv.y| / √2`. With `h = ½ · width`, the result is
+`−1 + 2 · ramp(h(1 − softness), h(1 + softness), d)`. Version 1 has no 3D pipes variant.
 
 ### `noise`
 Fields: `kind`, `position` (op id or `null` for `p`), `scale`, `normalize`, `octaves`,

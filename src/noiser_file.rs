@@ -78,7 +78,7 @@ pub fn ops(g: &Graph, seed: u32) -> Result<Value, String> {
                     json!({"op": "pattern", "kind": p.kind.file_name(), "position": input(id, 0), "counts": p.counts, "mode2d": p.mode2d,
                            "axis": p.axis, "steps": p.steps, "gap": p.gap, "bevel": p.bevel, "output": output,
                            "variant": p.variant, "radius": p.radius, "profile": p.profile, "dir": p.dir,
-                           "width": p.width, "softness": p.softness, "seed": p.seed.unwrap_or(seed)})
+                           "width": p.width, "softness": p.softness, "iterations": p.iterations, "seed": p.seed.unwrap_or(seed)})
                 }
                 NodeKind::Normal { flip } => json!({"op": "normal", "field": input(id, 0), "flip": flip}),
                 NodeKind::Noise(n) => {

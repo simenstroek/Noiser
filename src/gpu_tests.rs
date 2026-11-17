@@ -714,6 +714,9 @@ fn render_pattern_images() {
         ("stripes_square", single_node_graph(NodeKind::Pattern({ let mut p = crate::graph::PatternParams::for_kind(crate::graph::PatternKind::Stripes); p.variant = 3; p.dir = [1.0, 1.0, 0.0]; p.counts[0] = 6.0; p.width = 0.4; p }))),
         ("dimples_golf", single_node_graph(NodeKind::Pattern(crate::graph::PatternParams::for_kind(crate::graph::PatternKind::Dimples)))),
         ("gyroid_shell", single_node_graph(NodeKind::Pattern({ let mut p = crate::graph::PatternParams::for_kind(crate::graph::PatternKind::Gyroid); p.output = PatternOutput::Shape; p.counts = [3.0; 3]; p }))),
+        ("menger", single_node_graph(NodeKind::Pattern({ let mut p = crate::graph::PatternParams::for_kind(crate::graph::PatternKind::Fractal); p.iterations = 4; p }))),
+        ("sierpinski", single_node_graph(NodeKind::Pattern({ let mut p = crate::graph::PatternParams::for_kind(crate::graph::PatternKind::Fractal); p.variant = 1; p.iterations = 4; p }))),
+        ("truchet_arcs", single_node_graph(NodeKind::Pattern(crate::graph::PatternParams::for_kind(crate::graph::PatternKind::Truchet)))),
     ];
     for (name, g) in graphs {
         let ev = export::Evaluator::new(&gpu.device, &gpu.queue, &g, 0).unwrap();
@@ -1081,6 +1084,69 @@ mod pattern_family_tests {
                 check(&gpu, &pattern(Gyroid, |p| { p.variant = surface; p.output = output; }), &format!("gyroid {surface} {output:?}"), true);
             }
         }
+        for variant in 0..2 {
+            for iterations in [1, 2, 4, 6] {
+                for counts in [[1.0; 3], [2.0, 3.0, 1.0]] {
+                    check(&gpu, &pattern(Fractal, |p| { p.variant = variant; p.iterations = iterations; p.counts = counts; }), &format!("fractal {variant} x{iterations} {counts:?}"), false);
+                }
+            }
+        }
+        for variant in 0..2 {
+            for flat in [true, false] {
+                check(&gpu, &pattern(Truchet, |p| { p.variant = variant; p.mode2d = flat; }), &format!("truchet {variant} 2d={flat}"), true);
+            }
+        }
+    }
+
+    #[test]
+    fn fractals_and_truchet_tiles_have_their_known_points() {
+        use PatternKind::*;
+        let Some(gpu) = gpu() else { return eprintln!("no GPU adapter; skipping") };
+        // A Menger sponge: the middle of the cell and of a face are holes, a corner is solid, at any depth.
+        for iterations in 1..=5 {
+            let g = pattern(Fractal, |p| { p.variant = 0; p.iterations = iterations; });
+            let v = eval(&gpu, &g, &[[0.5, 0.5, 0.5], [0.0005, 0.0005, 0.0005], [0.5, 0.5, 0.02]]); // the corner point is in the corner cube at every depth
+            assert!(v[0] > 0.99, "depth {iterations}: the middle should be empty, got {}", v[0]);
+            assert!(v[1] < 0.0, "depth {iterations}: a corner should be solid, got {}", v[1]);
+            assert!(v[2] > 0.99, "depth {iterations}: the middle of a face is the mouth of a through-hole, got {}", v[2]);
+        }
+        // More iterations carve out more: the share of solid space shrinks (a sponge keeps 20/27 of its cube each time).
+        let solid_share = |iterations: u32| {
+            let v = eval(&gpu, &pattern(Fractal, |p| { p.variant = 0; p.iterations = iterations; }), &points(30000, 6));
+            v.iter().filter(|x| **x < 0.0).count() as f32 / v.len() as f32
+        };
+        let (s1, s2, s3) = (solid_share(1), solid_share(2), solid_share(3));
+        assert!(s1 > s2 && s2 > s3, "solid share should fall with depth: {s1} {s2} {s3}");
+        assert!((s1 - 20.0 / 27.0).abs() < 0.03, "one level keeps about 20/27 of the cube, got {s1}");
+
+        // Truchet arcs pass through the midpoint of every cell edge whichever way the cell is flipped,
+        // and are empty at the cell centre (width 0.3, so the line is 0.15 from its centre line).
+        let n = 6.0;
+        let arcs = pattern(Truchet, |_| {});
+        let mut pts = Vec::new();
+        for (i, j) in [(0.0, 0.0), (1.0, 3.0), (4.0, 2.0), (5.0, 5.0)] {
+            for (dx, dy) in [(0.5, 0.0), (0.0, 0.5), (1.0, 0.5), (0.5, 1.0)] {
+                pts.push([(i + dx) / n, (j + dy) / n, 0.37]);
+            }
+            pts.push([(i + 0.5) / n, (j + 0.5) / n, 0.37]);
+        }
+        let v = eval(&gpu, &arcs, &pts);
+        for (k, chunk) in v.chunks(5).enumerate() {
+            for e in 0..4 {
+                near(chunk[e], -1.0, &format!("cell {k}: an arc should cross the edge midpoint {e}"));
+            }
+            near(chunk[4], 1.0, &format!("cell {k}: the centre is off the arcs"));
+        }
+        // Diagonals cross at the centre of every cell and are empty at the midpoint of an edge.
+        let diagonals = pattern(Truchet, |p| p.variant = 1);
+        let v = eval(&gpu, &diagonals, &[[0.5 / n, 0.5 / n, 0.0], [3.5 / n, 2.5 / n, 0.0], [0.5 / n, 0.0, 0.0]]);
+        near(v[0], -1.0, "diagonal through a cell centre");
+        near(v[1], -1.0, "diagonal through another cell centre");
+        near(v[2], 1.0, "no diagonal at an edge midpoint");
+        // Same seed, same tiles; another seed flips some cells.
+        let seeded = |seed: u32| eval(&gpu, &pattern(Truchet, |p| p.seed = Some(seed)), &points(3000, 2));
+        assert_eq!(seeded(1), seeded(1));
+        assert!(seeded(1).iter().zip(seeded(2)).any(|(a, b)| (a - b).abs() > 0.5), "another seed should change the layout");
     }
 
     #[test]

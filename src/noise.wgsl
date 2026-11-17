@@ -348,8 +348,8 @@ fn mesh_mask(t: texture_3d<f32>, p: vec3f, origin: vec3f, voxel: f32, blo: vec3f
     return sum;
 }
 
-// Pattern params are at P[s..s+18]: counts (3), steps, gap, bevel, output, 2D, axis, seed (-1 = global),
-// variant, radius, profile, direction (3), width, softness. See PatternParams.
+// Pattern params are at P[s..s+19]: counts (3), steps, gap, bevel, output, 2D, axis, seed (-1 = global),
+// variant, radius, profile, direction (3), width, softness, iterations. See PatternParams.
 
 // A checkerboard. counts are cells per tile (one period of the wave spans two cells, so tiling needs
 // even counts); softness widens the edges between cells. In 2D the pattern is extruded along `axis`.
@@ -461,3 +461,85 @@ fn gyroid(q: vec3f, s: u32) -> f32 {
 }
 const GYROID_PEAK: f32 = 1.5;
 const DIAMOND_PEAK: f32 = 1.4142136;
+
+// Menger sponge (IQ) in the cube [-1, 1]³: negative inside the solid, positive in the holes.
+fn menger(p: vec3f, iterations: u32) -> f32 {
+    let q = abs(p) - vec3f(1.0);
+    var d = length(max(q, vec3f(0.0))) + min(max(q.x, max(q.y, q.z)), 0.0); // the cube
+    var s = 1.0;
+    for (var m = 0u; m < iterations; m++) {
+        let a = p * s - 2.0 * floor(p * s / 2.0) - vec3f(1.0); // mod(p * s, 2) - 1
+        s *= 3.0;
+        let r = abs(vec3f(1.0) - 3.0 * abs(a));
+        let hole = (min(max(r.x, r.y), min(max(r.y, r.z), max(r.z, r.x))) - 1.0) / s;
+        d = max(d, hole);
+    }
+    return d;
+}
+
+// Sierpinski tetrahedron by tetrahedral folding (Syntopia): each iteration folds the point into the
+// region of one vertex of the tetrahedron with vertices (1,1,1), (-1,-1,1), (1,-1,-1), (-1,1,-1) and
+// scales by 2 about that vertex; what is left is tested against the tetrahedron itself. The distance
+// is in the folded space, so edges stay crisp at any depth.
+fn sierpinski(p_in: vec3f, iterations: u32) -> f32 {
+    var z = p_in;
+    for (var n = 0u; n < iterations; n++) {
+        if (z.x + z.y < 0.0) { z = vec3f(-z.y, -z.x, z.z); }
+        if (z.x + z.z < 0.0) { z = vec3f(-z.z, z.y, -z.x); }
+        if (z.y + z.z < 0.0) { z = vec3f(z.x, -z.z, -z.y); }
+        z = z * 2.0 - vec3f(1.0);
+    }
+    let faces = max(max(dot(z, vec3f(-1.0, -1.0, -1.0)), dot(z, vec3f(1.0, 1.0, -1.0))), max(dot(z, vec3f(-1.0, 1.0, 1.0)), dot(z, vec3f(1.0, -1.0, 1.0))));
+    return (faces - 1.0) * 0.57735027;
+}
+
+// A repeating fractal in each cell: variant 0 Menger sponge, 1 Sierpinski tetrahedron; counts are
+// cells per tile (whole numbers tile), iterations how deep it goes. Output 1 is the shape (-1 solid,
+// +1 empty) from a distance estimate scaled to the cell; output 0 is that estimate unclamped by
+// the shape threshold, i.e. the signed distance in units of the cell.
+fn fractal(q: vec3f, s: u32) -> f32 {
+    let n = max(vec3f(P[s], P[s + 1u], P[s + 2u]), vec3f(1e-3));
+    let variant = u32(P[s + 10u]);
+    let iterations = min(u32(max(P[s + 18u], 1.0)), 6u);
+    let p = (fract(q * n) - vec3f(0.5)) * 2.0; // the cell as [-1, 1]³
+    var d = menger(p, iterations);
+    // Features are 3^-iterations across, so scale the estimate to keep edges crisp at any depth.
+    var scale = pow(3.0, f32(iterations));
+    if (variant == 1u) { d = sierpinski(p, iterations); scale = 3.0; }
+    return clamp(d * scale, -1.0, 1.0);
+}
+
+// Truchet tiles in the plane of two axes (extruded along the third in 2D mode): each cell has one
+// of two orientations at random, and the lines join up across cell borders. Variant 0 draws quarter
+// circles of radius 1/2 around two opposite corners, 1 draws a diagonal. `width` is the line's
+// width as a share of a cell, `softness` how soft its edges are. -1 on the line, +1 away from it.
+fn truchet(q: vec3f, s: u32) -> f32 {
+    let counts = max(vec3f(P[s], P[s + 1u], P[s + 2u]), vec3f(1e-3));
+    let flat2d = P[s + 7u] > 0.5;
+    let axis = u32(P[s + 8u]);
+    let variant = u32(P[s + 10u]);
+    let width = P[s + 16u];
+    let soft = P[s + 17u];
+    let seed = select(u.seed, u32(P[s + 9u]), P[s + 9u] >= 0.0);
+    var r = 0u;
+    var st = 1u;
+    var ly = 2u;
+    if (flat2d && axis == 0u) { r = 1u; st = 2u; ly = 0u; }
+    else if (flat2d && axis == 1u) { r = 0u; st = 2u; ly = 1u; }
+    let x = q * counts;
+    let cell = floor(x);
+    var id = vec3i(cell);
+    if (flat2d) { id[ly] = 0; }
+    let n = vec3i(max(counts, vec3f(1.0)) + 0.5);
+    let flip = hash01(((id % n) + n) % n, seed).x > 0.5;
+    var uv = vec2f(fract(x[r]), fract(x[st]));
+    if (flip) { uv.x = 1.0 - uv.x; }
+    var d = 0.0;
+    if (variant == 1u) {
+        d = abs(uv.x - uv.y) * 0.70710678; // distance to the diagonal
+    } else {
+        d = min(abs(length(uv) - 0.5), abs(length(uv - vec2f(1.0)) - 0.5)); // to the nearer quarter circle
+    }
+    let half_width = 0.5 * width;
+    return -1.0 + 2.0 * ramp01(half_width * (1.0 - soft), half_width * (1.0 + soft), d);
+}
