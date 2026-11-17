@@ -36,6 +36,8 @@ struct Preview {
     seed: u32,
     step_scale: f32,
     max_steps: u32,
+    /// Fraction of the view's pixels each side the 3D view is rendered at (viewport only).
+    render_scale: f32,
     /// Viewport material (never exported).
     color: [f32; 3],
     specular: f32,
@@ -60,6 +62,7 @@ impl Default for Preview {
             // Overshoot is caught and refined, so this only needs to avoid stepping through thin features.
             step_scale: 0.9,
             max_steps: 300,
+            render_scale: 1.0,
             color: [0.8, 0.78, 0.74],
             specular: 0.0,
             roughness: 0.5,
@@ -428,7 +431,7 @@ impl App {
             tile_size: pv.tile_size,
             prim_size: pv.prim_size,
             // Logical points are fine here: only the ratio to the view height matters.
-            pixel: 2.0 / view3d.height().max(1.0),
+            pixel: 2.0 / (view3d.height() * pv.render_scale).max(1.0),
             cloud_density: pv.cloud_density,
             mode: pv.cloud as u32,
             prim: if pv.prim == meshapp::MESH_PRIM && self.mesh.is_none() { 0 } else { pv.prim },
@@ -558,6 +561,14 @@ fn preview_props(ui: &mut egui::Ui, pv: &mut Preview, mesh_loaded: bool) {
         row(ui, &mut pv.cloud_density, d.cloud_density, |ui, v| _ = ui.add(egui::Slider::new(v, 0.5..=64.0).logarithmic(true).text("cloud density")));
     } else {
         row(ui, &mut pv.step_scale, d.step_scale, |ui, v| _ = ui.add(egui::Slider::new(v, 0.1..=1.0).text("step safety")));
+        row(ui, &mut pv.render_scale, d.render_scale, |ui, v| {
+            ui.horizontal(|ui| {
+                ui.label("render resolution");
+                for (s, label) in [(1.0, "Full"), (0.5, "Half"), (0.25, "Quarter")] {
+                    ui.selectable_value(v, s, label);
+                }
+            });
+        });
         row(ui, &mut pv.max_steps, d.max_steps, |ui, v| _ = ui.add(egui::Slider::new(v, 32..=600).logarithmic(true).text("max march steps")));
         ui.separator();
         ui.heading("Material (viewport only)");
@@ -1056,7 +1067,8 @@ impl eframe::App for App {
                     // Draw with whichever pipeline is installed, using its own parameter layout.
                     // Empty params: installed for a graph that has since changed again; wait for its successor.
                     if let Some((_, params)) = self.built.as_ref().filter(|b| !b.1.is_empty()) {
-                        let cb3d = view::View3d { uniforms, params: params.clone(), size: [px.x as u32, px.y as u32] };
+                        let scale = self.pv.render_scale;
+                        let cb3d = view::View3d { uniforms, params: params.clone(), size: [(px.x * scale) as u32, (px.y * scale) as u32] };
                         painter.add(egui_wgpu::Callback::new_paint_callback(r3d, cb3d));
                         let cbs = view::SliceView { uniforms, params: params.clone() };
                         painter.add(egui_wgpu::Callback::new_paint_callback(rslice, cbs));
