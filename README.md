@@ -30,12 +30,13 @@ with period 1 on every axis whenever its scales and counts are whole numbers. Ev
 a node that breaks tiling gets an orange outline and says why in the details panel.
 
 **Nodes**
-- **Noise**: Perlin, Simplex, Worley (F1, F2, F2 − F1 or a flat cell value, optionally fractal), White
-  and Blue. Scale, octaves, lacunarity, roughness, distortion, seed override, optional position input.
-- **Patterns**: *Grid* (distance to the nearest cell centre or corner) and *Bricks* (a staggered brick
-  wall: running bond or thirds, 2D extruded along an axis or 3D, with Distance, Shape and Cell value
-  outputs).
-- **Math**: add, subtract, multiply, divide, min, max, power, smooth min and max, dot product. The
+- **Noise**: Perlin, Simplex, Worley and Blue/White. Worley has F1, F2, F2 − F1, a flat cell value or exact
+  *cell edges*, a choice of Euclidean, Manhattan or Chebyshev distance, and a jitter control. Scale, octaves,
+  lacunarity, roughness, distortion, seed override, optional position input.
+- **Patterns**: *Grid* (distance to the nearest cell centre or corner), *Bricks* (running bond or thirds, 2D
+  or 3D), *Checker*, *Stripes*, *Dimples*, *Gyroid*, *Fractal* (Menger, Sierpinski), *Truchet* (arcs,
+  diagonals) and *Honeycomb*, with Distance, Shape and Cell value outputs where they make sense.
+- **Math**: add, subtract, multiply, divide, min, max, power, smooth min and max, dot product, absolute, ridge. The
   operator is a dropdown on the node (the mouse wheel over it steps through them). A float with a vector
   gives a vector.
 - **Remap** (with optional clamp), **Value**, **Position**, **Normal** (gradient of a field).
@@ -92,5 +93,5 @@ reported and the rest continue; nothing is ever overwritten. From a script:
 
 ## Roadmap
 
-Next: more pattern nodes (dimples, honeycomb, Truchet, stripes, checker, gyroid, fractals), then rendering and
-material settings for the viewport. See `PLAN.md` for the details.
+Next: a Curve node, Truchet pipes, then rendering and material settings for the viewport (march steps,
+lighting, material colour and roughness). See `PLAN.md` for the details.
