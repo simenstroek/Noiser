@@ -216,6 +216,37 @@ fn fractal(q: vec3f, s: u32) -> f32 {
     return clamp(d * scale, -1.0, 1.0);
 }
 
+// 3D Truchet pipes. Each cell joins its six face centres in three pairs of neighbouring faces, by
+// quarter circles of radius 1/2 around the edge shared by the two faces; one of the 8 possible
+// pairings is picked per cell. Every face centre gets exactly one pipe in each of the two cells
+// sharing it, and both meet the face at a right angle, so the pipes continue across cells.
+// Faces: 0 +x, 1 -x, 2 +y, 3 -y, 4 +z, 5 -z.
+fn truchet_pipes(x: vec3f, counts: vec3f, width: f32, soft: f32, seed: u32) -> f32 {
+    var pairs = array<u32, 48>(0u,2u,1u,4u,3u,5u, 0u,2u,1u,5u,3u,4u, 0u,3u,1u,4u,2u,5u, 0u,3u,1u,5u,2u,4u,
+                               0u,4u,1u,2u,3u,5u, 0u,4u,1u,3u,2u,5u, 0u,5u,1u,2u,3u,4u, 0u,5u,1u,3u,2u,4u);
+    let n = vec3i(max(counts, vec3f(1.0)) + 0.5);
+    let h = hash01(((vec3i(floor(x)) % n) + n) % n, seed).x;
+    let m = min(u32(h * 8.0), 7u) * 6u;
+    let p = fract(x) - vec3f(0.5); // from the cell centre, in cell units
+    var d = 1e9;
+    for (var k = 0u; k < 3u; k++) {
+        let fa = pairs[m + 2u * k];
+        let fb = pairs[m + 2u * k + 1u];
+        var da = vec3f(0.0);
+        var db = vec3f(0.0);
+        da[fa / 2u] = select(-1.0, 1.0, (fa & 1u) == 0u);
+        db[fb / 2u] = select(-1.0, 1.0, (fb & 1u) == 0u);
+        let v = p - 0.5 * (da + db);
+        let a = dot(v, da);
+        let b = dot(v, db);
+        let w = v - a * da - b * db;
+        let e = length(vec2f(a, b)) - 0.5;
+        d = min(d, sqrt(e * e + dot(w, w)));
+    }
+    let half_width = 0.5 * width;
+    return -1.0 + 2.0 * ramp01(half_width * (1.0 - soft), half_width * (1.0 + soft), d);
+}
+
 // Truchet tiles in the plane of two axes (extruded along the third in 2D mode): each cell has one
 // of two orientations at random, and the lines join up across cell borders. Variant 0 draws quarter
 // circles of radius 1/2 around two opposite corners, 1 draws a diagonal. `width` is the line's
@@ -228,6 +259,7 @@ fn truchet(q: vec3f, s: u32) -> f32 {
     let width = P[s + 16u];
     let soft = P[s + 17u];
     let seed = select(u.seed, u32(P[s + 9u]), P[s + 9u] >= 0.0);
+    if (variant == 2u) { return truchet_pipes(q * counts, counts, width, soft, seed); }
     var r = 0u;
     var st = 1u;
     var ly = 2u;

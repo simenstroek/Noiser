@@ -1075,12 +1075,15 @@ fn pattern_props(ui: &mut egui::Ui, p: &mut graph::PatternParams) {
             ui.weak("-1 in the solid, +1 in the empty space, from a distance estimate. Changing the iterations does not recompile the shader.");
         }
         PatternKind::Truchet => {
-            pattern_2d(ui, p);
-            pattern_counts(ui, p, ["cells", "cells", "cells"]);
             row(ui, &mut p.variant, d.variant, |ui, v| {
                 ui.selectable_value(v, 0, "Arcs");
                 ui.selectable_value(v, 1, "Diagonals");
+                ui.selectable_value(v, 2, "Pipes (3D)");
             });
+            if p.variant < 2 {
+                pattern_2d(ui, p);
+            }
+            pattern_counts(ui, p, ["cells", "cells", "cells"]);
             row(ui, &mut p.width, d.width, |ui, v| _ = ui.add(egui::Slider::new(v, 0.0..=1.0).text("line width")));
             row(ui, &mut p.softness, d.softness, |ui, v| _ = ui.add(egui::Slider::new(v, 0.0..=1.0).text("edge softness")));
             pattern_seed(ui, p, &d);

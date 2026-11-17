@@ -355,7 +355,7 @@ impl PatternParams {
     /// (axis along a row, axis rows stack along, axis of layers in 3D). In 2D mode the pattern is
     /// extruded along `axis` and the other two axes, in order, are the row and the stacking axis.
     pub fn axes(&self) -> (usize, usize, Option<usize>) {
-        if !self.mode2d {
+        if !self.mode2d || (self.kind == PatternKind::Truchet && self.variant == 2) {
             return (0, 1, Some(2));
         }
         match self.axis {

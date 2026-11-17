@@ -1119,7 +1119,7 @@ mod pattern_family_tests {
                 }
             }
         }
-        for variant in 0..2 {
+        for variant in 0..3 {
             for flat in [true, false] {
                 check(&gpu, &pattern(Truchet, |p| { p.variant = variant; p.mode2d = flat; }), &format!("truchet {variant} 2d={flat}"), true);
             }
@@ -1175,6 +1175,26 @@ mod pattern_family_tests {
         let seeded = |seed: u32| eval(&gpu, &pattern(Truchet, |p| p.seed = Some(seed)), &points(3000, 2));
         assert_eq!(seeded(1), seeded(1));
         assert!(seeded(1).iter().zip(seeded(2)).any(|(a, b)| (a - b).abs() > 0.5), "another seed should change the layout");
+    }
+
+    #[test]
+    fn truchet_pipes_pass_through_every_face_centre() {
+        use PatternKind::*;
+        let Some(gpu) = gpu() else { return eprintln!("no GPU adapter; skipping") };
+        let n = 4.0;
+        let pipes = pattern(Truchet, |p| { p.variant = 2; p.counts = [n; 3]; });
+        let mut pts = Vec::new();
+        for (i, j, k) in [(0.0, 0.0, 0.0), (1.0, 2.0, 3.0), (3.0, 1.0, 2.0)] {
+            for (dx, dy, dz) in [(0.0, 0.5, 0.5), (1.0, 0.5, 0.5), (0.5, 0.0, 0.5), (0.5, 1.0, 0.5), (0.5, 0.5, 0.0), (0.5, 0.5, 1.0)] {
+                pts.push([(i + dx) / n, (j + dy) / n, (k + dz) / n]);
+            }
+        }
+        for (i, v) in eval(&gpu, &pipes, &pts).iter().enumerate() {
+            assert!(*v < -0.99, "face centre {i} should be inside a pipe, got {v}");
+        }
+        let share = |v: Vec<f32>| v.iter().filter(|x| **x < 0.0).count() as f32 / v.len() as f32;
+        let s = share(eval(&gpu, &pipes, &points(4000, 3)));
+        assert!(s > 0.05 && s < 0.4, "pipes should fill part of the volume, got {s}");
     }
 
     #[test]
