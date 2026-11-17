@@ -180,6 +180,7 @@ struct App {
     shortcuts_open: bool,
     prefs: Prefs,
     prefs_open: bool,
+    about_open: bool,
     /// Last window title sent, so it is only sent when it changes.
     title: String,
     /// The window was asked to close with unsaved changes; waiting for Save / Discard / Cancel.
@@ -297,6 +298,7 @@ impl App {
             shortcuts_open: false,
             prefs: prefs.clone(),
             prefs_open: false,
+            about_open: false,
             title: String::new(),
             close_prompt: false,
             close_ok: false,
@@ -1023,6 +1025,17 @@ impl eframe::App for App {
                 });
             });
         }
+        egui::Window::new("About Noiser").open(&mut self.about_open).collapsible(false).resizable(false).show(&ctx, |ui| {
+            ui.heading(format!("Noiser {}", env!("CARGO_PKG_VERSION")));
+            ui.label("A node editor for tiling 3D noise: build a graph of noises, patterns and math, watch it in 3D and as a slice, export it as textures, a volume, a math function, or use it to displace meshes.");
+            ui.separator();
+            ui.label("Getting started");
+            ui.label("• Right-click the graph to add nodes (type to search); drag from a pin to connect, or drop a wire on empty space.");
+            ui.label("• The eye on a node previews it; the cache button bakes everything upstream of it for speed.");
+            ui.label("• Orange outline: the node breaks tiling (the details panel says why).");
+            ui.label("• File > Import mesh shapes a low-poly OBJ, PLY or STL with the graph; Export displaced mesh writes the high-resolution result.");
+            ui.label("• Help > Keyboard shortcuts lists the keys. Source and releases: github.com/simenstroek/Noiser");
+        });
         egui::Window::new("Preferences").open(&mut self.prefs_open).collapsible(false).resizable(false).show(&ctx, |ui| {
             let r = ui.add(egui::Slider::new(&mut self.prefs.ui_scale, 0.75..=2.0).text("Interface scale"));
             r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Slider, true, "Interface scale"));
@@ -1138,6 +1151,10 @@ impl eframe::App for App {
                 ui.menu_button("Help", |ui| {
                     if ui.button("Keyboard shortcuts").clicked() {
                         self.shortcuts_open = true;
+                        ui.close();
+                    }
+                    if ui.button("About Noiser").clicked() {
+                        self.about_open = true;
                         ui.close();
                     }
                 });
