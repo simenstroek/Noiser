@@ -29,6 +29,8 @@ centre, size = (lo + hi) / 2, max(hi - lo)
 cam = bpy.data.objects.new("cam", bpy.data.cameras.new("cam"))
 bpy.context.scene.collection.objects.link(cam)
 cam.data.lens = 60
+cam.data.clip_start = size * 0.01
+cam.data.clip_end = size * 20
 direction = Vector((math.sin(azimuth) * 0.9, -math.cos(azimuth) * 0.9, 0.55)).normalized()
 cam.location = centre + direction * size * 2.6
 cam.rotation_euler = (centre - cam.location).to_track_quat("-Z", "Y").to_euler()

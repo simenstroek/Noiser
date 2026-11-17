@@ -170,6 +170,48 @@ pub struct MeshQuery {
     tri: Vec<[V3; 3]>,
     nodes: Vec<Node>,
     order: Vec<u32>,
+    /// A surface that does not enclose anything (a terrain, a leaf, a sheet): "inside" is then the
+    /// side opposite the surface normal, since the winding number has no clean inside.
+    open: bool,
+    /// Smooth (angle-weighted) vertex normals of each triangle's corners, for the open sign.
+    corner_normal: Vec<[V3; 3]>,
+}
+
+/// Angle-weighted vertex normals, per triangle corner.
+fn corner_normals(mesh: &Mesh) -> Vec<[V3; 3]> {
+    let mut sum = vec![[0.0f32; 3]; mesh.positions.len()];
+    for t in &mesh.triangles {
+        let p = [mesh.positions[t[0] as usize], mesh.positions[t[1] as usize], mesh.positions[t[2] as usize]];
+        let n = cross(sub(p[1], p[0]), sub(p[2], p[0]));
+        let nl = length(n);
+        if nl < 1e-20 {
+            continue;
+        }
+        let n = scale(n, 1.0 / nl);
+        for c in 0..3 {
+            let (e1, e2) = (sub(p[(c + 1) % 3], p[c]), sub(p[(c + 2) % 3], p[c]));
+            let (l1, l2) = (length(e1), length(e2));
+            if l1 < 1e-20 || l2 < 1e-20 {
+                continue;
+            }
+            let angle = (dot(e1, e2) / (l1 * l2)).clamp(-1.0, 1.0).acos();
+            sum[t[c] as usize] = add(sum[t[c] as usize], scale(n, angle));
+        }
+    }
+    mesh.triangles.iter().map(|t| std::array::from_fn(|c| sum[t[c] as usize])).collect()
+}
+
+/// Barycentric coordinates of `p` (on the triangle's plane) in triangle `abc`.
+fn barycentric(p: V3, a: V3, b: V3, c: V3) -> V3 {
+    let (v0, v1, v2) = (sub(b, a), sub(c, a), sub(p, a));
+    let (d00, d01, d11, d20, d21) = (dot(v0, v0), dot(v0, v1), dot(v1, v1), dot(v2, v0), dot(v2, v1));
+    let den = d00 * d11 - d01 * d01;
+    if den.abs() < 1e-30 {
+        return [1.0, 0.0, 0.0];
+    }
+    let v = (d11 * d20 - d01 * d21) / den;
+    let w = (d00 * d21 - d01 * d20) / den;
+    [1.0 - v - w, v, w]
 }
 
 impl MeshQuery {
@@ -181,14 +223,43 @@ impl MeshQuery {
             build_bvh(&tri, &mut order, 0, &mut nodes);
             fill_far_field(&mut nodes, &tri, &order);
         }
-        MeshQuery { tri, nodes, order }
+        let mut q = MeshQuery { tri, nodes, order, open: false, corner_normal: Vec::new() };
+        q.open = q.looks_open(mesh);
+        if q.open {
+            q.corner_normal = corner_normals(mesh);
+        }
+        q
     }
 
-    /// The squared distance from `p` to the nearest triangle.
-    fn closest_distance2(&self, p: V3) -> f32 {
-        let mut best = f32::INFINITY;
+    /// Whether the surface is open: far from the mesh the winding number of a closed surface is a
+    /// whole number (0, 1, 2...), while a sheet gives about one half on either side.
+    fn looks_open(&self, mesh: &Mesh) -> bool {
         if self.nodes.is_empty() {
-            return best;
+            return false;
+        }
+        let (lo, hi) = mesh.bounds();
+        let mut fractional = 0;
+        let n = 7;
+        for k in 0..n {
+            for j in 0..n {
+                for i in 0..n {
+                    let t = |a: usize, c: usize| lo[a] + (hi[a] - lo[a]) * (0.5 + (c as f32 + 0.5 - n as f32 * 0.5) / n as f32 * 1.2);
+                    let w = self.winding_number([t(0, i), t(1, j), t(2, k)]).abs();
+                    if (w - w.round()).abs() > 0.25 {
+                        fractional += 1;
+                    }
+                }
+            }
+        }
+        fractional * 10 > n * n * n * 4
+    }
+
+    /// Squared distance to the nearest triangle, that triangle (an index into `tri`) and the closest point on it.
+    fn closest(&self, p: V3) -> (f32, usize, V3) {
+        let mut best = f32::INFINITY;
+        let (mut best_tri, mut best_point) = (0usize, p);
+        if self.nodes.is_empty() {
+            return (best, best_tri, best_point);
         }
         let mut stack = [0u32; 96];
         let mut top = 1;
@@ -200,9 +271,14 @@ impl MeshQuery {
             }
             if node.count > 0 {
                 for slot in node.a..node.a + node.count {
-                    let [a, b, c] = self.tri[self.order[slot as usize] as usize];
-                    let d = sub(p, closest_on_triangle(p, a, b, c).0);
-                    best = best.min(dot(d, d));
+                    let ti = self.order[slot as usize] as usize;
+                    let [a, b, c] = self.tri[ti];
+                    let cp = closest_on_triangle(p, a, b, c).0;
+                    let d = sub(p, cp);
+                    let d2 = dot(d, d);
+                    if d2 < best {
+                        (best, best_tri, best_point) = (d2, ti, cp);
+                    }
                 }
             } else {
                 let (left, right) = (stack[top] + 1, node.a);
@@ -215,7 +291,7 @@ impl MeshQuery {
                 top += 2;
             }
         }
-        best
+        (best, best_tri, best_point)
     }
 
     /// The generalized winding number at `p`: about 1 inside a closed surface wound outward, 0
@@ -255,9 +331,17 @@ impl MeshQuery {
 
     /// Distance to the surface, negative inside.
     pub fn signed_distance(&self, p: V3) -> f32 {
-        let d2 = self.closest_distance2(p);
+        let (d2, ti, cp) = self.closest(p);
         if !d2.is_finite() {
             return f32::INFINITY;
+        }
+        if self.open {
+            // Which side of the surface: the smooth normal at the closest point against the offset to it.
+            let [a, b, c] = self.tri[ti];
+            let w = barycentric(cp, a, b, c);
+            let n = self.corner_normal[ti];
+            let normal = add(add(scale(n[0], w[0]), scale(n[1], w[1])), scale(n[2], w[2]));
+            return if dot(sub(p, cp), normal) < 0.0 { -d2.sqrt() } else { d2.sqrt() };
         }
         // Either orientation of a closed part counts as inside; overlapping parts add up.
         if self.winding_number(p).abs() > 0.5 { -d2.sqrt() } else { d2.sqrt() }
@@ -474,6 +558,44 @@ mod tests {
         let q = MeshQuery::new(&open);
         assert!(q.signed_distance([0.0; 3]) < 0.0, "a cube with a missing face");
         assert!(q.signed_distance([0.0, 0.0, 3.0]) > 0.0);
+    }
+
+    /// A bumpy 16 x 16 sheet seen from above, like a terrain.
+    fn sheet() -> Mesh {
+        let n = 16;
+        let mut positions = Vec::new();
+        for j in 0..=n {
+            for i in 0..=n {
+                let (x, z) = (i as f32 / n as f32 * 2.0 - 1.0, j as f32 / n as f32 * 2.0 - 1.0);
+                positions.push([x, 0.1 * (3.0 * x).sin() * (2.0 * z).cos(), z]);
+            }
+        }
+        let mut triangles = Vec::new();
+        for j in 0..n {
+            for i in 0..n {
+                let a = (j * (n + 1) + i) as u32;
+                let (b, c, d) = (a + 1, a + n as u32 + 1, a + n as u32 + 2);
+                triangles.push([a, c, b]); // wound so the normal points up (+y)
+                triangles.push([b, c, d]);
+            }
+        }
+        Mesh { positions, triangles }
+    }
+
+    #[test]
+    fn an_open_sheet_is_solid_below_and_empty_above() {
+        let q = MeshQuery::new(&sheet());
+        assert!(q.open, "a sheet is detected as open");
+        for (x, z) in [(0.0, 0.0), (0.5, -0.4), (-0.7, 0.6), (0.9, 0.9)] {
+            assert!(q.signed_distance([x, 0.5, z]) > 0.3, "above the sheet at {x},{z}");
+            assert!(q.signed_distance([x, -0.5, z]) < -0.3, "below the sheet at {x},{z}");
+        }
+        // Closed solids are not mistaken for sheets.
+        assert!(!MeshQuery::new(&shapes::icosphere(1.0, 2)).open);
+        assert!(!MeshQuery::new(&shapes::split_cube().welded()).open);
+        let mut hole = shapes::split_cube().welded();
+        hole.triangles.truncate(hole.triangles.len() - 2);
+        assert!(!MeshQuery::new(&hole).open, "a cube missing a face is still a solid");
     }
 
     #[test]
