@@ -46,6 +46,8 @@ pub struct Editor {
     pan: Vec2,
     zoom: f32,
     pub selected: BTreeSet<NodeId>,
+    /// Snap nodes to a 20-unit grid when a drag ends (a preference).
+    pub snap: bool,
     /// Node shown in the 3D and slice views instead of the Density output.
     pub preview: Option<NodeId>,
     /// How often each node was picked from the wire-drop menu; most used are listed first.
@@ -71,6 +73,7 @@ impl Default for Editor {
             pan: Vec2::new(40.0, 40.0),
             zoom: 1.0,
             selected: BTreeSet::new(),
+            snap: false,
             preview: None,
             picks: BTreeMap::new(),
             wire: None,
@@ -568,6 +571,14 @@ impl Editor {
         }
         if let Some((to, port)) = detach {
             graph.disconnect(to, port);
+        }
+        // Optional snapping: when a drag ends, selected nodes settle on a 20-unit grid.
+        if self.snap && ui.input(|i| i.pointer.primary_released()) {
+            for id in &self.selected {
+                if let Some(n) = graph.nodes.get_mut(id) {
+                    n.pos = [(n.pos[0] / 20.0).round() * 20.0, (n.pos[1] / 20.0).round() * 20.0];
+                }
+            }
         }
         if moved != Vec2::ZERO {
             for id in &self.selected {

@@ -888,7 +888,7 @@ const SHORTCUTS: [(&str, &str); 14] = [
     ("Drag on empty canvas", "Box select (Shift/Ctrl adds)"),
     ("Middle-drag", "Pan the graph editor"),
     ("Mouse wheel", "Zoom the graph editor or the 3D view; moves the slice through the tile"),
-    ("Drag in the 3D view", "Orbit (wheel zooms)"),
+    ("Drag in the 3D view", "Orbit (wheel zooms, double-click resets the camera)"),
 ];
 const RECENT_KEY: &str = "recent_files";
 const PREFS_KEY: &str = "preferences";
@@ -901,11 +901,13 @@ struct Prefs {
     ui_scale: f32,
     /// Rolling crash-recovery backups of the open graph.
     backups: bool,
+    /// Nodes snap to a grid when released.
+    snap_nodes: bool,
 }
 
 impl Default for Prefs {
     fn default() -> Self {
-        Prefs { ui_scale: 1.0, backups: true }
+        Prefs { ui_scale: 1.0, backups: true, snap_nodes: false }
     }
 }
 
@@ -969,6 +971,7 @@ impl eframe::App for App {
                 }
             }
         }
+        self.editor.snap = self.prefs.snap_nodes;
         // Window title: the file and an asterisk for unsaved changes.
         let dirty = self.graph != self.saved;
         let title = match (&self.path, dirty) {
@@ -1015,6 +1018,7 @@ impl eframe::App for App {
                 ctx.set_zoom_factor(self.prefs.ui_scale);
             }
             ui.checkbox(&mut self.prefs.backups, "Keep rolling backups for crash recovery");
+            ui.checkbox(&mut self.prefs.snap_nodes, "Snap nodes to a grid when released");
             if ui.button("Reset to defaults").clicked() {
                 self.prefs = Prefs::default();
                 ctx.set_zoom_factor(1.0);
@@ -1218,7 +1222,10 @@ impl eframe::App for App {
         egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| {
             let full = ui.available_rect_before_wrap();
             let (r3d, rslice) = full.split_left_right_at_fraction(0.5);
-            let resp = ui.interact(r3d, ui.scope_id().with("view3d"), egui::Sense::drag());
+            let resp = ui.interact(r3d, ui.scope_id().with("view3d"), egui::Sense::click_and_drag());
+            if resp.double_clicked() {
+                (self.yaw, self.pitch, self.dist) = (0.6, 0.35, 3.5); // back to the starting camera
+            }
             let d = resp.drag_delta();
             self.yaw -= d.x * 0.01;
             self.pitch = (self.pitch + d.y * 0.01).clamp(-1.5, 1.5);
@@ -1548,7 +1555,7 @@ mod prefs_tests {
         assert_eq!(p, Prefs::default());
         let p: Prefs = serde_json::from_str(r#"{"ui_scale": 9.0}"#).unwrap();
         assert_eq!(p.sane().ui_scale, 2.0);
-        assert_eq!(Prefs { ui_scale: f32::NAN, backups: true }.sane().ui_scale, 1.0);
+        assert_eq!(Prefs { ui_scale: f32::NAN, ..Prefs::default() }.sane().ui_scale, 1.0);
     }
 }
 
