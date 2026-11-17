@@ -197,6 +197,51 @@ struct Layout {
 }
 
 impl Editor {
+    /// Draws the comment frames under the nodes. Dragging a frame's title bar moves it and the nodes
+    /// inside it, the corner handle resizes it, and its context menu renames or deletes it.
+    fn frames(&mut self, ui: &mut egui::Ui, painter: &egui::Painter, origin: Pos2, graph: &mut Graph) {
+        let z = self.zoom;
+        let mut delete = None;
+        for i in 0..graph.frames.len() {
+            let f = &graph.frames[i];
+            let rect = Rect::from_min_size(self.to_screen(origin, f.pos), Vec2::new(f.size[0], f.size[1]) * z);
+            painter.rect(rect, CornerRadius::same((6.0 * z) as u8), Color32::from_rgba_unmultiplied(120, 140, 170, 28), Stroke::new(1.0, Color32::from_rgb(90, 105, 130)), egui::StrokeKind::Inside);
+            let header = Rect::from_min_size(rect.min, Vec2::new(rect.width(), 22.0 * z));
+            painter.rect_filled(header, CornerRadius::same((6.0 * z) as u8), Color32::from_rgba_unmultiplied(120, 140, 170, 70));
+            painter.with_clip_rect(header).text(header.left_center() + Vec2::new(8.0 * z, 0.0), egui::Align2::LEFT_CENTER, &f.title, egui::FontId::proportional(13.0 * z), Color32::from_gray(225));
+            let bar = ui.interact(header, ui.scope_id().with(("frame bar", i)), Sense::click_and_drag());
+            if bar.dragged_by(egui::PointerButton::Primary) {
+                let d = bar.drag_delta() / z;
+                // The nodes whose top-left corner is inside the frame go with it.
+                let (lo, hi) = (graph.frames[i].pos, [graph.frames[i].pos[0] + graph.frames[i].size[0], graph.frames[i].pos[1] + graph.frames[i].size[1]]);
+                for n in graph.nodes.values_mut() {
+                    if n.pos[0] >= lo[0] && n.pos[0] <= hi[0] && n.pos[1] >= lo[1] && n.pos[1] <= hi[1] {
+                        n.pos = [n.pos[0] + d.x, n.pos[1] + d.y];
+                    }
+                }
+                graph.frames[i].pos = [lo[0] + d.x, lo[1] + d.y];
+            }
+            let corner = Rect::from_min_size(rect.right_bottom() - Vec2::splat(16.0 * z), Vec2::splat(16.0 * z));
+            painter.line_segment([corner.right_bottom() - Vec2::new(12.0 * z, 2.0 * z), corner.right_bottom() - Vec2::new(2.0 * z, 12.0 * z)], Stroke::new(1.5, Color32::from_gray(150)));
+            let grip = ui.interact(corner, ui.scope_id().with(("frame grip", i)), Sense::drag());
+            if grip.dragged_by(egui::PointerButton::Primary) {
+                let d = grip.drag_delta() / z;
+                let f = &mut graph.frames[i];
+                f.size = [(f.size[0] + d.x).max(80.0), (f.size[1] + d.y).max(50.0)];
+            }
+            bar.context_menu(|ui| {
+                ui.add(egui::TextEdit::singleline(&mut graph.frames[i].title).hint_text("Title"));
+                if ui.button("Delete frame").clicked() {
+                    delete = Some(i);
+                    ui.close();
+                }
+            });
+        }
+        if let Some(i) = delete {
+            graph.frames.remove(i);
+        }
+    }
+
     /// Pans and zooms so the given nodes (all of them when `only` is empty) fill the canvas.
     fn frame(&mut self, canvas_size: Vec2, graph: &Graph, only: &BTreeSet<NodeId>) {
         let mut lo = [f32::MAX; 2];
@@ -305,7 +350,14 @@ impl Editor {
                     ui.close();
                 }
             }
+            ui.separator();
+            if ui.button("Comment frame").clicked() {
+                graph.frames.push(crate::graph::Frame { title: "Frame".into(), pos: [self.menu_at.x, self.menu_at.y], size: [300.0, 200.0] });
+                ui.close();
+            }
         });
+
+        self.frames(ui, &painter, origin, graph);
 
         let layouts: BTreeMap<NodeId, Layout> =
             graph.nodes.iter().map(|(&id, n)| (id, self.layout(origin, &n.kind, n.pos))).collect();

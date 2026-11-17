@@ -573,6 +573,18 @@ pub struct Edge {
 pub struct Graph {
     pub nodes: BTreeMap<NodeId, Node>,
     pub edges: Vec<Edge>,
+    /// Comment boxes drawn behind the nodes; they have no effect on the result.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub frames: Vec<Frame>,
+}
+
+/// A labelled box in the graph editor for grouping nodes.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Frame {
+    pub title: String,
+    /// Top-left corner and size in graph units.
+    pub pos: [f32; 2],
+    pub size: [f32; 2],
 }
 
 impl Graph {
@@ -1438,5 +1450,19 @@ mod mute_tests {
         g.disconnect(1, 0);
         assert_eq!(g.input(2, 0), None, "nothing to pass on");
         assert!(Graph::from_json(&g.to_json()).unwrap().nodes[&1].muted, "survives a save");
+    }
+}
+
+#[cfg(test)]
+mod frame_tests {
+    use super::*;
+
+    #[test]
+    fn frames_round_trip_and_old_files_have_none() {
+        let mut g = Graph::default_graph();
+        assert!(!g.to_json().contains("frames"), "an empty list is not written");
+        g.frames.push(Frame { title: "A".into(), pos: [1.0, 2.0], size: [3.0, 4.0] });
+        assert_eq!(Graph::from_json(&g.to_json()).unwrap().frames, g.frames);
+        assert!(Graph::from_json(&Graph::default_graph().to_json()).unwrap().frames.is_empty());
     }
 }
