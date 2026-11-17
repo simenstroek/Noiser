@@ -270,7 +270,7 @@ pub struct BatchJob {
 }
 
 /// `dir/stem.ext`, or `dir/stem_2.ext` and so on if that exists, so a batch never overwrites anything.
-fn unique_path(dir: &std::path::Path, stem: &str, ext: &str) -> PathBuf {
+pub(crate) fn unique_path(dir: &std::path::Path, stem: &str, ext: &str) -> PathBuf {
     let mut path = dir.join(format!("{stem}.{ext}"));
     let mut n = 2;
     while path.exists() {

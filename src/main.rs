@@ -8,6 +8,7 @@ mod codegen;
 mod editor;
 mod export;
 mod graph;
+mod headless;
 mod history;
 mod mesh;
 mod meshapp;
@@ -1197,6 +1198,9 @@ impl eframe::App for App {
 
 
 fn main() -> eframe::Result {
+    if let Some(code) = headless::try_run() {
+        std::process::exit(code);
+    }
     let options = eframe::NativeOptions {
         renderer: eframe::Renderer::Wgpu,
         wgpu_options: view::request_timestamps(Default::default()),
