@@ -385,6 +385,50 @@ impl Gen<'_> {
     }
 }
 
+/// A random graph using every node kind, with random links (no cycles) and muted nodes, for tests.
+#[cfg(test)]
+pub(crate) fn random_graph(rnd: &mut impl FnMut(usize) -> usize) -> Graph {
+    use crate::graph::{CurveMode, NodeKind as K, NoiseParams, PatternKind, PatternParams, WorleyFeature, WorleyMetric};
+    let mut g = Graph::default();
+    let count = 3 + rnd(6);
+    for i in 0..count {
+        let kind = match rnd(11) {
+            0 => K::Float(rnd(5) as f32 - 2.0),
+            1 => K::Vec3([rnd(3) as f32, 0.5, -1.0]),
+            2 => K::Position,
+            3 => K::Math { op: MathOp::ALL[rnd(MathOp::ALL.len())], a: 0.5, b: 2.0, c: 0.3 },
+            4 => K::Remap { vals: [0.0, 0.0, 1.0, -1.0, 2.0], clamp: rnd(2) == 0 },
+            5 => K::Mix { vals: [0.5, 0.0, 1.0], clamp: rnd(2) == 0 },
+            6 => K::Curve { points: vec![[1.0, 0.0], [0.0, 1.0], [0.5, 3.0]][..1 + rnd(3)].to_vec(), mode: CurveMode::ALL[rnd(4)] },
+            7 => K::Grid { counts: [4.0; 3], corners: rnd(2) == 0 },
+            8 => K::Pattern(PatternParams::for_kind(PatternKind::ALL[rnd(8)])),
+            9 => K::Normal { flip: rnd(2) == 0 },
+            _ => K::Noise(NoiseParams {
+                kind: crate::graph::NoiseKind::ALL[rnd(5)],
+                feature: [WorleyFeature::F1, WorleyFeature::F2, WorleyFeature::F2MinusF1, WorleyFeature::CellValue, WorleyFeature::Edges][rnd(5)],
+                metric: [WorleyMetric::Euclidean, WorleyMetric::Manhattan, WorleyMetric::Chebyshev][rnd(3)],
+                jitter: [1.0, 0.5][rnd(2)],
+                ..NoiseParams::default()
+            }),
+        };
+        let id = g.add(kind, [i as f32 * 50.0, 0.0]);
+        g.nodes.get_mut(&id).unwrap().muted = rnd(7) == 0;
+    }
+    // Links only from earlier to later nodes, so there are no cycles.
+    for to in 1..count as u32 {
+        for port in 0..g.nodes[&to].kind.input_count() {
+            if rnd(10) < 6 {
+                g.connect(rnd(to as usize) as u32, to, port);
+            }
+        }
+    }
+    let out = g.add(K::OutDensity, [0.0; 2]);
+    let normal_out = g.add(K::OutNormal, [0.0; 2]);
+    g.connect(count as u32 - 1, out, 0);
+    g.connect(rnd(count) as u32, normal_out, 0);
+    g
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -409,6 +453,29 @@ mod tests {
         naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all())
             .validate(&module)
             .unwrap_or_else(|e| panic!("{e:?}\n---\n{src}"));
+    }
+
+    /// Random graphs from every node kind, with random links and muted nodes, must compile to valid WGSL.
+    #[test]
+    fn random_graphs_compile_to_valid_shaders() {
+        let mut state = 0x2545F4914F6CDD1Du64;
+        let mut rnd = move |n: usize| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state % n as u64) as usize
+        };
+        for round in 0..120 {
+            let g = random_graph(&mut rnd);
+            let c = compile(&g).unwrap_or_else(|e| panic!("round {round}: {e}
+{}", g.to_json()));
+            validate(&c);
+            if round % 20 == 0 {
+                let src = crate::view::shader_source(&c.wgsl, round % 40 == 0, false);
+                let module = naga::front::wgsl::parse_str(&src).unwrap_or_else(|e| panic!("{}", e.emit_to_string(&src)));
+                naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all()).validate(&module).unwrap();
+            }
+        }
     }
 
     #[test]
