@@ -577,6 +577,8 @@ pub enum NodeKind {
     /// A regular pattern (see `PatternParams`). Input: position (defaults to world position).
     Pattern(PatternParams),
     Position,
+    /// A waypoint on a wire: passes its input through (every reader skips it, like a muted node).
+    Reroute,
     /// Input: the field to differentiate. Output: unit gradient (points low → high unless flipped).
     Normal { flip: bool },
     /// Input: position (defaults to world position).
@@ -589,6 +591,7 @@ impl NodeKind {
     pub fn input_count(&self) -> usize {
         match self {
             NodeKind::Float(_) | NodeKind::Vec3(_) | NodeKind::Position => 0,
+            NodeKind::Reroute => 1,
             NodeKind::Math { op, .. } => if op.is_smooth() { 3 } else if op.is_unary() { 1 } else { 2 },
             NodeKind::Remap { .. } => 5,
             NodeKind::Mix { .. } => 3,
@@ -716,7 +719,7 @@ impl Graph {
     pub fn input(&self, to: NodeId, port: usize) -> Option<NodeId> {
         let mut src = self.edges.iter().find(|e| e.to == to && e.port == port)?.from;
         for _ in 0..=self.nodes.len() {
-            if !self.nodes.get(&src).is_some_and(|n| n.muted) {
+            if !self.nodes.get(&src).is_some_and(|n| n.muted || n.kind == NodeKind::Reroute) {
                 return Some(src);
             }
             src = self.edges.iter().find(|e| e.to == src && e.port == 0)?.from;
@@ -800,6 +803,7 @@ impl Graph {
     pub fn yields_vector(&self, id: NodeId) -> bool {
         match &self.nodes[&id].kind {
             NodeKind::Vec3(_) | NodeKind::Position | NodeKind::Normal { .. } => true,
+            NodeKind::Reroute => self.input(id, 0).is_some_and(|s| self.yields_vector(s)),
             NodeKind::Math { op, .. } => *op != MathOp::Dot && (0..2).any(|p| self.input(id, p).is_some_and(|s| self.yields_vector(s))),
             _ => false,
         }
@@ -924,6 +928,7 @@ impl Graph {
         let t = match &self.nodes[&id].kind {
             NodeKind::Float(_) | NodeKind::Vec3(_) => Const,
             NodeKind::Position => Coord,
+            NodeKind::Reroute => input(0, memo, stack).unwrap_or(Const),
             NodeKind::Math { op, a, b, .. } => {
                 let ta = input(0, memo, stack).unwrap_or(Const);
                 let tb = input(1, memo, stack).unwrap_or(Const);
@@ -1094,6 +1099,10 @@ impl Graph {
             NodeKind::Float(v) => (*v, *v),
             NodeKind::Vec3(v) => (v.iter().cloned().fold(f32::MAX, f32::min), v.iter().cloned().fold(f32::MIN, f32::max)),
             NodeKind::Position => UNBOUNDED,
+            NodeKind::Reroute => match self.input(id, 0) {
+                Some(src) => self.range_of(src, stack),
+                None => (0.0, 0.0),
+            },
             NodeKind::Normal { .. } => (-1.0, 1.0),
             // noise.wgsl keeps every kind within [-1, 1] (Perlin and Simplex are clamped).
             NodeKind::Noise(n) => if n.normalize { (0.0, 1.0) } else { (-1.0, 1.0) },
@@ -1555,6 +1564,17 @@ mod tests {
 #[cfg(test)]
 mod mute_tests {
     use super::*;
+
+    #[test]
+    fn a_reroute_is_transparent() {
+        let mut g = Graph::default_graph(); // 0 Position -> 1 Noise -> 2 OutDensity
+        let r = g.add(NodeKind::Reroute, [0.0; 2]);
+        g.connect(1, r, 0);
+        g.connect(r, 2, 0);
+        assert_eq!(g.input(2, 0), Some(1), "the output reads the noise through the reroute");
+        assert!(!g.yields_vector(r));
+        assert_eq!(g.density_range(), (-1.0, 1.0));
+    }
 
     #[test]
     fn a_muted_node_passes_its_first_input_on() {

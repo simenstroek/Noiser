@@ -81,7 +81,7 @@ reported and the rest continue; nothing is ever overwritten. From a script:
 `--format obj|ply`, `--cull`, `--mask KIND`). Progress goes to the console and to `noiser-batch.log` in the output
 folder; the exit code is 1 if any mesh failed.
 
-**Editing.** Undo and redo, copy and paste of nodes (also between two Noiser windows), duplicate, mute (bypass) a
+**Editing.** Undo and redo, copy and paste of nodes (also between two Noiser windows), duplicate, reroute nodes, mute (bypass) a
 node with M, frame the selection with F or everything with Home, search in the add menu, File > New from template
 (clouds, ridged mountains, cracked rock, brick wall, gyroid foam), Open recent, drag a `.noisegraph` or `.obj` file
 onto the window, and a prompt before closing with unsaved changes (the window title shows an asterisk).

@@ -36,6 +36,8 @@ pub fn ops(g: &Graph, seed: u32) -> Result<Value, String> {
             let ty = if g.yields_vector(id) { "vector" } else { "float" };
             let mut op = match &g.nodes[&id].kind {
                 NodeKind::Position => json!({"op": "position"}),
+                // A passthrough, written as adding zero.
+                NodeKind::Reroute => json!({"op": "math", "fn": "add", "a": input(id, 0), "b": 0.0}),
                 NodeKind::Float(v) => json!({"op": "value", "value": v}),
                 NodeKind::Vec3(v) => json!({"op": "value", "value": v}),
                 NodeKind::Math { op, a, b, c } => {

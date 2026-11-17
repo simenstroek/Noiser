@@ -294,6 +294,10 @@ impl Gen<'_> {
             NodeKind::Float(_) => (Ty::F, format!("P[{s}]")),
             NodeKind::Vec3(_) => (Ty::V, format!("vec3f(P[{s}], P[{}], P[{}])", s + 1, s + 2)),
             NodeKind::Position => (Ty::V, "p".into()),
+            NodeKind::Reroute => {
+                let ty = self.g.input(id, 0).map_or(Ty::F, |src| self.types[&src]);
+                (ty, self.operand(id, 0, ty, &convert("0.0", Ty::F, ty)))
+            }
             NodeKind::Math { op, .. } => {
                 let in_ty = |port| self.g.input(id, port).map_or(Ty::F, |src| self.types[&src]);
                 // Dot takes vectors and gives a float; everything else is a vector if any input is.
@@ -392,7 +396,7 @@ pub(crate) fn random_graph(rnd: &mut impl FnMut(usize) -> usize) -> Graph {
     let mut g = Graph::default();
     let count = 3 + rnd(6);
     for i in 0..count {
-        let kind = match rnd(11) {
+        let kind = match rnd(12) {
             0 => K::Float(rnd(5) as f32 - 2.0),
             1 => K::Vec3([rnd(3) as f32, 0.5, -1.0]),
             2 => K::Position,
@@ -403,6 +407,7 @@ pub(crate) fn random_graph(rnd: &mut impl FnMut(usize) -> usize) -> Graph {
             7 => K::Grid { counts: [4.0; 3], corners: rnd(2) == 0 },
             8 => K::Pattern(PatternParams::for_kind(PatternKind::ALL[rnd(8)])),
             9 => K::Normal { flip: rnd(2) == 0 },
+            10 => K::Reroute,
             _ => K::Noise(NoiseParams {
                 kind: crate::graph::NoiseKind::ALL[rnd(5)],
                 feature: [WorleyFeature::F1, WorleyFeature::F2, WorleyFeature::F2MinusF1, WorleyFeature::CellValue, WorleyFeature::Edges][rnd(5)],

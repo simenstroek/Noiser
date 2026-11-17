@@ -877,6 +877,7 @@ fn node_props(ui: &mut egui::Ui, kind: &mut NodeKind) {
             });
         }
         NodeKind::Position => _ = ui.label("World position. Feeds noise inputs by default."),
+        NodeKind::Reroute => _ = ui.weak("A waypoint on a wire: it passes its input through unchanged."),
         NodeKind::OutDensity | NodeKind::OutNormal => {}
     }
 }

@@ -102,6 +102,7 @@ pub fn title(kind: &NodeKind) -> String {
         NodeKind::Grid { .. } => "Grid".into(),
         NodeKind::Pattern(p) => p.kind.name().into(),
         NodeKind::Position => "Position".into(),
+        NodeKind::Reroute => "Reroute".into(),
         NodeKind::Normal { .. } => "Normal".into(),
         NodeKind::Noise(n) => n.kind.name().into(),
         NodeKind::OutDensity => "Density Output".into(),
@@ -114,6 +115,7 @@ fn input_label(kind: &NodeKind, port: usize) -> &'static str {
         (NodeKind::Math { .. }, 0) => "A",
         (NodeKind::Math { .. }, 1) => "B",
         (NodeKind::Math { .. }, _) => "Blend",
+        (NodeKind::Reroute, _) => "In",
         (NodeKind::Curve { .. }, _) => "Value",
         (NodeKind::Mix { .. }, 0) => "Factor",
         (NodeKind::Mix { .. }, 1) => "A",
@@ -142,6 +144,7 @@ fn summary(kind: &NodeKind) -> String {
         NodeKind::Float(v) => format!("{v:.3}"),
         NodeKind::Vec3(v) => format!("{:.2}, {:.2}, {:.2}", v[0], v[1], v[2]),
         NodeKind::Position => "world position".into(),
+        NodeKind::Reroute => "passes its input on".into(),
         _ => String::new(),
     }
 }
@@ -156,6 +159,7 @@ fn palette() -> Vec<(&'static str, NodeKind)> {
             ("Math", NodeKind::Math { op: MathOp::Add, a: 0.0, b: 0.0, c: 0.5 }),
             ("Remap", NodeKind::Remap { vals: [0.0, 0.0, 1.0, 0.0, 1.0], clamp: false }),
             ("Mix", NodeKind::Mix { vals: [0.5, 0.0, 1.0], clamp: true }),
+            ("Reroute", NodeKind::Reroute),
             ("Curve", NodeKind::Curve { points: vec![[0.0, 0.0], [1.0, 1.0]], mode: crate::graph::CurveMode::Linear }),
             ("Grid", NodeKind::Grid { counts: [8.0; 3], corners: false }),
             ("Bricks", NodeKind::Pattern(crate::graph::PatternParams::for_kind(crate::graph::PatternKind::Bricks))),
