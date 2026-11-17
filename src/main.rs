@@ -1,6 +1,9 @@
+mod bluenoise;
 mod codegen;
 mod editor;
 mod graph;
+#[cfg(test)]
+mod gpu_tests;
 mod view;
 
 use eframe::{egui, egui_wgpu};
@@ -253,11 +256,27 @@ fn node_props(ui: &mut egui::Ui, kind: &mut NodeKind) {
         NodeKind::Normal { flip } => row(ui, flip, false, |ui, f| _ = ui.checkbox(f, "flip")),
         NodeKind::Noise(n) => {
             let d = graph::NoiseParams::default();
+            // Changing the type keeps the other settings; it has no reset since it defines the node.
+            egui::ComboBox::from_label("type").selected_text(n.kind.name()).show_ui(ui, |ui| {
+                for k in graph::NoiseKind::ALL {
+                    ui.selectable_value(&mut n.kind, k, k.name());
+                }
+            });
+            if n.kind == graph::NoiseKind::Worley {
+                row(ui, &mut n.feature, d.feature, |ui, v| {
+                    use graph::WorleyFeature::*;
+                    for (f, name) in [(F1, "F1"), (F2, "F2"), (F2MinusF1, "F2 − F1")] {
+                        ui.selectable_value(v, f, name);
+                    }
+                });
+            }
             row(ui, &mut n.scale, d.scale, |ui, v| _ = ui.add(egui::Slider::new(v, 0.5..=32.0).text("scale (cells/tile)")));
             row(ui, &mut n.normalize, d.normalize, |ui, v| _ = ui.checkbox(v, "normalize 0-1"));
-            row(ui, &mut n.octaves, d.octaves, |ui, v| _ = ui.add(egui::Slider::new(v, 1..=8).text("octaves")));
-            row(ui, &mut n.lacunarity, d.lacunarity, |ui, v| _ = ui.add(egui::Slider::new(v, 1.0..=4.0).text("lacunarity")));
-            row(ui, &mut n.roughness, d.roughness, |ui, v| _ = ui.add(egui::Slider::new(v, 0.0..=1.0).text("roughness")));
+            if n.kind.has_octaves() {
+                row(ui, &mut n.octaves, d.octaves, |ui, v| _ = ui.add(egui::Slider::new(v, 1..=8).text("octaves")));
+                row(ui, &mut n.lacunarity, d.lacunarity, |ui, v| _ = ui.add(egui::Slider::new(v, 1.0..=4.0).text("lacunarity")));
+                row(ui, &mut n.roughness, d.roughness, |ui, v| _ = ui.add(egui::Slider::new(v, 0.0..=1.0).text("roughness")));
+            }
             row(ui, &mut n.distortion, d.distortion, |ui, v| _ = ui.add(egui::Slider::new(v, 0.0..=2.0).text("distortion")));
             row(ui, &mut n.seed, d.seed, |ui, seed| {
                 let mut locked = seed.is_some();

@@ -16,6 +16,7 @@ struct Uniforms {
 // Slice values plus their min/max, as order-preserving u32 bit patterns so atomics can compare them.
 struct Slice { lo: atomic<u32>, hi: atomic<u32>, vals: array<f32> };
 @group(0) @binding(2) var<storage, read_write> slice: Slice;
+@group(0) @binding(3) var<storage, read> BN: array<f32>;
 
 struct VsOut { @builtin(position) pos: vec4f, @location(0) uv: vec2f };
 

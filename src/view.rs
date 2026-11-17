@@ -143,6 +143,7 @@ pub fn build(rs: &egui_wgpu::RenderState, graph_wgsl: &str) -> Gpu {
             entry(0, wgpu::BufferBindingType::Uniform),
             entry(1, wgpu::BufferBindingType::Storage { read_only: true }),
             entry(2, wgpu::BufferBindingType::Storage { read_only: false }),
+            entry(3, wgpu::BufferBindingType::Storage { read_only: true }),
         ],
     });
     let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -184,6 +185,9 @@ pub fn build(rs: &egui_wgpu::RenderState, graph_wgsl: &str) -> Gpu {
     let uniforms = buffer("uniforms", std::mem::size_of::<Uniforms>() as u64, wgpu::BufferUsages::UNIFORM);
     let params = buffer("params", (MAX_PARAMS * 4) as u64, wgpu::BufferUsages::STORAGE);
     let slice = buffer("slice", 8 + (SLICE_RES * SLICE_RES * 4) as u64, wgpu::BufferUsages::STORAGE);
+    let blue: &[f32] = &crate::bluenoise::tables();
+    let blue_noise = buffer("blue noise", std::mem::size_of_val(blue) as u64, wgpu::BufferUsages::STORAGE);
+    rs.queue.write_buffer(&blue_noise, 0, bytemuck::cast_slice(blue));
     let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: None,
         layout: &bgl,
@@ -191,6 +195,7 @@ pub fn build(rs: &egui_wgpu::RenderState, graph_wgsl: &str) -> Gpu {
             wgpu::BindGroupEntry { binding: 0, resource: uniforms.as_entire_binding() },
             wgpu::BindGroupEntry { binding: 1, resource: params.as_entire_binding() },
             wgpu::BindGroupEntry { binding: 2, resource: slice.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 3, resource: blue_noise.as_entire_binding() },
         ],
     });
     Gpu { raymarch, slice_cs, slice_fs, uniforms, params, slice, bind_group }

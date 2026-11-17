@@ -61,6 +61,13 @@ Node graph (centre) · 3D view (primitive picker, solid/cloud, displacement amou
 | 7 | Mesh displacement (later) | import closed mesh → narrow-band SDF grid → apply noise → export VDB or a high-poly mesh (see §3a) |
 | 8 | Subgraphs + prefab library (later) | select nodes → collapse to subgraph; edges crossing the selection become subgraph inputs/outputs (like Unreal's "Collapse to Function"); save subgraphs to a library of prefab noises |
 
+### Noise notes (milestone 4)
+- **Hash**: pcg3d on the wrapped integer cell, so every noise tiles by wrapping its lattice every `scale` cells. Octaves use `seed + octave`.
+- **Simplex** uses psrdnoise's BCC lattice (`uvw = M·x`, kernel `max(0.5 − r², 0)⁴`, gain 90). Its features are slightly finer than Perlin's at the same scale.
+- **Voronoi / Worley** search 3×3×3 cells, fully jittered. Worley maps F1, F2 and F2−F1 to signed [-1, 1] using typical ranges (1, 1.4, 1).
+- **Blue noise** is a lookup into precomputed void-and-cluster tables (4³, 8³, 16³, 32³) in `assets/bluenoise.bin`. It tiles only when the scale is a multiple of 4. The seed shifts the lookup by whole cells.
+- **GPU tests** (`src/gpu_tests.rs`): seam check per axis, a 1e-4-step continuity check across the tile edge, and a signed-range check. `cargo test noise_contact_sheet -- --ignored` writes `target/noise_sheet.pgm` for a visual check.
+
 ### UI conventions
 - **Every value input has a reset-to-default button** in front of it (the `row`/`reset` helpers in `main.rs`).
 - **Interface icons come from Material Symbols** via Iconify (https://icon-sets.iconify.design/material-symbols/). Save each icon as an SVG in `assets/icons/` with `currentColor` replaced by white so egui can tint it. License: `assets/icons/LICENSE.txt`.

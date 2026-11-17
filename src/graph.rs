@@ -15,14 +15,66 @@ pub enum MathOp {
     Max,
 }
 
+/// The discriminant is the `kind` constant noise.wgsl switches on.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub enum NoiseKind {
-    Perlin,
+    Perlin = 0,
+    Simplex = 1,
+    /// Flat random value per cell.
+    Voronoi = 2,
+    /// Voronoi summed over octaves (Blender 4.0+ fractal Voronoi).
+    VoronoiFractal = 3,
+    /// Distance to the nearest feature points (see `WorleyFeature`).
+    Worley = 4,
+    /// Random value per cell.
+    White = 5,
+    /// Tileable 3D blue noise table lookup.
+    Blue = 6,
+}
+
+impl NoiseKind {
+    pub const ALL: [NoiseKind; 7] = [
+        NoiseKind::Perlin,
+        NoiseKind::Simplex,
+        NoiseKind::Voronoi,
+        NoiseKind::VoronoiFractal,
+        NoiseKind::Worley,
+        NoiseKind::White,
+        NoiseKind::Blue,
+    ];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            NoiseKind::Perlin => "Perlin",
+            NoiseKind::Simplex => "Simplex",
+            NoiseKind::Voronoi => "Voronoi",
+            NoiseKind::VoronoiFractal => "Voronoi Fractal",
+            NoiseKind::Worley => "Worley",
+            NoiseKind::White => "White Noise",
+            NoiseKind::Blue => "Blue Noise",
+        }
+    }
+
+    /// Whether octaves, lacunarity and roughness apply.
+    pub fn has_octaves(self) -> bool {
+        matches!(self, NoiseKind::Perlin | NoiseKind::Simplex | NoiseKind::VoronoiFractal | NoiseKind::Worley)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub enum WorleyFeature {
+    #[default]
+    F1 = 0,
+    F2 = 1,
+    F2MinusF1 = 2,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct NoiseParams {
     pub kind: NoiseKind,
+    /// Worley only.
+    #[serde(default)]
+    pub feature: WorleyFeature,
     /// Cells per tile. A whole number keeps the noise tiling.
     pub scale: f32,
     /// Map the signed [-1, 1] result to [0, 1].
@@ -42,6 +94,7 @@ impl Default for NoiseParams {
     fn default() -> Self {
         Self {
             kind: NoiseKind::Perlin,
+            feature: WorleyFeature::F1,
             scale: 4.0,
             normalize: false,
             octaves: 4,
@@ -248,7 +301,10 @@ impl Graph {
             NodeKind::Noise(n) => {
                 if !is_whole(n.scale) {
                     Broken(format!("scale {} is not a whole number", n.scale))
-                } else if n.octaves > 1 && !is_whole(n.lacunarity) {
+                } else if n.kind == NoiseKind::Blue && n.scale % 4.0 != 0.0 {
+                    // The blue noise tables are 4³, 8³, 16³ and 32³; the tile must hold whole tables.
+                    Broken(format!("blue noise scale {} is not a multiple of 4", n.scale))
+                } else if n.kind.has_octaves() && n.octaves > 1 && !is_whole(n.lacunarity) {
                     Broken(format!("lacunarity {} is not a whole number", n.lacunarity))
                 } else {
                     match input(0, memo, stack) {
@@ -297,6 +353,21 @@ mod tests {
         }
         let out = g.find(|k| *k == NodeKind::OutDensity).unwrap();
         assert!(matches!(tiling_at(&g, out), Tiling::Broken(r) if r.contains("scale 2.5")));
+    }
+
+    #[test]
+    fn blue_noise_scale_rule_and_octaveless_lacunarity() {
+        let mut g = Graph::default();
+        let mk = |kind, scale, lacunarity| NodeKind::Noise(NoiseParams { kind, scale, lacunarity, ..Default::default() });
+        let blue6 = g.add(mk(NoiseKind::Blue, 6.0, 2.0), [0.0; 2]);
+        let blue8 = g.add(mk(NoiseKind::Blue, 8.0, 2.0), [0.0; 2]);
+        // Lacunarity is ignored by kinds without octaves.
+        let white = g.add(mk(NoiseKind::White, 8.0, 2.5), [0.0; 2]);
+        let perlin = g.add(mk(NoiseKind::Perlin, 8.0, 2.5), [0.0; 2]);
+        assert!(matches!(tiling_at(&g, blue6), Tiling::Broken(_)));
+        assert_eq!(tiling_at(&g, blue8), Tiling::Periodic);
+        assert_eq!(tiling_at(&g, white), Tiling::Periodic);
+        assert!(matches!(tiling_at(&g, perlin), Tiling::Broken(_)));
     }
 
     #[test]

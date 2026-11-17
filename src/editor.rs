@@ -4,7 +4,7 @@
 //! right-click adds a node, Delete removes the selection. Drag from an output to an input
 //! to connect; drag a connected input away to disconnect it.
 
-use crate::graph::{Graph, MathOp, NodeId, NodeKind, NoiseParams, Tiling};
+use crate::graph::{Graph, MathOp, NodeId, NodeKind, NoiseKind, NoiseParams, Tiling};
 use eframe::egui::{self, Color32, CornerRadius, Pos2, Rect, Sense, Stroke, StrokeKind, Vec2, epaint::CubicBezierShape};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -38,7 +38,7 @@ pub fn title(kind: &NodeKind) -> String {
         NodeKind::Math { op, .. } => format!("Math · {op:?}"),
         NodeKind::Position => "Position".into(),
         NodeKind::Normal { .. } => "Normal".into(),
-        NodeKind::Noise(n) => format!("{:?}", n.kind),
+        NodeKind::Noise(n) => n.kind.name().into(),
         NodeKind::OutDensity => "Density Output".into(),
         NodeKind::OutNormal => "Normal Output".into(),
     }
@@ -72,15 +72,16 @@ fn summary(kind: &NodeKind) -> String {
 
 /// Nodes offered by the right-click menu.
 fn palette() -> Vec<(&'static str, NodeKind)> {
-    vec![
-        ("Perlin", NodeKind::Noise(NoiseParams::default())),
+    let noises = NoiseKind::ALL.map(|kind| (kind.name(), NodeKind::Noise(NoiseParams { kind, ..Default::default() })));
+    noises.into_iter().chain([
         ("Value", NodeKind::Float(1.0)),
         ("Math", NodeKind::Math { op: MathOp::Add, a: 0.0, b: 0.0 }),
         ("Position", NodeKind::Position),
         ("Normal", NodeKind::Normal { flip: false }),
         ("Density Output", NodeKind::OutDensity),
         ("Normal Output", NodeKind::OutNormal),
-    ]
+    ])
+    .collect()
 }
 
 struct Layout {

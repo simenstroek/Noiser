@@ -13,3 +13,4 @@ serde_json = "1.0.154"
 
 [dev-dependencies]
 naga = { version = "30.0.2", features = ["wgsl-in"] }
+pollster = "1.0.2"

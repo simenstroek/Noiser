@@ -10,6 +10,14 @@ use std::fmt::Write;
 
 pub const NOISE_LIB: &str = include_str!("noise.wgsl");
 
+/// Minimal bindings the noise lib needs, for standalone evaluators (tests, export).
+/// Binding numbers match common.wgsl.
+#[allow(dead_code)] // used by tests now, texture export in milestone 5
+pub const EVAL_BINDINGS: &str = "struct U { seed: u32 }
+@group(0) @binding(0) var<uniform> u: U;
+@group(0) @binding(1) var<storage, read> P: array<f32>;
+@group(0) @binding(3) var<storage, read> BN: array<f32>;";
+
 #[derive(Debug)]
 pub struct Compiled {
     pub wgsl: String,
@@ -68,6 +76,7 @@ pub fn compile(g: &Graph) -> Result<Compiled, String> {
                 n.roughness,
                 n.distortion,
                 n.seed.map_or(-1.0, |s| s as f32), // shortcut: f32 holds seeds exactly only below 2^24
+                n.feature as u32 as f32,
             ]),
             _ => {}
         }
@@ -217,9 +226,9 @@ impl Gen<'_> {
                     None => (Ty::V, "vec3f(0.0)".into()),
                 }
             }
-            NodeKind::Noise(_) => {
+            NodeKind::Noise(n) => {
                 let q = self.operand(id, 0, Ty::V, "p");
-                (Ty::F, format!("noise_perlin({q}, {s}u)"))
+                (Ty::F, format!("noise({q}, {s}u, {}u)", n.kind as u32))
             }
             NodeKind::OutDensity | NodeKind::OutNormal => return Err("output nodes cannot feed other nodes".into()),
         };
@@ -236,7 +245,7 @@ mod tests {
     /// Parses and validates a full shader made of the noise lib, the generated graph, and a stub entry point.
     fn validate(c: &Compiled) {
         let src = format!(
-            "{NOISE_LIB}\n{}\nstruct U {{ seed: u32 }}\n@group(0) @binding(0) var<uniform> u: U;\n@group(0) @binding(1) var<storage, read> P: array<f32>;\n@fragment fn fs() -> @location(0) vec4f {{ return vec4f(graph_normal(vec3f(0.5)), graph_density(vec3f(0.5))); }}",
+            "{NOISE_LIB}\n{}\n{EVAL_BINDINGS}\n@fragment fn fs() -> @location(0) vec4f {{ return vec4f(graph_normal(vec3f(0.5)), graph_density(vec3f(0.5))); }}",
             c.wgsl
         );
         let module = naga::front::wgsl::parse_str(&src).unwrap_or_else(|e| panic!("{}\n---\n{src}", e.emit_to_string(&src)));
@@ -248,7 +257,7 @@ mod tests {
     #[test]
     fn default_graph_compiles() {
         let c = compile(&Graph::default_graph()).unwrap();
-        assert!(c.wgsl.contains("noise_perlin(v0, "));
+        assert!(c.wgsl.contains("noise(v0, "));
         validate(&c);
     }
 
@@ -287,8 +296,22 @@ mod tests {
             g.connect(v, m, 1);
             ops.push(m);
         }
-        let noise = g.add(NodeKind::Noise(NoiseParams { distortion: 0.3, seed: Some(7), ..Default::default() }), [0.0; 2]);
-        g.connect(ops[5], noise, 0);
+        // Every noise kind, summed: noise_0 + noise_1 + ...
+        let mut noise = None;
+        for kind in crate::graph::NoiseKind::ALL {
+            let n = g.add(NodeKind::Noise(NoiseParams { kind, distortion: 0.3, seed: Some(7), ..Default::default() }), [0.0; 2]);
+            g.connect(ops[5], n, 0);
+            noise = Some(match noise {
+                None => n,
+                Some(prev) => {
+                    let sum = g.add(NodeKind::Math { op: MathOp::Add, a: 0.0, b: 0.0 }, [0.0; 2]);
+                    g.connect(prev, sum, 0);
+                    g.connect(n, sum, 1);
+                    sum
+                }
+            });
+        }
+        let noise = noise.unwrap();
         // float * noise, then the normal of that, flipped.
         let scaled = g.add(NodeKind::Math { op: MathOp::Multiply, a: 0.0, b: 0.0 }, [0.0; 2]);
         g.connect(f, scaled, 0);
