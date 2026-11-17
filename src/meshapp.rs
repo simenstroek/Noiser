@@ -175,7 +175,8 @@ impl App {
             return;
         }
         let Some(m) = &self.mesh else {
-            self.mesh_export_open = false;
+            // Nothing to export yet; a mesh may still be loading.
+            self.mesh_export_open = self.mesh_job.is_some() && self.mesh_export_open;
             return;
         };
         let (lo, hi) = m.normalized.bounds();

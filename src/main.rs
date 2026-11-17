@@ -112,12 +112,14 @@ impl App {
     fn new(cc: &eframe::CreationContext) -> Self {
         egui_extras::install_image_loaders(&cc.egui_ctx);
         // `noiser path.noisegraph` opens that graph.
-        // `noiser [graph.noisegraph] [--mesh file.obj]`
+        // `noiser [graph.noisegraph] [--mesh file.obj] [--open-mesh-export]`
         let mut args = std::env::args().skip(1);
-        let (mut graph_arg, mut mesh_arg) = (None, None);
+        let (mut graph_arg, mut mesh_arg, mut open_mesh_export) = (None, None, false);
         while let Some(a) = args.next() {
             if a == "--mesh" {
                 mesh_arg = args.next().map(std::path::PathBuf::from);
+            } else if a == "--open-mesh-export" {
+                open_mesh_export = true;
             } else if graph_arg.is_none() {
                 graph_arg = Some(std::path::PathBuf::from(a));
             }
@@ -178,6 +180,7 @@ impl App {
         if let Some(p) = mesh_arg {
             app.start_mesh_load(p);
         }
+        app.mesh_export_open = open_mesh_export; // for looking at the dialog without clicking
         app
     }
 
