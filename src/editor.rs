@@ -711,6 +711,9 @@ impl Editor {
                     self.selected = new;
                 }
             }
+            if ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::A)) {
+                self.selected = graph.nodes.keys().copied().collect();
+            }
             if ui.input(|i| i.key_pressed(egui::Key::M) && !i.modifiers.command) {
                 for id in &self.selected {
                     if let Some(n) = graph.nodes.get_mut(id).filter(|n| !matches!(n.kind, NodeKind::OutDensity | NodeKind::OutNormal)) {
