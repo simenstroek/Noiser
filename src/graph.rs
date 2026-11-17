@@ -556,6 +556,9 @@ pub struct Node {
     /// Some(n) = n³ texels per tile. Export always ignores it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache: Option<u32>,
+    /// Bypassed: whatever reads this node gets its first input instead (or nothing if that is unconnected).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub muted: bool,
 }
 
 /// Every node has a single output, so an edge is "output of `from` → input `port` of `to`".
@@ -575,7 +578,7 @@ pub struct Graph {
 impl Graph {
     pub fn add(&mut self, kind: NodeKind, pos: [f32; 2]) -> NodeId {
         let id = self.nodes.keys().next_back().map_or(0, |k| k + 1);
-        self.nodes.insert(id, Node { kind, pos, cache: None });
+        self.nodes.insert(id, Node { kind, pos, cache: None, muted: false });
         id
     }
 
@@ -615,8 +618,16 @@ impl Graph {
         false
     }
 
+    /// The node feeding `port` of `to`, looking through muted nodes (which pass their first input on).
     pub fn input(&self, to: NodeId, port: usize) -> Option<NodeId> {
-        self.edges.iter().find(|e| e.to == to && e.port == port).map(|e| e.from)
+        let mut src = self.edges.iter().find(|e| e.to == to && e.port == port)?.from;
+        for _ in 0..=self.nodes.len() {
+            if !self.nodes.get(&src).is_some_and(|n| n.muted) {
+                return Some(src);
+            }
+            src = self.edges.iter().find(|e| e.to == src && e.port == 0)?.from;
+        }
+        None // a loop of muted nodes
     }
 
     pub fn find(&self, pred: impl Fn(&NodeKind) -> bool) -> Option<NodeId> {
@@ -1411,5 +1422,21 @@ mod tests {
         let mut bad = g.clone();
         bad.edges.push(Edge { from: 0, to: 2, port: 5 });
         assert!(Graph::from_json(&bad.to_json()).is_err());
+    }
+}
+
+#[cfg(test)]
+mod mute_tests {
+    use super::*;
+
+    #[test]
+    fn a_muted_node_passes_its_first_input_on() {
+        let mut g = Graph::default_graph(); // 0 Position -> 1 Noise -> 2 OutDensity
+        assert_eq!(g.input(2, 0), Some(1));
+        g.nodes.get_mut(&1).unwrap().muted = true;
+        assert_eq!(g.input(2, 0), Some(0), "the output reads the Position through the muted noise");
+        g.disconnect(1, 0);
+        assert_eq!(g.input(2, 0), None, "nothing to pass on");
+        assert!(Graph::from_json(&g.to_json()).unwrap().nodes[&1].muted, "survives a save");
     }
 }

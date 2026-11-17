@@ -781,11 +781,12 @@ fn node_props(ui: &mut egui::Ui, kind: &mut NodeKind) {
 }
 
 const PICKS_KEY: &str = "node_picks";
-const SHORTCUTS: [(&str, &str); 13] = [
+const SHORTCUTS: [(&str, &str); 14] = [
     ("Ctrl+Z", "Undo"),
     ("Ctrl+Y / Ctrl+Shift+Z", "Redo"),
     ("Ctrl+D", "Duplicate the selected nodes at the cursor (graph editor)"),
     ("Drop a file on the window", "A .noisegraph opens as the graph, an .obj loads as the mesh"),
+    ("M", "Mute (bypass) the selected nodes: readers get the first input instead"),
     ("F / Home", "Frame the selected nodes / all nodes (graph editor)"),
     ("Ctrl+C / Ctrl+V", "Copy the selection, paste at the cursor; works between two Noiser windows"),
     ("Delete / Backspace", "Delete the selected nodes (graph editor)"),

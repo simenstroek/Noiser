@@ -353,12 +353,12 @@ impl Editor {
             let r = CornerRadius::same((5.0 * z) as u8);
             painter.rect_filled(l.rect, r, Color32::from_gray(48));
             let header = Rect::from_min_size(l.rect.min, Vec2::new(l.rect.width(), HEADER_H * z));
-            let header_color = if has_output(&node.kind) { Color32::from_rgb(55, 70, 95) } else { Color32::from_rgb(80, 60, 95) };
+            let header_color = if node.muted { Color32::from_gray(60) } else if has_output(&node.kind) { Color32::from_rgb(55, 70, 95) } else { Color32::from_rgb(80, 60, 95) };
             painter.rect_filled(header, CornerRadius { nw: r.nw, ne: r.ne, sw: 0, se: 0 }, header_color);
             let cacheable = matches!(node.kind, NodeKind::Noise(_) | NodeKind::Math { .. } | NodeKind::Remap { .. } | NodeKind::Curve { .. } | NodeKind::Grid { .. } | NodeKind::Pattern(_));
             // Keep the title clear of the header buttons.
             let title_clip = header.with_max_x(header.right() - (if cacheable { 48.0 } else { 28.0 }) * z);
-            painter.with_clip_rect(title_clip).text(header.left_center() + Vec2::new(8.0 * z, 0.0), egui::Align2::LEFT_CENTER, title(&node.kind), font.clone(), Color32::WHITE);
+            painter.with_clip_rect(title_clip).text(header.left_center() + Vec2::new(8.0 * z, 0.0), egui::Align2::LEFT_CENTER, &if node.muted { format!("{} (muted)", title(&node.kind)) } else { title(&node.kind) }, font.clone(), if node.muted { Color32::from_gray(150) } else { Color32::WHITE });
             let is_covered = covered.contains(&id);
             let outline = if let Some(why) = &broken {
                 resp.on_hover_text(format!("Does not tile: {why}"));
@@ -607,6 +607,13 @@ impl Editor {
                 let new = paste_text(graph, &t, [at.x, at.y]);
                 if !new.is_empty() {
                     self.selected = new;
+                }
+            }
+            if ui.input(|i| i.key_pressed(egui::Key::M) && !i.modifiers.command) {
+                for id in &self.selected {
+                    if let Some(n) = graph.nodes.get_mut(id).filter(|n| !matches!(n.kind, NodeKind::OutDensity | NodeKind::OutNormal)) {
+                        n.muted = !n.muted;
+                    }
                 }
             }
             if ui.input(|i| i.key_pressed(egui::Key::F) && !i.modifiers.command) {
