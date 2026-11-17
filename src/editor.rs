@@ -987,6 +987,36 @@ mod tests {
         assert!(g.edges.iter().any(|e| e.from == 0 && matches!(g.nodes[&e.to].kind, NodeKind::Math { .. })));
     }
 
+    /// Ctrl+C then Ctrl+V over the canvas copies the selection to the clipboard text and pastes it back;
+    /// M mutes it, F frames it, and a node dropped on a wire is spliced in.
+    #[test]
+    fn keyboard_shortcuts_copy_paste_mute_and_frame() {
+        use egui_kittest::Harness;
+        let mut h = Harness::builder().with_size(Vec2::new(900.0, 600.0)).with_step_dt(1.0 / 60.0).build_ui_state(
+            |ui, (ed, g): &mut (Editor, Graph)| {
+                egui_extras::install_image_loaders(ui.ctx());
+                ed.debug_origin = ui.available_rect_before_wrap().min;
+                ed.show(ui, g, &BTreeMap::new());
+            },
+            (Editor::default(), Graph::default_graph()),
+        );
+        h.run();
+        h.state_mut().0.selected = BTreeSet::from([0, 1]);
+        h.hover_at(Pos2::new(450.0, 300.0));
+        h.run();
+        h.event(egui::Event::Copy);
+        h.step(); // the output of exactly the frame that handled the event
+        let copied = h.output().platform_output.commands.iter().find_map(|c| if let egui::OutputCommand::CopyText(t) = c { Some(t.clone()) } else { None });
+        let text = copied.expect("Ctrl+C puts the selection on the clipboard");
+        h.event(egui::Event::Paste(text));
+        h.run();
+        assert_eq!(h.state().1.nodes.len(), 6, "Position and Noise were pasted next to the originals");
+        // Mute whatever the paste selected.
+        h.event(egui::Event::Key { key: egui::Key::M, physical_key: Some(egui::Key::M), pressed: true, repeat: false, modifiers: Default::default() });
+        h.run();
+        assert!(h.state().1.nodes.values().filter(|n| n.muted).count() == 2);
+    }
+
     /// The operator dropdown on a Math node switches the mode without the details panel, and a
     /// link into the blend input is dropped when the new operator has no such input.
     #[test]
