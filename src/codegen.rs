@@ -472,7 +472,7 @@ mod tests {
 {}", g.to_json()));
             validate(&c);
             if round % 20 == 0 {
-                let src = crate::view::shader_source(&c.wgsl, round % 40 == 0, false);
+                let src = crate::view::shader_source(&c.wgsl, round % 40 == 0, crate::view::Extras { mask_view: round % 40 == 0 });
                 let module = naga::front::wgsl::parse_str(&src).unwrap_or_else(|e| panic!("{}", e.emit_to_string(&src)));
                 naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all()).validate(&module).unwrap();
             }
@@ -491,7 +491,7 @@ mod tests {
     #[test]
     fn preview_shader_validates() {
         let c = compile(&Graph::default_graph()).unwrap();
-        let src = crate::view::shader_source(&c.wgsl, true, false);
+        let src = crate::view::shader_source(&c.wgsl, true, crate::view::Extras { mask_view: true });
         let module = naga::front::wgsl::parse_str(&src).unwrap_or_else(|e| panic!("{}", e.emit_to_string(&src)));
         naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all())
             .validate(&module)
@@ -504,7 +504,7 @@ mod tests {
         let c = compile_with(&g, &BTreeMap::from([(1, 3)])).unwrap();
         assert!(c.wgsl.contains("cache_sample(3u, p)"));
         assert!(!c.wgsl.contains("fn noise_k0(")); // the cached noise isn't evaluated
-        let src = crate::view::shader_source(&c.wgsl, false, false);
+        let src = crate::view::shader_source(&c.wgsl, false, Default::default());
         let module = naga::front::wgsl::parse_str(&src).unwrap_or_else(|e| panic!("{}", e.emit_to_string(&src)));
         naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all()).validate(&module).unwrap();
     }

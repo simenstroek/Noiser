@@ -1195,15 +1195,15 @@ impl eframe::App for App {
         }
         // The mesh displacement mask is only compiled when it is in use; the pipeline key says so.
         let mask_on = self.pv.prim == meshapp::MESH_PRIM && self.mesh.is_some() && !self.mesh_mask.terms.is_empty();
-        let mask_view = mask_on && self.pv.show_mask && !self.pv.cloud;
+        let extras = view::Extras { mask_view: mask_on && self.pv.show_mask && !self.pv.cloud };
         if let Ok(c) = &compiled {
-            let key = format!("{}{}{}", if mask_on { "//mask\n" } else { "" }, if mask_view { "//maskview\n" } else { "" }, c.wgsl);
+            let key = format!("{}{}{}", if mask_on { "//mask\n" } else { "" }, if extras.mask_view { "//maskview\n" } else { "" }, c.wgsl);
             let built = self.built.as_ref().is_some_and(|b| b.0 == key);
             let queued = self.compiling.as_ref().is_some_and(|p| p.0 == key);
             if !built && !queued && self.failed_build.as_ref() != Some(&key) {
                 let (tx, rx) = std::sync::mpsc::channel();
                 let (device, queue, format, wgsl) = (self.rs.device.clone(), self.rs.queue.clone(), self.rs.target_format, c.wgsl.clone());
-                std::thread::spawn(move || _ = tx.send(view::build(&device, &queue, format, &wgsl, mask_on, mask_view)));
+                std::thread::spawn(move || _ = tx.send(view::build(&device, &queue, format, &wgsl, mask_on, extras)));
                 self.compiling = Some((key.clone(), rx)); // a superseded build just finishes and is dropped
                 ui.ctx().request_repaint_after(std::time::Duration::from_millis(50));
             }

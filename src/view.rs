@@ -364,8 +364,8 @@ impl Gpu {
 
 /// Full shader source for a compiled graph. `mask` compiles the mesh displacement mask; without it the
 /// mask is a stub, which keeps pipeline builds fast for everything that is not a masked mesh.
-pub fn shader_source(graph_wgsl: &str, mask: bool, mask_view: bool) -> String {
-    let s = format!(
+pub fn shader_source(graph_wgsl: &str, mask: bool, extras: Extras) -> String {
+    let mut s = format!(
         "{}\n{}\n{graph_wgsl}\n{}\n{}\n{}",
         codegen::NOISE_LIB,
         codegen::mesh_mask_lib(mask),
@@ -373,7 +373,18 @@ pub fn shader_source(graph_wgsl: &str, mask: bool, mask_view: bool) -> String {
         include_str!("raymarch.wgsl"),
         include_str!("slice.wgsl")
     );
-    if mask_view { s.replace("const MASK_VIEW: bool = false;", "const MASK_VIEW: bool = true;") } else { s }
+    if extras.mask_view {
+        s = s.replace("const MASK_VIEW: bool = false;", "const MASK_VIEW: bool = true;");
+        s = s.replace("fn view_mask(p: vec3f) -> f32 { return 1.0; } // STUB view_mask", "fn view_mask(p: vec3f) -> f32 { return mask_at(p); }");
+    }
+    s
+}
+
+/// Parts of the preview shader that are compiled only when used (see the stubs in raymarch.wgsl).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Extras {
+    /// Colour the mesh by its displacement mask (and draw it undisplaced).
+    pub mask_view: bool,
 }
 
 const BLIT_WGSL: &str = "
@@ -400,11 +411,11 @@ pub fn request_timestamps(mut cfg: egui_wgpu::WgpuConfiguration) -> egui_wgpu::W
     cfg
 }
 
-pub fn build(device: &wgpu::Device, queue: &wgpu::Queue, format: wgpu::TextureFormat, graph_wgsl: &str, mask: bool, mask_view: bool) -> Gpu {
+pub fn build(device: &wgpu::Device, queue: &wgpu::Queue, format: wgpu::TextureFormat, graph_wgsl: &str, mask: bool, extras: Extras) -> Gpu {
     // shortcut: no error scope here; the full shader is naga-validated in tests. Add one if users hit shader panics.
     let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("preview"),
-        source: wgpu::ShaderSource::Wgsl(shader_source(graph_wgsl, mask, mask_view).into()),
+        source: wgpu::ShaderSource::Wgsl(shader_source(graph_wgsl, mask, extras).into()),
     });
     let stages = wgpu::ShaderStages::FRAGMENT | wgpu::ShaderStages::COMPUTE;
     let entry = |binding, ty| wgpu::BindGroupLayoutEntry {

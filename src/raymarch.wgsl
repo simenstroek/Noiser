@@ -59,6 +59,11 @@ fn mask_color(m: f32) -> vec3f {
 // in the normal shader makes the driver's compile take far too long.
 const MASK_VIEW: bool = false;
 
+// A stub that view::shader_source swaps for the real mask only in the mask-view variant: otherwise the mask
+// would be inlined once more, which costs compile time. (A stub for the soft shadow was tried too: it saved
+// 0.15 s of compile time but made the solid view 60 % slower, so the shadow code stays in.)
+fn view_mask(p: vec3f) -> f32 { return 1.0; } // STUB view_mask
+
 fn displaced(p: vec3f, b: f32) -> f32 {
     if (MASK_VIEW) { return b; }
     return b - u.amount * mask_at(p) * graph_density(p / u.tile_size);
@@ -117,13 +122,16 @@ fn solid(ro: vec3f, rd: vec3f, bg: vec3f) -> vec3f {
     var t = span.x;
     // A ray that starts inside solid sees nothing: an open mesh such as a terrain is solid below its
     // surface, and the bounding sphere cuts through that region.
-    if (u.prim == 7u && field(ro + rd * t) < 0.0) { return bg; }
     var t_out = t; // last t known to be outside, and the field there
     var d_out = 0.0;
     var hit = false;
+    var started_inside = false;
     let max_steps = select(300, i32(u.max_steps), u.max_steps >= 1.0);
     for (var i = 0; i < max_steps; i++) {
         let d = field(ro + rd * t);
+        // A ray that starts inside solid sees nothing: an open mesh (a terrain) is solid below its surface and
+        // the bounding sphere cuts through it. Checked here so the graph is not inlined once more.
+        started_inside = started_inside || (i == 0 && d < 0.0 && u.prim == 7u);
         if (d < 0.0 && i > 0) {
             // Overshot into the surface (displacement breaks the distance bound). The field is
             // close to linear over one step, so a few false-position steps land on it.
@@ -146,7 +154,7 @@ fn solid(ro: vec3f, rd: vec3f, bg: vec3f) -> vec3f {
         t += d * u.step_scale;
         if (t > span.y) { break; }
     }
-    if (!hit) { return bg; }
+    if (!hit || started_inside) { return bg; }
     let p = ro + rd * t;
     let n = normal_at(p, max(pix * t, 1e-4));
     let SUN = sun_dir();
@@ -171,7 +179,7 @@ fn solid(ro: vec3f, rd: vec3f, bg: vec3f) -> vec3f {
     var albedo = u.look_a.xyz;
     var highlight = 1.0;
     if (MASK_VIEW) {
-        albedo = mask_color(mask_at(p));
+        albedo = mask_color(view_mask(p));
         highlight = 0.0; // the colour must stay readable
     }
     // Mirror-like reflection of the sky gradient, scaled by specular and (1 - roughness).
