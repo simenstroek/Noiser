@@ -5,6 +5,7 @@
 use crate::codegen::{self, EVAL_BINDINGS, NOISE_LIB};
 use crate::graph::Graph;
 use crate::mesh::{Normalization, V3};
+use crate::meshmask::PackedMask;
 use crate::surface::{RawMesh, surface_nets};
 use eframe::wgpu;
 use std::path::Path;
@@ -50,6 +51,8 @@ pub struct Displace {
     pub tile_size: f32,
     /// The "shape size" scale of the mesh in the preview.
     pub prim_size: f32,
+    /// Where the noise displaces more or less (see meshmask.rs).
+    pub mask: PackedMask,
 }
 
 #[repr(C)]
@@ -67,10 +70,16 @@ struct Block {
     tile_size: f32,
     prim_size: f32,
     _pad: f32,
+    mesh_lo: [f32; 3],
+    mask_n: u32,
+    mesh_hi: [f32; 3],
+    /// Samples farther than this from the surface cannot cross zero, so the noise is skipped there.
+    band: f32,
+    mask: [[f32; 4]; 12],
 }
 
 const MESH_EVAL_WGSL: &str = "
-struct X { grid_min: vec3f, h: f32, mesh_origin: vec3f, mesh_voxel: f32, nx: u32, ny: u32, z0: u32, count: u32, amount: f32, tile_size: f32, prim_size: f32, _pad: f32 };
+struct X { grid_min: vec3f, h: f32, mesh_origin: vec3f, mesh_voxel: f32, nx: u32, ny: u32, z0: u32, count: u32, amount: f32, tile_size: f32, prim_size: f32, _pad: f32, mesh_lo: vec3f, mask_n: u32, mesh_hi: vec3f, band: f32, mask: array<vec4f, 12> };
 @group(0) @binding(4) var<uniform> x: X;
 @group(0) @binding(5) var<storage, read_write> out: array<f32>;
 @group(0) @binding(6) var mesh_tex: texture_3d<f32>;
@@ -79,8 +88,11 @@ struct X { grid_min: vec3f, h: f32, mesh_origin: vec3f, mesh_voxel: f32, nx: u32
 fn main(@builtin(global_invocation_id) id: vec3u) {
     if (id.x >= x.nx || id.y >= x.ny || id.z >= x.count) { return; }
     let p = x.grid_min + vec3f(f32(id.x), f32(id.y), f32(x.z0 + id.z)) * x.h;
+    let at = (id.z * x.ny + id.y) * x.nx + id.x;
     let base = mesh_sdf_at(mesh_tex, p / x.prim_size, x.mesh_origin, x.mesh_voxel) * x.prim_size;
-    out[(id.z * x.ny + id.y) * x.nx + id.x] = base - x.amount * graph_density(p / x.tile_size);
+    if (abs(base) > x.band) { out[at] = base; return; }
+    let m = mesh_mask(mesh_tex, p / x.prim_size, x.mesh_origin, x.mesh_voxel, x.mesh_lo, x.mesh_hi, x.mask, x.mask_n);
+    out[at] = base - x.amount * m * graph_density(p / x.tile_size);
 }
 ";
 
@@ -122,11 +134,13 @@ pub struct MeshEvaluator {
     mesh: wgpu::TextureView,
     mesh_origin: V3,
     mesh_voxel: f32,
+    /// The mesh's bounds in normalized space (the mask's position ramps run across them).
+    mesh_bounds: (V3, V3),
 }
 
 impl MeshEvaluator {
     /// `mesh` is the baked distance grid (see `MeshSdf::upload`); `origin` and `voxel` describe it.
-    pub fn new(device: &wgpu::Device, queue: &wgpu::Queue, graph: &Graph, seed: u32, mesh: wgpu::TextureView, origin: V3, voxel: f32) -> Result<Self, String> {
+    pub fn new(device: &wgpu::Device, queue: &wgpu::Queue, graph: &Graph, seed: u32, mesh: wgpu::TextureView, origin: V3, voxel: f32, bounds: (V3, V3)) -> Result<Self, String> {
         use wgpu::util::DeviceExt;
         let c = codegen::compile(graph)?;
         let src = format!("{NOISE_LIB}\n{}\n{EVAL_BINDINGS}\n{MESH_EVAL_WGSL}", c.wgsl);
@@ -179,11 +193,12 @@ impl MeshEvaluator {
             mesh,
             mesh_origin: origin,
             mesh_voxel: voxel,
+            mesh_bounds: bounds,
         })
     }
 
     /// The field at layers `z0..z0 + count` of the grid: `nx * ny` values per layer, x fastest.
-    pub fn layers(&self, grid: &Grid, d: Displace, z0: usize, count: usize) -> Vec<f32> {
+    pub fn layers(&self, grid: &Grid, d: Displace, band: f32, z0: usize, count: usize) -> Vec<f32> {
         use wgpu::util::DeviceExt;
         let dev = &self.device;
         let [nx, ny, _] = grid.dims;
@@ -200,6 +215,11 @@ impl MeshEvaluator {
             tile_size: d.tile_size,
             prim_size: d.prim_size,
             _pad: 0.0,
+            mesh_lo: self.mesh_bounds.0,
+            mask_n: d.mask.count,
+            mesh_hi: self.mesh_bounds.1,
+            band,
+            mask: std::array::from_fn(|i| d.mask.terms[i]),
         };
         let block = dev.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: None, contents: bytemuck::bytes_of(&block), usage: wgpu::BufferUsages::UNIFORM });
         let bytes = (nx * ny * count * 4) as u64;
@@ -262,11 +282,12 @@ impl Job<'_> {
     pub fn extract(&self, progress: &Progress) -> RawMesh {
         let grid = self.grid();
         let [nx, ny, nz] = grid.dims;
+        let band = self.reach + 3.0 * grid.h;
         let mut slab: (usize, Vec<f32>) = (usize::MAX, Vec::new());
         let mut mesh = surface_nets(nx, ny, nz, |k| {
             if slab.0 == usize::MAX || k < slab.0 || k >= slab.0 + SLAB {
                 let count = SLAB.min(nz - k);
-                slab = (k, self.ev.layers(&grid, self.d, k, count));
+                slab = (k, self.ev.layers(&grid, self.d, band, k, count));
             }
             progress.store((k * 900 / nz) as u32, Ordering::Relaxed);
             let at = (k - slab.0) * nx * ny;
@@ -330,8 +351,8 @@ impl SeedMode {
 
 /// How far the surface can move: the displacement's reach, limited to what a distance grid padded
 /// by `grid_pad` covers (it keeps 0.05 of margin).
-pub fn reach(graph: &Graph, amount: f32, grid_pad: f32) -> f32 {
-    let push = crate::view::push_range(graph.density_range(), amount);
+pub fn reach(graph: &Graph, amount: f32, mask: (f32, f32), grid_pad: f32) -> f32 {
+    let push = crate::view::push_range(graph.density_range(), amount, mask);
     push.0.abs().max(push.1.abs()).min((grid_pad - 0.05).max(0.0))
 }
 
@@ -354,9 +375,9 @@ impl FileJob<'_> {
         let (mesh, norm) = crate::mesh::Mesh::load_obj(input)?.normalized();
         let sdf = crate::meshsdf::MeshSdf::build(&mesh, self.grid_res, self.grid_pad, &Default::default());
         let (_texture, view) = sdf.upload(self.device, self.queue); // keep the texture alive for the whole job
-        let ev = MeshEvaluator::new(self.device, self.queue, self.graph, self.seed, view, sdf.origin, sdf.voxel)?;
         let (lo, hi) = mesh.bounds();
-        let job = Job { ev: &ev, d: self.d, lo, hi, reach: reach(self.graph, self.d.amount, self.grid_pad), norm, settings: self.settings.clone() };
+        let ev = MeshEvaluator::new(self.device, self.queue, self.graph, self.seed, view, sdf.origin, sdf.voxel, (lo, hi))?;
+        let job = Job { ev: &ev, d: self.d, lo, hi, reach: reach(self.graph, self.d.amount, self.d.mask.range, self.grid_pad), norm, settings: self.settings.clone() };
         job.run(output, progress)
     }
 }

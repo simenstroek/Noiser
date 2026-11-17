@@ -23,6 +23,8 @@ pub struct MeshState {
     /// The welded mesh scaled to a bounding sphere of radius 1, and how to get back to object space.
     pub normalized: Arc<Mesh>,
     pub norm: Normalization,
+    /// The normalized mesh's bounds.
+    pub bounds: (crate::mesh::V3, crate::mesh::V3),
     pub sdf: Arc<MeshSdf>,
     pub view: wgpu::TextureView,
     _texture: wgpu::Texture,
@@ -99,7 +101,8 @@ impl App {
         let [nx, ny, nz] = b.sdf.dims;
         let (texture, view) = b.sdf.upload(&self.rs.device, &self.rs.queue);
         self.status = format!("{}: {} triangles, distance grid {nx}×{ny}×{nz}", b.name, b.normalized.triangles.len());
-        self.mesh = Some(MeshState { name: b.name, normalized: b.normalized, norm: b.norm, sdf: Arc::new(b.sdf), view, _texture: texture, res: b.res, pad: b.pad });
+        let bounds = b.normalized.bounds();
+        self.mesh = Some(MeshState { name: b.name, normalized: b.normalized, norm: b.norm, bounds, sdf: Arc::new(b.sdf), view, _texture: texture, res: b.res, pad: b.pad });
         self.mesh_gen += 1;
         if b.new_file {
             self.pv.prim = MESH_PRIM;
@@ -130,7 +133,7 @@ impl App {
             ui.weak("Import a low-resolution mesh to shape it with the graph. It shows up as the Mesh shape in the 3D view.");
             return;
         };
-        let reach = view::push_range(self.graph.density_range(), self.pv.amount);
+        let reach = view::push_range(self.graph.density_range(), self.pv.amount, self.mesh_mask.range());
         let reach = reach.0.abs().max(reach.1.abs());
         let (name, tris, dims, grid_res, grid_pad) = (m.name.clone(), m.normalized.triangles.len(), m.sdf.dims, m.res, m.pad);
         ui.label(format!("{name}: {tris} triangles"));
@@ -144,6 +147,7 @@ impl App {
         if reach > grid_pad - 0.05 {
             ui.colored_label(crate::editor::ORANGE, format!("Displacement reaches {reach:.2} but the grid only extends {grid_pad:.2} past the mesh: the shape will be clipped. Raise the padding."));
         }
+        self.mask_ui(ui);
         if ui.button("Export displaced mesh…").clicked() {
             self.mesh_export_open = true;
         }
@@ -160,7 +164,7 @@ pub struct MeshExportJob {
 impl App {
     /// How far the current displacement can move the surface, limited to what the distance grid covers.
     fn displacement_reach(&self, grid_pad: f32) -> f32 {
-        meshexport::reach(&self.graph, self.pv.amount, grid_pad)
+        meshexport::reach(&self.graph, self.pv.amount, self.mesh_mask.range(), grid_pad)
     }
 
     /// The Export displaced mesh window.
@@ -184,7 +188,7 @@ impl App {
             return;
         };
         let (lo, hi) = m.normalized.bounds();
-        let displace = Displace { amount: self.pv.amount, tile_size: self.pv.tile_size, prim_size: self.pv.prim_size };
+        let displace = Displace { amount: self.pv.amount, tile_size: self.pv.tile_size, prim_size: self.pv.prim_size, mask: self.mesh_mask.pack() };
         let reach = self.displacement_reach(m.pad);
         let name = m.name.clone();
         let mut open = true;
@@ -236,7 +240,7 @@ impl App {
             return;
         };
         let (lo, hi) = m.normalized.bounds();
-        let displace = Displace { amount: self.pv.amount, tile_size: self.pv.tile_size, prim_size: self.pv.prim_size };
+        let displace = Displace { amount: self.pv.amount, tile_size: self.pv.tile_size, prim_size: self.pv.prim_size, mask: self.mesh_mask.pack() };
         let reach = self.displacement_reach(m.pad);
         let (graph, seed, norm) = (self.graph.clone(), self.pv.seed, m.norm);
         let (device, queue) = (self.rs.device.clone(), self.rs.queue.clone());
@@ -245,7 +249,7 @@ impl App {
         let p = progress.clone();
         let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || {
-            let r = MeshEvaluator::new(&device, &queue, &graph, seed, view, origin, voxel).and_then(|ev| {
+            let r = MeshEvaluator::new(&device, &queue, &graph, seed, view, origin, voxel, (lo, hi)).and_then(|ev| {
                 let job = Job { ev: &ev, d: displace, lo, hi, reach, norm, settings };
                 job.run(&path, &p)
             });
@@ -378,7 +382,7 @@ impl App {
         let files = self.batch_files.clone();
         let total = files.len();
         let (graph, base, mode) = (self.graph.clone(), self.pv.seed, self.batch_seeds);
-        let d = Displace { amount: self.pv.amount, tile_size: self.pv.tile_size, prim_size: self.pv.prim_size };
+        let d = Displace { amount: self.pv.amount, tile_size: self.pv.tile_size, prim_size: self.pv.prim_size, mask: self.mesh_mask.pack() };
         let settings = self.mesh_export.clone();
         let (grid_res, grid_pad) = (self.mesh_res, self.mesh_pad);
         let (device, queue) = (self.rs.device.clone(), self.rs.queue.clone());
@@ -417,5 +421,72 @@ impl App {
             let _ = tx.send(summary);
         });
         self.batch_job = Some(BatchJob { index, total, file_progress, name, done: rx });
+    }
+}
+
+impl App {
+    /// The Displacement mask section: terms that vary how strongly the noise displaces the mesh.
+    fn mask_ui(&mut self, ui: &mut egui::Ui) {
+        use crate::meshmask::{MAX_TERMS, MaskKind, MaskTerm};
+        egui::CollapsingHeader::new("Displacement mask").default_open(!self.mesh_mask.terms.is_empty()).show(ui, |ui| {
+            ui.weak("Varies how strongly the noise displaces each part of the mesh. With no terms every part moves equally. Strength is the sum of weight × term; every term is measured on the mesh itself. Applies to the Mesh shape.");
+            let mut remove = None;
+            for (i, t) in self.mesh_mask.terms.iter_mut().enumerate() {
+                ui.group(|ui| {
+                    ui.horizontal(|ui| {
+                        let before = t.kind;
+                        egui::ComboBox::from_id_salt(("mask kind", i)).selected_text(t.kind.name()).show_ui(ui, |ui| {
+                            for k in MaskKind::ALL {
+                                ui.selectable_value(&mut t.kind, k, k.name());
+                            }
+                        });
+                        if t.kind != before {
+                            (t.lo, t.hi) = t.kind.default_range();
+                        }
+                        if ui.small_button("×").on_hover_text("Remove this term").clicked() {
+                            remove = Some(i);
+                        }
+                    });
+                    crate::row(ui, &mut t.weight, 1.0, |ui, v| _ = ui.add(egui::Slider::new(v, -2.0..=2.0).text("weight")));
+                    if matches!(t.kind, MaskKind::Position | MaskKind::Normal) {
+                        let word = if t.kind == MaskKind::Position { "along" } else { "facing" };
+                        crate::row(ui, &mut t.axis, 1, |ui, v| {
+                            ui.label(word);
+                            for (a, name) in [(0, "X"), (1, "Y"), (2, "Z")] {
+                                ui.selectable_value(v, a, name);
+                            }
+                        });
+                        crate::row(ui, &mut t.negative, false, |ui, v| _ = ui.checkbox(v, "negative direction"));
+                    }
+                    if t.kind != MaskKind::Constant {
+                        let (dlo, dhi) = t.kind.default_range();
+                        let speed = if t.kind == MaskKind::Curvature { 0.05 } else { 0.01 };
+                        crate::row(ui, &mut (t.lo, t.hi), (dlo, dhi), |ui, v| {
+                            ui.add(egui::DragValue::new(&mut v.0).speed(speed).prefix("0 at "));
+                            ui.add(egui::DragValue::new(&mut v.1).speed(speed).prefix("1 at "));
+                        });
+                        crate::row(ui, &mut t.invert, false, |ui, v| _ = ui.checkbox(v, "invert"));
+                    }
+                    ui.weak(t.kind.help());
+                });
+            }
+            if let Some(i) = remove {
+                self.mesh_mask.terms.remove(i);
+            }
+            if self.mesh_mask.terms.len() < MAX_TERMS {
+                ui.menu_button("Add term", |ui| {
+                    for k in MaskKind::ALL {
+                        if ui.button(k.name()).on_hover_text(k.help()).clicked() {
+                            self.mesh_mask.terms.push(MaskTerm::new(k));
+                            ui.close();
+                        }
+                    }
+                });
+            }
+            if self.mesh_mask.range() != (1.0, 1.0) {
+                let (lo, hi) = self.mesh_mask.range();
+                ui.weak(format!("Strength ranges from {lo:.2} to {hi:.2}."));
+            }
+        });
     }
 }

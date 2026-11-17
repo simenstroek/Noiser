@@ -40,8 +40,14 @@ fn base_sdf(p: vec3f) -> f32 {
 // Must stay above the hit threshold (0.5 px × t), which is ~0.01 at the far end of the bounds.
 const SHELL_MARGIN: f32 = 0.02;
 
+// How strongly the noise displaces the surface at p: 1, or for a mesh the displacement mask.
+fn mask_at(p: vec3f) -> f32 {
+    if (u.prim != 7u || u.mask_n == 0u) { return 1.0; }
+    return mesh_mask(mesh_tex, p / u.prim_size, u.mesh_origin, u.mesh_voxel, u.mesh_lo, u.mesh_hi, u.mask, u.mask_n);
+}
+
 fn displaced(p: vec3f, b: f32) -> f32 {
-    return b - u.amount * graph_density(p / u.tile_size);
+    return b - u.amount * mask_at(p) * graph_density(p / u.tile_size);
 }
 
 // Signed distance bound for marching: exact near the surface, conservative elsewhere.

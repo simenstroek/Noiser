@@ -43,16 +43,25 @@ pub struct Uniforms {
     /// Min corner and texel size of the mesh distance grid.
     pub mesh_origin: [f32; 3],
     pub mesh_voxel: f32,
+    /// The mesh's bounds, the number of mask terms and the terms (see meshmask.rs).
+    pub mesh_lo: [f32; 3],
+    pub mask_n: u32,
+    pub mesh_hi: [f32; 3],
+    pub _pad_mask: f32,
+    pub mask: [[f32; 4]; 12],
 }
 
-/// How far the surface can move in/out: amount × the graph's density range, kept finite for
-/// the shader (1e6 effectively disables the shell skip for unbounded graphs).
-pub fn push_range((lo, hi): (f32, f32), amount: f32) -> (f32, f32) {
-    let (a, b) = (amount * lo, amount * hi); // NaN when amount is 0 and the range unbounded
-    if a.is_nan() || b.is_nan() {
+/// How far the surface can move in/out: amount × the displacement mask × the graph's density range,
+/// kept finite for the shader (1e6 effectively disables the shell skip for unbounded graphs).
+/// `mask` is the range of the mask (1, 1 when there is none).
+pub fn push_range((lo, hi): (f32, f32), amount: f32, mask: (f32, f32)) -> (f32, f32) {
+    let products = [mask.0 * lo, mask.0 * hi, mask.1 * lo, mask.1 * hi].map(|p| amount * p);
+    if products.iter().any(|p| p.is_nan()) {
+        // 0 times infinity: an unbounded graph with nothing to scale it.
         return (-1e6, 1e6);
     }
-    (a.min(b).clamp(-1e6, 1e6), a.max(b).clamp(-1e6, 1e6))
+    let (a, b) = (products.iter().cloned().fold(f32::INFINITY, f32::min), products.iter().cloned().fold(f32::NEG_INFINITY, f32::max));
+    (a.clamp(-1e6, 1e6), b.clamp(-1e6, 1e6))
 }
 
 // ---- GPU timing ------------------------------------------------------------

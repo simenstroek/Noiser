@@ -253,12 +253,12 @@ fn bench_preview() {
         let rl = (fwd[2] * fwd[2] + fwd[0] * fwd[0]).sqrt();
         let right = [-fwd[2] / rl, 0.0, fwd[0] / rl];
         let up = [right[1] * fwd[2] - right[2] * fwd[1], right[2] * fwd[0] - right[0] * fwd[2], right[0] * fwd[1] - right[1] * fwd[0]];
-        let push = view::push_range(graph.density_range(), 0.25);
+        let push = view::push_range(graph.density_range(), 0.25, (1.0, 1.0));
         let u = view::Uniforms {
             cam_pos: pos, aspect: 1.0, cam_fwd: fwd, amount: 0.25, cam_right: right, step_scale: step, cam_up: up, seed: 0,
             tile_size: 1.0, prim_size: 1.0, pixel: 2.0 / size[1] as f32, cloud_density: 8.0, mode, prim: 0,
             slice_axis: 2, slice_mode: 0, slice_pos: 0.5, slice_aspect: 1.0, slice_tiles: 1.0, slice_res: view::SLICE_RES,
-            push_min: push.0, push_max: push.1, _pad: [0.0; 2], mesh_origin: [0.0; 3], mesh_voxel: 1.0,
+            push_min: push.0, push_max: push.1, _pad: [0.0; 2], mesh_origin: [0.0; 3], mesh_voxel: 1.0, mesh_lo: [0.0; 3], mask_n: 0, mesh_hi: [0.0; 3], _pad_mask: 0.0, mask: [[0.0; 4]; 12],
         };
         let mut samples = Vec::new();
         for _ in 0..30 {
@@ -715,9 +715,11 @@ mod mesh_export_tests {
 
     /// A radius-1 icosphere baked and uploaded, with an evaluator for `graph`.
     fn evaluator(gpu: &Gpu, graph: &Graph, seed: u32) -> (MeshSdf, MeshEvaluator, wgpu::Texture) {
-        let sdf = MeshSdf::build(&shapes::icosphere(1.0, 3), 64, 0.6, &AtomicU32::new(0));
+        let mesh = shapes::icosphere(1.0, 3);
+        let bounds = mesh.bounds();
+        let sdf = MeshSdf::build(&mesh, 64, 0.6, &AtomicU32::new(0));
         let (texture, view) = sdf.upload(&gpu.device, &gpu.queue);
-        let ev = MeshEvaluator::new(&gpu.device, &gpu.queue, graph, seed, view, sdf.origin, sdf.voxel).unwrap();
+        let ev = MeshEvaluator::new(&gpu.device, &gpu.queue, graph, seed, view, sdf.origin, sdf.voxel, bounds).unwrap();
         (sdf, ev, texture)
     }
 
@@ -752,7 +754,7 @@ mod mesh_export_tests {
     fn without_displacement_the_export_is_the_mesh() {
         let Some(gpu) = gpu() else { return eprintln!("no GPU adapter; skipping") };
         let (_sdf, ev, _tex) = evaluator(&gpu, &single_node_graph(NodeKind::Float(0.0)), 0);
-        let d = Displace { amount: 0.0, tile_size: 1.0, prim_size: 1.0 };
+        let d = Displace { amount: 0.0, tile_size: 1.0, prim_size: 1.0, mask: crate::meshmask::PackedMask::NONE };
         let j = job(&ev, d, 0.0, 64);
         let m = j.extract(&Default::default());
         assert!(m.triangles.len() > 5000, "{} triangles", m.triangles.len());
@@ -768,7 +770,7 @@ mod mesh_export_tests {
         let Some(gpu) = gpu() else { return eprintln!("no GPU adapter; skipping") };
         let noise = noise_graph(NoiseParams { scale: 3.0, octaves: 3, ..Default::default() });
         let (sdf, ev, _tex) = evaluator(&gpu, &noise, 0);
-        let d = Displace { amount: 0.12, tile_size: 1.0, prim_size: 1.0 };
+        let d = Displace { amount: 0.12, tile_size: 1.0, prim_size: 1.0, mask: crate::meshmask::PackedMask::NONE };
         let j = job(&ev, d, 0.12, 96);
         let h = j.grid().h;
         let m = j.extract(&Default::default());
@@ -795,7 +797,7 @@ mod mesh_export_tests {
         let (_sdf, ev, _tex) = evaluator(&gpu, &single_node_graph(NodeKind::Float(0.0)), 0);
         // Shape size 2 doubles the sphere in the preview; the mesh's own units are 3 per normalized
         // unit and centred at x = 5, so the file should hold a sphere of radius 2 / 2 × 3 = 3 there.
-        let d = Displace { amount: 0.0, tile_size: 1.0, prim_size: 2.0 };
+        let d = Displace { amount: 0.0, tile_size: 1.0, prim_size: 2.0, mask: crate::meshmask::PackedMask::NONE };
         let mut j = job(&ev, d, 0.0, 64);
         j.hi = [1.0; 3];
         j.norm = Normalization { center: [5.0, 0.0, 0.0], scale: 3.0 };
@@ -813,11 +815,86 @@ mod mesh_export_tests {
         assert!(std::fs::metadata(dir.join("sphere.ply")).unwrap().len() > 1000);
     }
 
+    /// The mask value at each exported vertex of a unit sphere. With a constant density of 1 the
+    /// surface moves outward by `amount * mask`, so mask = (radius - 1) / amount.
+    fn probe_mask(gpu: &Gpu, terms: Vec<crate::meshmask::MaskTerm>) -> Vec<([f32; 3], f32)> {
+        let amount = 0.1;
+        let mask = crate::meshmask::MaskSettings { terms }.pack();
+        let (_sdf, ev, _tex) = evaluator(gpu, &single_node_graph(NodeKind::Float(1.0)), 0);
+        let d = Displace { amount, tile_size: 1.0, prim_size: 1.0, mask };
+        let j = job(&ev, d, 0.3, 80);
+        let m = j.extract(&Default::default());
+        assert!(!m.positions.is_empty());
+        m.positions.iter().map(|p| (*p, (radius(*p) - 1.0) / amount)).collect()
+    }
+
+    #[test]
+    fn mask_terms_vary_the_displacement_as_described() {
+        use crate::meshmask::{MaskKind, MaskTerm};
+        let Some(gpu) = gpu() else { return eprintln!("no GPU adapter; skipping") };
+        let mean = |v: &[([f32; 3], f32)]| v.iter().map(|(_, m)| m).sum::<f32>() / v.len() as f32;
+        let (lo, hi) = shapes::icosphere(1.0, 3).bounds();
+
+        // A constant is just a strength: weight 2 moves everything out by 0.2.
+        let mut c = MaskTerm::new(MaskKind::Constant);
+        c.weight = 2.0;
+        let v = probe_mask(&gpu, vec![c]);
+        assert!(v.iter().all(|(_, m)| (m - 2.0).abs() < 0.25), "constant 2: {:?}", (mean(&v)));
+
+        // A ramp up the Y axis: 0 at the bottom of the mesh, 1 at the top.
+        let ramp = MaskTerm::new(MaskKind::Position);
+        let v = probe_mask(&gpu, vec![ramp]);
+        let worst = v.iter().map(|(p, m)| {
+            let s = p.map(|c| c / radius(*p)); // the surface point this vertex came from
+            (m - ((s[1] - lo[1]) / (hi[1] - lo[1])).clamp(0.0, 1.0)).abs()
+        }).fold(0.0, f32::max);
+        assert!(worst < 0.15, "position ramp is off by {worst}");
+        let end = |keep: &dyn Fn(f32) -> bool| mean(&v.iter().cloned().filter(|(p, _)| keep(p[1])).collect::<Vec<_>>());
+        let (bottom, top) = (end(&|y| y < -0.85), end(&|y| y > 0.85));
+        assert!(bottom < 0.1 && top > 0.85, "bottom {bottom}, top {top}");
+
+        // The same ramp the other way (negative direction) and inverted both flip it.
+        let mut down = MaskTerm::new(MaskKind::Position);
+        down.negative = true;
+        let v_down = probe_mask(&gpu, vec![down]);
+        assert!((mean(&v_down) - 0.5).abs() < 0.1 && mean(&v_down.iter().filter(|(p, _)| p[1] > 0.8).map(|(p, m)| (*p, *m)).collect::<Vec<_>>()) < 0.1);
+
+        // Normal direction: facing up counts fully, the equator and below not at all.
+        let up = MaskTerm::new(MaskKind::Normal);
+        let v = probe_mask(&gpu, vec![up]);
+        let worst = v.iter().map(|(p, m)| (m - (p[1] / radius(*p)).clamp(0.0, 1.0)).abs()).fold(0.0, f32::max);
+        assert!(worst < 0.15, "normal term is off by {worst}");
+
+        // Curvature: a unit sphere has mean curvature 1 everywhere, which is 0.75 of the way from -2 to 2.
+        let v = probe_mask(&gpu, vec![MaskTerm::new(MaskKind::Curvature)]);
+        assert!((mean(&v) - 0.75).abs() < 0.12, "curvature mean {}", mean(&v));
+
+        // Occlusion: a convex sphere is fully open.
+        let v = probe_mask(&gpu, vec![MaskTerm::new(MaskKind::Occlusion)]);
+        assert!(mean(&v) > 0.9, "occlusion mean {}", mean(&v));
+
+        // Thickness: the solid behind a unit sphere's surface is its diameter, 2, which is half of 0 to 4.
+        let mut t = MaskTerm::new(MaskKind::Thickness);
+        t.hi = 4.0;
+        let v = probe_mask(&gpu, vec![t]);
+        assert!((mean(&v) - 0.5).abs() < 0.1, "thickness mean {}", mean(&v));
+
+        // Terms add: a constant 0.5 plus an inverted ramp.
+        let mut half = MaskTerm::new(MaskKind::Constant);
+        half.weight = 0.5;
+        let mut inv = MaskTerm::new(MaskKind::Position);
+        inv.invert = true;
+        inv.weight = 0.5;
+        let v = probe_mask(&gpu, vec![half, inv]);
+        assert!((mean(&v.iter().filter(|(p, _)| p[1] < -0.8).map(|(p, m)| (*p, *m)).collect::<Vec<_>>()) - 1.0).abs() < 0.1);
+        assert!((mean(&v.iter().filter(|(p, _)| p[1] > 0.8).map(|(p, m)| (*p, *m)).collect::<Vec<_>>()) - 0.5).abs() < 0.1);
+    }
+
     #[test]
     fn seeds_change_the_result_and_repeat() {
         let Some(gpu) = gpu() else { return eprintln!("no GPU adapter; skipping") };
         let noise = noise_graph(NoiseParams { scale: 3.0, octaves: 2, ..Default::default() });
-        let d = Displace { amount: 0.1, tile_size: 1.0, prim_size: 1.0 };
+        let d = Displace { amount: 0.1, tile_size: 1.0, prim_size: 1.0, mask: crate::meshmask::PackedMask::NONE };
         let run = |seed: u32| {
             let (_sdf, ev, _tex) = evaluator(&gpu, &noise, seed);
             job(&ev, d, 0.1, 48).extract(&Default::default())
@@ -852,12 +929,12 @@ fn export_a_real_mesh() {
     let sdf = crate::meshsdf::MeshSdf::build(&mesh, 128, pad, &Default::default());
     eprintln!("distance grid {:?} in {:?}", sdf.dims, t.elapsed());
     let (_tex, view) = sdf.upload(&gpu.device, &gpu.queue);
-    let ev = MeshEvaluator::new(&gpu.device, &gpu.queue, &graph, seed, view, sdf.origin, sdf.voxel).unwrap();
-    let push = crate::view::push_range(graph.density_range(), amount);
+    let ev = MeshEvaluator::new(&gpu.device, &gpu.queue, &graph, seed, view, sdf.origin, sdf.voxel, mesh.bounds()).unwrap();
+    let push = crate::view::push_range(graph.density_range(), amount, (1.0, 1.0));
     let reach = push.0.abs().max(push.1.abs()).min(pad - 0.05);
     let (lo, hi) = mesh.bounds();
     let settings = Settings { res, format: Format::Obj, cull: 0.01 };
-    let job = Job { ev: &ev, d: Displace { amount, tile_size: 1.0, prim_size: 1.0 }, lo, hi, reach, norm, settings };
+    let job = Job { ev: &ev, d: Displace { amount, tile_size: 1.0, prim_size: 1.0, mask: crate::meshmask::PackedMask::NONE }, lo, hi, reach, norm, settings };
     eprintln!("export grid {:?}", job.grid().dims);
     let t = std::time::Instant::now();
     let out = root.join("target").join(format!("{}_displaced.obj", mesh_path.file_stem().unwrap().to_string_lossy()));
@@ -906,7 +983,7 @@ mod batch_tests {
                 queue: &gpu.queue,
                 graph: &noise,
                 seed,
-                d: Displace { amount: 0.1, tile_size: 1.0, prim_size: 1.0 },
+                d: Displace { amount: 0.1, tile_size: 1.0, prim_size: 1.0, mask: crate::meshmask::PackedMask::NONE },
                 settings: Settings { res: 48, format: Format::Obj, cull: 0.0 },
                 grid_res: 48,
                 grid_pad: 0.5,
@@ -927,7 +1004,7 @@ mod batch_tests {
         let worst = a.positions.iter().zip(&big.positions).map(|(p, q)| (0..3).map(|k| (p[k] * 3.0 - q[k]).abs()).fold(0.0, f32::max)).fold(0.0, f32::max);
         assert!(worst < 0.02, "scaled mesh differs by {worst}");
         // A missing file is an error, not a panic.
-        let job = FileJob { device: &gpu.device, queue: &gpu.queue, graph: &noise, seed: 0, d: Displace { amount: 0.1, tile_size: 1.0, prim_size: 1.0 }, settings: Settings::default(), grid_res: 32, grid_pad: 0.5 };
+        let job = FileJob { device: &gpu.device, queue: &gpu.queue, graph: &noise, seed: 0, d: Displace { amount: 0.1, tile_size: 1.0, prim_size: 1.0, mask: crate::meshmask::PackedMask::NONE }, settings: Settings::default(), grid_res: 32, grid_pad: 0.5 };
         assert!(job.run(&dir.join("nope.obj"), &dir.join("x.obj"), &Default::default()).is_err());
     }
 }

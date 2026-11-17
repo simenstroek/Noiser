@@ -13,6 +13,10 @@ struct Uniforms {
     push_min: f32, push_max: f32, _pad0: f32, _pad1: f32,
     // The baked mesh distance grid (see meshsdf.rs): its min corner and texel size.
     mesh_origin: vec3f, mesh_voxel: f32,
+    // The mesh's bounds, and the displacement mask (meshmask.rs): its term count and two vec4 per term.
+    mesh_lo: vec3f, mask_n: u32,
+    mesh_hi: vec3f, _pm: f32,
+    mask: array<vec4f, 12>,
 };
 @group(0) @binding(0) var<uniform> u: Uniforms;
 @group(0) @binding(1) var<storage, read> P: array<f32>;

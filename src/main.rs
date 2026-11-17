@@ -10,6 +10,7 @@ mod export;
 mod graph;
 mod mesh;
 mod meshapp;
+mod meshmask;
 mod meshexport;
 mod meshsdf;
 mod surface;
@@ -105,6 +106,8 @@ struct App {
     batch_dir: Option<std::path::PathBuf>,
     batch_seeds: meshexport::SeedMode,
     batch_job: Option<meshapp::BatchJob>,
+    /// How strongly the noise displaces each part of a mesh (see meshmask.rs).
+    mesh_mask: meshmask::MaskSettings,
 }
 
 /// An export running on a worker thread.
@@ -117,15 +120,20 @@ impl App {
     fn new(cc: &eframe::CreationContext) -> Self {
         egui_extras::install_image_loaders(&cc.egui_ctx);
         // `noiser path.noisegraph` opens that graph.
-        // `noiser [graph.noisegraph] [--mesh file.obj] [--open-mesh-export] [--batch-out DIR --batch-file FILE ...]`
+        // `noiser [graph.noisegraph] [--mesh file.obj] [--open-mesh-export] [--batch-out DIR --batch-file FILE ...] [--mask KIND ...]`
         let mut args = std::env::args().skip(1);
         let (mut graph_arg, mut mesh_arg, mut open_mesh_export) = (None, None, false);
         let (mut batch_dir, mut batch_files): (Option<std::path::PathBuf>, Vec<std::path::PathBuf>) = (None, Vec::new());
+        let mut mask_terms = Vec::new();
         while let Some(a) = args.next() {
             if a == "--mesh" {
                 mesh_arg = args.next().map(std::path::PathBuf::from);
             } else if a == "--open-mesh-export" {
                 open_mesh_export = true;
+            } else if a == "--mask" {
+                // A displacement-mask term of the named kind with its default settings.
+                let name = args.next().unwrap_or_default().to_lowercase();
+                mask_terms.extend(meshmask::MaskKind::ALL.iter().find(|k| k.name().to_lowercase().starts_with(&name)).map(|k| meshmask::MaskTerm::new(*k)));
             } else if a == "--batch-out" {
                 batch_dir = args.next().map(std::path::PathBuf::from);
             } else if a == "--batch-file" {
@@ -191,10 +199,12 @@ impl App {
             batch_dir: None,
             batch_seeds: meshexport::SeedMode::Same,
             batch_job: None,
+            mesh_mask: meshmask::MaskSettings::default(),
         };
         if let Some(p) = mesh_arg {
             app.start_mesh_load(p);
         }
+        app.mesh_mask.terms = mask_terms;
         app.mesh_export_open = open_mesh_export; // for looking at the dialog without clicking
         // `--batch-out DIR --batch-file A.obj --batch-file B.obj` starts a batch right away.
         if batch_dir.is_some() && !batch_files.is_empty() {
@@ -373,8 +383,12 @@ impl App {
         let aspect = |r: egui::Rect| r.width() / r.height().max(1.0);
         // How far the surface can move: amount × density range. Kept finite for the shader;
         // 1e6 effectively disables the shell skip for unbounded graphs.
-        let push = view::push_range(range, pv.amount);
+        // The displacement mask only applies to a mesh.
+        let mesh_on = pv.prim == meshapp::MESH_PRIM && self.mesh.is_some();
+        let mask = if mesh_on { self.mesh_mask.pack() } else { meshmask::PackedMask::NONE };
+        let push = view::push_range(range, pv.amount, mask.range);
         let (mesh_origin, mesh_voxel) = self.mesh.as_ref().map_or(([0.0; 3], 1.0), |m| (m.sdf.origin, m.sdf.voxel));
+        let (mesh_lo, mesh_hi) = self.mesh.as_ref().map_or(([0.0; 3], [0.0; 3]), |m| m.bounds);
         Uniforms {
             cam_pos: pos,
             aspect: aspect(view3d),
@@ -402,6 +416,11 @@ impl App {
             _pad: [0.0; 2],
             mesh_origin,
             mesh_voxel,
+            mesh_lo,
+            mask_n: mask.count,
+            mesh_hi,
+            _pad_mask: 0.0,
+            mask: std::array::from_fn(|i| mask.terms[i]),
         }
     }
 
