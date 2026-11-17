@@ -171,7 +171,11 @@ fn solid(ro: vec3f, rd: vec3f, bg: vec3f) -> vec3f {
         albedo = mask_color(mask_at(p));
         highlight = 0.0; // the colour must stay readable
     }
-    return albedo * (diff * sh * 0.9 * u.light[0].w * u.light[1].xyz + sky * 0.25 * u.light[1].w) + vec3f(spec * highlight * u.light[0].w);
+    // Mirror-like reflection of the sky gradient, scaled by specular and (1 - roughness).
+    let r = reflect(rd, n);
+    let env = mix(u.light[3].xyz, u.light[2].xyz, r.y * 0.5 + 0.5) * 3.0 * u.light[1].w;
+    let reflection = env * u.look_a.w * (1.0 - rough) * highlight;
+    return albedo * (diff * sh * 0.9 * u.light[0].w * u.light[1].xyz + sky * 0.25 * u.light[1].w) + vec3f(spec * highlight * u.light[0].w) + reflection;
 }
 
 fn cloud(ro: vec3f, rd: vec3f, bg: vec3f) -> vec3f {
