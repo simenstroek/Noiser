@@ -580,6 +580,28 @@ fn mix_matches_reference() {
 }
 
 #[test]
+fn the_cpu_curve_matches_the_shader() {
+    let Some(gpu) = gpu() else { return eprintln!("no GPU adapter; skipping") };
+    let pts = crate::graph::curve_points(&[[0.0, 0.2], [0.3, 1.0], [0.5, -0.4], [0.9, 0.5], [1.4, 0.5]]);
+    for mode in crate::graph::CurveMode::ALL {
+        let mut g = Graph::default();
+        let c = g.add(NodeKind::Curve { points: pts.clone(), mode }, [0.0; 2]);
+        let o = g.add(NodeKind::OutDensity, [0.0; 2]);
+        g.connect(c, o, 0);
+        // The curve input is a constant, so evaluate it at a series of x through a Float node.
+        for k in 0..=24 {
+            let x = -0.2 + 1.8 * k as f32 / 24.0;
+            let f = g.add(NodeKind::Float(x), [0.0; 2]);
+            g.connect(f, c, 0);
+            let gpu_value = eval(&gpu, &g, &[[0.5; 3]])[0];
+            let cpu_value = crate::graph::curve_value(&pts, mode, x);
+            assert!((gpu_value - cpu_value).abs() < 2e-4, "{mode:?} at {x}: gpu {gpu_value} cpu {cpu_value}");
+            g.remove(f);
+        }
+    }
+}
+
+#[test]
 fn curve_matches_reference() {
     use crate::graph::CurveMode::*;
     let Some(gpu) = gpu() else { return eprintln!("no GPU adapter; skipping") };

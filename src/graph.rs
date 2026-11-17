@@ -41,6 +41,54 @@ pub fn curve_points(points: &[[f32; 2]]) -> Vec<[f32; 2]> {
     p
 }
 
+/// The curve value at `x`, as the shader computes it (`curve_eval` in noise.wgsl): `points` sorted by x.
+pub fn curve_value(points: &[[f32; 2]], mode: CurveMode, x: f32) -> f32 {
+    let n = points.len();
+    if n == 0 {
+        return 0.0;
+    }
+    if x <= points[0][0] {
+        return points[0][1];
+    }
+    let secant = |i: usize| (points[i + 1][1] - points[i][1]) / (points[i + 1][0] - points[i][0]).max(1e-12);
+    let slope = |k: usize| {
+        if n < 2 {
+            return 0.0;
+        }
+        if k == 0 {
+            return secant(0);
+        }
+        if k == n - 1 {
+            return secant(n - 2);
+        }
+        let (d0, d1) = (secant(k - 1), secant(k));
+        if d0 * d1 <= 0.0 {
+            return 0.0;
+        }
+        let (h0, h1) = (points[k][0] - points[k - 1][0], points[k + 1][0] - points[k][0]);
+        let (w0, w1) = (2.0 * h1 + h0, h1 + 2.0 * h0);
+        (w0 + w1) / (w0 / d0 + w1 / d1)
+    };
+    for i in 1..n {
+        if x < points[i][0] {
+            let (x0, y0, x1, y1) = (points[i - 1][0], points[i - 1][1], points[i][0], points[i][1]);
+            let mut t = (x - x0) / (x1 - x0).max(1e-12);
+            match mode {
+                CurveMode::Step => return y0,
+                CurveMode::Smooth => t = t * t * (3.0 - 2.0 * t),
+                CurveMode::Cubic => {
+                    let (h, t2) = (x1 - x0, t * t);
+                    let t3 = t2 * t;
+                    return (2.0 * t3 - 3.0 * t2 + 1.0) * y0 + (t3 - 2.0 * t2 + t) * h * slope(i - 1) + (-2.0 * t3 + 3.0 * t2) * y1 + (t3 - t2) * h * slope(i);
+                }
+                CurveMode::Linear => {}
+            }
+            return y0 + (y1 - y0) * t;
+        }
+    }
+    points[n - 1][1]
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub enum MathOp {
     Add,

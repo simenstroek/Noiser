@@ -791,6 +791,7 @@ fn node_props(ui: &mut egui::Ui, kind: &mut NodeKind) {
                     ui.selectable_value(mode, m, m.label());
                 }
             });
+            curve_plot(ui, points, *mode);
             let mut remove = None;
             for (i, q) in points.iter_mut().enumerate() {
                 ui.horizontal(|ui| {
@@ -809,7 +810,7 @@ fn node_props(ui: &mut egui::Ui, kind: &mut NodeKind) {
                 let y = points.last().map_or(0.0, |q| q[1]);
                 points.push([x, y]);
             }
-            ui.weak("Points are sorted by x when evaluated. Before the first point and after the last, the output holds the end value.");
+            ui.weak("Drag the points in the plot, double-click to add one, right-click a point to remove it. Before the first point and after the last, the output holds the end value.");
         }
         NodeKind::Pattern(p) => pattern_props(ui, p),
         NodeKind::Grid { counts, corners } => {
@@ -1301,6 +1302,65 @@ fn main() -> eframe::Result {
     eframe::run_native("Noiser", options, Box::new(|cc| Ok(Box::new(App::new(cc)))))
 }
 
+/// Draws a curve with draggable points: drag a point to move it, double-click empty space to add one,
+/// right-click a point to remove it.
+fn curve_plot(ui: &mut egui::Ui, points: &mut Vec<[f32; 2]>, mode: graph::CurveMode) {
+    let size = egui::Vec2::new(ui.available_width().min(300.0), 150.0);
+    let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::click_and_drag());
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(rect, 4.0, egui::Color32::from_gray(28));
+    let sorted = graph::curve_points(points);
+    // View: the points extent plus a margin, always including 0..1 so the usual range is visible.
+    let (mut x0, mut x1, mut y0, mut y1) = (0.0f32, 1.0f32, 0.0f32, 1.0f32);
+    for p in &sorted {
+        (x0, x1, y0, y1) = (x0.min(p[0]), x1.max(p[0]), y0.min(p[1]), y1.max(p[1]));
+    }
+    let (mx, my) = ((x1 - x0) * 0.08, (y1 - y0) * 0.08);
+    (x0, x1, y0, y1) = (x0 - mx, x1 + mx, y0 - my, y1 + my);
+    let to_screen = |p: [f32; 2]| egui::Pos2::new(rect.left() + (p[0] - x0) / (x1 - x0) * rect.width(), rect.bottom() - (p[1] - y0) / (y1 - y0) * rect.height());
+    let to_curve = |s: egui::Pos2| [x0 + (s.x - rect.left()) / rect.width() * (x1 - x0), y0 + (rect.bottom() - s.y) / rect.height() * (y1 - y0)];
+    let grid = egui::Stroke::new(1.0, egui::Color32::from_gray(50));
+    for v in [0.0f32, 1.0] {
+        painter.line_segment([to_screen([x0, v]), to_screen([x1, v])], grid);
+        painter.line_segment([to_screen([v, y0]), to_screen([v, y1])], grid);
+    }
+    let line: Vec<egui::Pos2> = (0..=120)
+        .map(|i| {
+            let x = x0 + (x1 - x0) * i as f32 / 120.0;
+            to_screen([x, graph::curve_value(&sorted, mode, x)])
+        })
+        .collect();
+    painter.add(egui::Shape::line(line, egui::Stroke::new(1.5, egui::Color32::from_rgb(120, 190, 255))));
+    let hovered = resp.hover_pos().and_then(|m| points.iter().position(|p| to_screen(*p).distance(m) < 8.0));
+    for (i, p) in points.iter().enumerate() {
+        let radius = if hovered == Some(i) { 6.0 } else { 4.5 };
+        painter.circle(to_screen(*p), radius, egui::Color32::from_rgb(255, 210, 90), egui::Stroke::new(1.0, egui::Color32::BLACK));
+    }
+    // Which point a drag moves is decided when it starts.
+    let id = resp.id.with("drag point");
+    if resp.drag_started() {
+        let at = resp.interact_pointer_pos().and_then(|m| points.iter().position(|p| to_screen(*p).distance(m) < 10.0));
+        ui.memory_mut(|mem| mem.data.insert_temp(id, at));
+    }
+    if resp.dragged() {
+        if let (Some(Some(i)), Some(m)) = (ui.memory(|mem| mem.data.get_temp::<Option<usize>>(id)), resp.interact_pointer_pos()) {
+            if let Some(p) = points.get_mut(i) {
+                *p = to_curve(m);
+            }
+        }
+    }
+    if resp.double_clicked() && points.len() < graph::MAX_CURVE_POINTS {
+        if let Some(m) = resp.interact_pointer_pos() {
+            points.push(to_curve(m));
+        }
+    }
+    if resp.secondary_clicked() && points.len() > 1 {
+        if let Some(i) = resp.interact_pointer_pos().and_then(|m| points.iter().position(|p| to_screen(*p).distance(m) < 10.0)) {
+            points.remove(i);
+        }
+    }
+}
+
 /// A row of cell counts for the axes a pattern uses, labelled by what they count.
 fn pattern_counts(ui: &mut egui::Ui, p: &mut graph::PatternParams, labels: [&str; 3]) {
     let d = graph::PatternParams::for_kind(p.kind);
@@ -1576,5 +1636,20 @@ mod lighting_tests {
             let d = preset().pack()[0];
             assert!(((d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt() - 1.0).abs() < 1e-4, "the sun direction is a unit vector");
         }
+    }
+}
+
+#[cfg(test)]
+mod curve_ui_tests {
+    use super::*;
+    use egui_kittest::{Harness, kittest::Queryable};
+
+    #[test]
+    fn the_curve_panel_draws_and_lists_every_point() {
+        let kind = NodeKind::Curve { points: vec![[0.0, 0.0], [0.5, 1.0], [1.0, 0.2]], mode: graph::CurveMode::Cubic };
+        let mut h = Harness::builder().with_size(egui::Vec2::new(400.0, 600.0)).build_ui_state(|ui, kind: &mut NodeKind| node_props(ui, kind), kind);
+        h.run();
+        assert!(h.get_all_by_label("x").count() >= 3, "a remove button per point");
+        h.get_by_label("Cubic");
     }
 }
