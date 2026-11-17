@@ -57,12 +57,12 @@ Node graph (centre) · 3D view (primitive picker, solid/cloud, displacement amou
 | 3 | Viewports | 3D solid + cloud, primitive picker; 2D slice with axis/slider/heatmap/normalize |
 | 4 | All noise nodes | all 7 tiling (or flagged), seam test: field(p) == field(p + period) on GPU readback |
 | 5 | Texture export | 2D PNG/EXR, 3D as slice-grid PNG, DDS volume, raw f32; 8/16/32-bit |
-| 6 | Math export + Blender | `.noiser` spec, test vectors, Blender add-on (see §4) passing the vectors |
+| 6 | Math export + samplers | `.noiser` spec, test vectors, Blender add-on (see §4) passing the vectors. Perlin/Value/Math done; remaining noise kinds, Normal and a Houdini sampler follow |
 | 7 | Mesh displacement (later) | import closed mesh → narrow-band SDF grid → apply noise → export VDB or a high-poly mesh (see §3a) |
 | 8 | Subgraphs + prefab library (later) | select nodes → collapse to subgraph; edges crossing the selection become subgraph inputs/outputs (like Unreal's "Collapse to Function"); save subgraphs to a library of prefab noises |
 
 ### Noise notes (milestone 4)
-- **Hash**: pcg3d on the wrapped integer cell, so every noise tiles by wrapping its lattice every `scale` cells. Octaves use `seed + octave`.
+- **Hash**: Blender's hash (Jenkins lookup3 over float bits, i.e. its 4D White Noise node, `hash_float_to_float3(float4(cell, seed))`) on the wrapped integer cell, so every noise tiles by wrapping its lattice every `scale` cells. Octaves use `seed + octave`. It replaced pcg3d on 2026-11-17 so Blender can reproduce every lattice random with a stock node; seeds must stay below 2^24 (exact as f32). Saved graphs keep their settings but render a different, equivalent pattern.
 - **Simplex** uses psrdnoise's BCC lattice (`uvw = M·x`, kernel `max(0.5 − r², 0)⁴`, gain 90). Its features are slightly finer than Perlin's at the same scale.
 - **Voronoi / Worley** search 3×3×3 cells, fully jittered. Worley maps F1, F2 and F2−F1 to signed [-1, 1] using typical ranges (1, 1.4, 1).
 - **Blue noise** is a lookup into precomputed void-and-cluster tables (4³, 8³, 16³, 32³) in `assets/bluenoise.bin`. It tiles only when the scale is a multiple of 4. The seed shifts the lookup by whole cells.
@@ -120,16 +120,31 @@ Node graph (centre) · 3D view (primitive picker, solid/cloud, displacement amou
 
 ---
 
-## 4. Blender sampling: options and my advice
-Geometry Nodes has **no Python custom-node API**, so we can't drop a "Noiser" node into a GN tree that calls our code. Realistic options:
+### Displacement control and island culling (requested 2026-11-17, for milestone 7)
+`d(p) = base_sdf(p) − amount · mask(p) · noise(p)`, where `mask` is a **weighted sum of terms**, each with its own weight and remap/clamp:
+- **Position gradient** along X/Y/Z (a ramp over the object's bounds).
+- **Normal**: dot of the surface normal with a chosen axis, remapped and clamped. The normal is the gradient of the base SDF, so it comes free from the grid.
+- **Occlusion**: SDF-based AO (a few samples along the normal, as in IQ's AO).
+- **Thickness**: march inward along the negative normal until the SDF turns positive again.
+- **Curvature**: mean curvature, the divergence of the normalized SDF gradient, by finite differences on the grid (convex and concave get opposite signs).
 
-1. **Add-on that builds a native GN node group from the `.noiser` file** (recommended). It translates each IR op into stock math/vector nodes, packed into a group "Noiser: MyNoise" with a Position input and Density/Normal outputs. This fully matches "behaves like the Noise Texture node": it's live, works per-point, needs no bake, and also works in shader nodes. The cost is that each noise must be rebuilt from math nodes (hash, lattice, fade, 27-cell Voronoi search). The groups get big, but they're generated, and the hash must be built from integer-safe float ops. Test vectors prove it matches.
-2. **Bake to OpenVDB** and sample with Blender's grid nodes. Simple and fast for any graph, but it's a texture rather than a function, with fixed resolution.
-3. **Python sampler that writes attributes** (an operator, not live). This is the least useful.
+**Every term is derived from the base SDF only, never from the displaced field**, so the mask can't feed back on itself. That means occlusion and thickness (the expensive ones) bake **once per mesh** into mask channels at SDF resolution, and only the weights, remaps and noise stay live. The preview samples the channels, and export reads them through the same grid path.
 
-So: (1) first, with (2) as a fallback for nodes that can't be expressed as a function. **Blue noise is one of those.** It's an optimized pattern, not a formula, so in the math export it has to be a baked tileable 3D texture embedded in the file. Every sampler then needs texture support for it.
+**Vertex color / painted masks (my advice: yes, as scalar channels).** It survives the SDF conversion the same way distance does: the mesh-to-SDF pass already finds the closest triangle per voxel, so interpolating a vertex attribute (barycentric) at that closest point gives a painted value per voxel, stored as one more mask channel. Cheap, and the band is exactly where displacement acts. Limits: color edges blur to voxel resolution, and where two surfaces sit within a voxel (thin walls) the nearer triangle wins. Treat it as a scalar mask (pick one color channel or a named attribute) rather than full RGB. Import needs a format that carries it: glTF `COLOR_0` or PLY, not plain OBJ.
 
----
+**Culling tiny floating parts on export, keeping multi-part meshes.** Label connected components of the inside region on the grid (union-find over bricks) before meshing, then drop components below a size threshold (volume, as a fraction of the largest component or an absolute size in object units). A multi-part mesh survives because its real parts are large. An option, **keep every component that contains part of the original mesh**, protects deliberately small parts: displacement-made floaters appear either outside the base surface (outward bumps that detach) or as fragments cut from the body, so "contains base mesh" separates them from intentional small parts. The VDB export clears the culled voxels, and mesh export never meshes them.
+
+## 4. Samplers: how other software evaluates a `.noiser` file
+
+**Strategy (decided 2026-11-17).** Matching every host's built-in noise nodes can't last: we plan to export to Houdini and others too, and each host's nodes differ. So the file stays host-neutral and each host gets a purpose-fit **sampler plugin** that reads our own graph format and implements the ops natively, with **texture bake as the fallback** where a host or an op can't do it. Baking is universal but needs very high resolution to keep the detail, so it's the second choice, not the first.
+
+- **Spec**: `docs/noiser-format.md` (JSON op list, one hash, written definitions, test vectors). The hash is Blender's Jenkins hash, defined in about 30 lines of integer code in the spec, so any host with u32 math can implement it directly. Blender is just the host where a stock node (White Noise 4D) happens to equal it.
+- **Conformance**: each file embeds test vectors (the GPU result on a 6³ grid). A sampler passes when it matches within 1e-4. Noiser can write them (`File > Export Math Function`), and `cargo test noiser_files_for_blender` writes sample files to `target/blender/`.
+- **Blender** (`blender/noiser/`, an extension for 5.2+): File > Import > Noiser Function builds a Geometry Nodes group and a shader group from stock nodes, each with a Position input and a Density output. Checked headless with `blender/check_file.py` (Geometry Nodes groups, five Perlin graphs, max error about 1e-6). `blender/check_hash.py` checks the hash alone. Perlin needs about 200 nodes (a reusable group) but evaluates live at any resolution. The shader group is built but not yet evaluated by a test.
+- **Houdini** (next): a VEX sampler is the natural fit (VEX has the u32 ops and `float`-bit casts the hash needs). Same test vectors.
+- **Fallback**: Noiser's VDB and slice-grid exports (milestone 5).
+- **Not yet in the format/add-on**: Simplex, Voronoi, Voronoi Fractal, Worley, White, Blue (blue noise must ship as an embedded 3D texture, since it's an optimized pattern, not a formula), the Normal op. The add-on says which op it can't build.
+- **Not worth doing**: a Python sampler that writes attributes (an operator, not live).
 
 ## 5. Things to watch
 - **Rust isn't ready on this machine**: rustup is installed with no toolchain. Milestone 0 runs `rustup default stable`.

@@ -1,0 +1,10 @@
+schema_version = "1.0.0"
+
+id = "noiser"
+version = "0.1.0"
+name = "Noiser"
+tagline = "Import Noiser tiling noise functions as node groups"
+maintainer = "Noiser"
+type = "add-on"
+blender_version_min = "5.2.0"
+license = ["SPDX:GPL-3.0-or-later"]

@@ -5,6 +5,7 @@ mod codegen;
 mod editor;
 mod export;
 mod graph;
+mod noiser_file;
 #[cfg(test)]
 mod gpu_tests;
 mod vdb;
@@ -238,6 +239,24 @@ impl App {
             let _ = tx.send(r);
         });
         self.export_job = Some(ExportJob { progress, done: rx });
+    }
+
+    /// Writes the `.noiser` math-function file. Its test vectors come from the GPU, so this runs
+    /// on a worker thread like texture export.
+    fn export_function(&mut self) {
+        let name = self.path.as_ref().and_then(|p| p.file_stem()).map_or("noise".into(), |n| n.to_string_lossy().into_owned());
+        let Some(path) = rfd::FileDialog::new().add_filter("Noiser math function", &["noiser"]).set_file_name(format!("{name}.noiser")).save_file() else { return };
+        let (graph, seed) = (self.graph.clone(), self.pv.seed);
+        let (device, queue) = (self.rs.device.clone(), self.rs.queue.clone());
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let r = export::Evaluator::new(&device, &queue, &graph, seed)
+                .and_then(|ev| noiser_file::file(&graph, seed, |n| ev.eval(n, [0; 3], [n; 3], false, None)))
+                .and_then(|s| std::fs::write(&path, s).map_err(|e| e.to_string()))
+                .map(|()| format!("Exported {}", path.display()));
+            let _ = tx.send(r);
+        });
+        self.export_job = Some(ExportJob { progress: export::Progress::default(), done: rx });
     }
 
     /// Asks whether to restore the backup of a session that didn't exit cleanly.
@@ -532,7 +551,8 @@ fn node_props(ui: &mut egui::Ui, kind: &mut NodeKind) {
                 let mut locked = seed.is_some();
                 ui.checkbox(&mut locked, "seed override");
                 if locked {
-                    ui.add(egui::DragValue::new(seed.get_or_insert(0)));
+                    // Seeds are hashed as f32 (Blender's White Noise W), exact below 2^24.
+                    ui.add(egui::DragValue::new(seed.get_or_insert(0)).range(0..=1_000_000));
                 } else {
                     *seed = None;
                 }
@@ -592,6 +612,9 @@ impl eframe::App for App {
                     ui.separator();
                     if ui.button("Export…").clicked() {
                         self.export_open = true;
+                    }
+                    if ui.add_enabled(self.export_job.is_none(), egui::Button::new("Export Math Function (.noiser)…")).clicked() {
+                        self.export_function();
                     }
                 });
                 ui.weak(&self.status);

@@ -19,14 +19,20 @@ pub(crate) fn gpu() -> Option<Gpu> {
 
 /// Evaluates the graph's density at each point.
 fn eval(gpu: &Gpu, graph: &Graph, points: &[[f32; 3]]) -> Vec<f32> {
-    use wgpu::util::DeviceExt;
     let c = codegen::compile(graph).unwrap();
+    let pts: Vec<[f32; 4]> = points.iter().map(|p| [p[0], p[1], p[2], 0.0]).collect();
+    eval_expr(gpu, &c, "graph_density(q.xyz)", &pts)
+}
+
+/// Evaluates a WGSL f32 expression of `q` (the point, a vec4f) next to the compiled graph.
+fn eval_expr(gpu: &Gpu, c: &codegen::Compiled, expr: &str, points: &[[f32; 4]]) -> Vec<f32> {
+    use wgpu::util::DeviceExt;
     let src = format!(
         "{NOISE_LIB}\n{}\n{EVAL_BINDINGS}
 @group(0) @binding(4) var<storage, read> pts: array<vec4f>;
 @group(0) @binding(5) var<storage, read_write> out: array<f32>;
 @compute @workgroup_size(64) fn main(@builtin(global_invocation_id) id: vec3u) {{
-    if (id.x < arrayLength(&out)) {{ out[id.x] = graph_density(pts[id.x].xyz); }}
+    if (id.x < arrayLength(&out)) {{ let q = pts[id.x]; out[id.x] = {expr}; }}
 }}",
         c.wgsl
     );
@@ -63,8 +69,7 @@ fn eval(gpu: &Gpu, graph: &Graph, points: &[[f32; 3]]) -> Vec<f32> {
     let uniforms = init(bytemuck::bytes_of(&[0u32; 4]), wgpu::BufferUsages::UNIFORM);
     let params = init(bytemuck::cast_slice(&c.params), wgpu::BufferUsages::STORAGE);
     let blue = init(bytemuck::cast_slice(&crate::bluenoise::tables()), wgpu::BufferUsages::STORAGE);
-    let pts: Vec<[f32; 4]> = points.iter().map(|p| [p[0], p[1], p[2], 0.0]).collect();
-    let pts = init(bytemuck::cast_slice(&pts), wgpu::BufferUsages::STORAGE);
+    let pts = init(bytemuck::cast_slice(points), wgpu::BufferUsages::STORAGE);
     let size = (points.len() * 4) as u64;
     let out = d.create_buffer(&wgpu::BufferDescriptor { label: None, size, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC, mapped_at_creation: false });
     let read = d.create_buffer(&wgpu::BufferDescriptor { label: None, size, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
@@ -363,5 +368,60 @@ fn noises_stay_in_signed_range() {
         eprintln!("{:16} min {lo:+.3} max {hi:+.3}", kind.name());
         assert!(lo >= -1.05 && hi <= 1.05, "{}: range {lo}..{hi}", kind.name());
         assert!(hi - lo > 1.0, "{}: range {lo}..{hi} is too narrow", kind.name());
+    }
+}
+
+/// Writes `target/blender/hash.json`: hash01 for a spread of cells and seeds, so
+/// `blender/check_hash.py` can confirm Blender's White Noise node gives the same values.
+#[test]
+fn hash_vectors_for_blender() {
+    let Some(gpu) = gpu() else { return eprintln!("no GPU adapter; skipping") };
+    let c = codegen::compile(&noise_graph(NoiseParams::default())).unwrap();
+    let mut cases = Vec::new();
+    for (i, p) in points(200, 11).into_iter().enumerate() {
+        let cell = p.map(|v| ((v - 0.5) * 2000.0).floor()); // negatives, zero, larger values
+        let seed = [0.0, 1.0, 7.0, 100.0, (0x51ED27 + 3) as f32][i % 5];
+        cases.push([cell[0], cell[1], cell[2], seed]);
+    }
+    cases.push([0.0, 0.0, 0.0, 0.0]);
+    let ch: Vec<Vec<f32>> = (0..3).map(|k| eval_expr(&gpu, &c, &format!("hash01(vec3i(q.xyz), u32(q.w))[{k}]"), &cases)).collect();
+    let rows: Vec<_> = cases.iter().enumerate().map(|(i, q)| serde_json::json!({"cell": &q[..3], "seed": q[3], "h": [ch[0][i], ch[1][i], ch[2][i]]})).collect();
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target").join("blender");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("hash.json"), serde_json::to_string(&rows).unwrap()).unwrap();
+    // Sanity: uniform-ish in [0, 1).
+    let mean = ch[0].iter().sum::<f32>() / ch[0].len() as f32;
+    assert!(ch.iter().flatten().all(|h| (0.0..=1.0).contains(h)) && (0.35..0.65).contains(&mean), "mean {mean}");
+}
+
+/// Writes `target/blender/*.noiser` through the real export path, for `blender/check_file.py`.
+#[test]
+fn noiser_files_for_blender() {
+    let Some(gpu) = gpu() else { return eprintln!("no GPU adapter; skipping") };
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target").join("blender");
+    std::fs::create_dir_all(&dir).unwrap();
+    let perlin = |p: NoiseParams| noise_graph(NoiseParams { kind: NoiseKind::Perlin, ..p });
+    let mut chain = perlin(NoiseParams { scale: 3.0, octaves: 2, ..Default::default() });
+    let n = chain.find(|k| matches!(k, NodeKind::Noise(_))).unwrap();
+    let o = chain.find(|k| *k == NodeKind::OutDensity).unwrap();
+    let m = chain.add(NodeKind::Math { op: crate::graph::MathOp::Divide, a: 0.0, b: 0.0 }, [0.0; 2]);
+    let k = chain.add(NodeKind::Math { op: crate::graph::MathOp::Multiply, a: 0.0, b: 0.8 }, [0.0; 2]);
+    chain.connect(n, m, 0); // noise / 0 (safe divide) feeds nothing useful; max keeps it in the graph
+    chain.connect(n, k, 0);
+    let mx = chain.add(NodeKind::Math { op: crate::graph::MathOp::Max, a: 0.0, b: 0.0 }, [0.0; 2]);
+    chain.connect(k, mx, 0);
+    chain.connect(m, mx, 1);
+    chain.connect(mx, o, 0);
+    let cases: Vec<(&str, Graph)> = vec![
+        ("perlin_default", Graph::default_graph()),
+        ("perlin_octaves_normalized", perlin(NoiseParams { scale: 5.0, octaves: 4, lacunarity: 2.0, roughness: 0.6, normalize: true, ..Default::default() })),
+        ("perlin_distorted", perlin(NoiseParams { scale: 3.0, octaves: 2, distortion: 0.5, seed: Some(9), ..Default::default() })),
+        ("perlin_not_tiling", perlin(NoiseParams { scale: 2.5, octaves: 3, lacunarity: 2.3, ..Default::default() })),
+        ("perlin_math_chain", chain),
+    ];
+    for (name, g) in cases {
+        let ev = crate::export::Evaluator::new(&gpu.device, &gpu.queue, &g, 4).unwrap();
+        let s = crate::noiser_file::file(&g, 4, |n| ev.eval(n, [0; 3], [n; 3], false, None)).unwrap();
+        std::fs::write(dir.join(format!("{name}.noiser")), s).unwrap();
     }
 }

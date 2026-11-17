@@ -271,7 +271,7 @@ impl Graph {
         upstream(behind, false).difference(&evaluated).copied().collect()
     }
 
-    fn yields_vector(&self, id: NodeId) -> bool {
+    pub fn yields_vector(&self, id: NodeId) -> bool {
         match &self.nodes[&id].kind {
             NodeKind::Vec3(_) | NodeKind::Position | NodeKind::Normal { .. } => true,
             NodeKind::Math { .. } => (0..2).any(|p| self.input(id, p).is_some_and(|s| self.yields_vector(s))),

@@ -7,14 +7,36 @@
 
 fn safe_normalize(v: vec3f) -> vec3f { return v / max(length(v), 1e-12); }
 
-// pcg3d (Jarzynski & Olano 2020): integer-only, so every sampler can reproduce it exactly.
-fn pcg3d(v_in: vec3u) -> vec3u {
-    var v = v_in * 1664525u + 1013904223u;
-    v.x += v.y * v.z; v.y += v.z * v.x; v.z += v.x * v.y;
-    v ^= v >> vec3u(16u);
-    v.x += v.y * v.z; v.y += v.z * v.x; v.z += v.x * v.y;
-    return v;
+// Blender's hash (Jenkins lookup3 over float bits, blenlib noise.cc), so Blender's stock White
+// Noise Texture node reproduces every lattice random exactly in Geometry Nodes and shaders.
+fn rotl(x: u32, k: u32) -> u32 { return (x << k) | (x >> (32u - k)); }
+
+fn jenkins4(k: vec4u) -> u32 {
+    var a = 0xdeadbeefu + (4u << 2u) + 13u;
+    var b = a;
+    var c = a;
+    a += k.x; b += k.y; c += k.z;
+    // hash_bit_mix
+    a -= c; a ^= rotl(c, 4u); c += b;
+    b -= a; b ^= rotl(a, 6u); a += c;
+    c -= b; c ^= rotl(b, 8u); b += a;
+    a -= c; a ^= rotl(c, 16u); c += b;
+    b -= a; b ^= rotl(a, 19u); a += c;
+    c -= b; c ^= rotl(b, 4u); b += a;
+    a += k.w;
+    // hash_bit_final
+    c ^= b; c -= rotl(b, 14u);
+    a ^= c; a -= rotl(c, 11u);
+    b ^= a; b -= rotl(a, 25u);
+    c ^= b; c -= rotl(b, 16u);
+    a ^= c; a -= rotl(c, 4u);
+    b ^= a; b -= rotl(a, 14u);
+    c ^= b; c -= rotl(b, 24u);
+    return c;
 }
+
+// hash_float_to_float(float4): uint_to_float_01 divides by float(0xFFFFFFFFu), which is 2^32.
+fn bl_hash(k: vec4f) -> f32 { return f32(jenkins4(bitcast<vec4u>(k))) / 4294967296.0; }
 
 fn wrap_cell(c: vec3i, period: i32) -> vec3i {
     if (period > 0) { return ((c % period) + period) % period; }
@@ -29,10 +51,12 @@ fn wrap_near(c: vec3i, period: i32) -> vec3i {
     return select(select(c, c - p, c >= p), c + p, c < vec3i(0));
 }
 
-// Three uniform randoms in [0, 1] for a (wrapped) lattice cell.
+// Three uniform randoms in [0, 1] for a (wrapped) lattice cell: Blender's White Noise Texture,
+// 4D, Color output, with Vector = cell and W = seed (hash_float_to_float3(float4)).
+// Seeds must stay below 2^24 so f32(seed) is exact; vec3f(int) never yields -0.0.
 fn hash01(c: vec3i, seed: u32) -> vec3f {
-    let h = pcg3d(bitcast<vec3u>(c) + vec3u(seed * 0x9E3779B9u, 0u, 0u));
-    return vec3f(h) / 4294967295.0;
+    let k = vec4f(vec3f(c), f32(seed));
+    return vec3f(bl_hash(k), bl_hash(k.zxwy), bl_hash(k.wzyx));
 }
 
 fn rand_dir(c: vec3i, seed: u32) -> vec3f { return safe_normalize(hash01(c, seed) * 2.0 - 1.0); }
