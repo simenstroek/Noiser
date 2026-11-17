@@ -38,6 +38,8 @@ struct Preview {
     max_steps: u32,
     /// Fraction of the view's pixels each side the 3D view is rendered at (viewport only).
     render_scale: f32,
+    /// Colour the mesh by its displacement mask (viewport only).
+    show_mask: bool,
     /// Viewport material (never exported).
     color: [f32; 3],
     specular: f32,
@@ -63,6 +65,7 @@ impl Default for Preview {
             step_scale: 0.9,
             max_steps: 300,
             render_scale: 1.0,
+            show_mask: false,
             color: [0.8, 0.78, 0.74],
             specular: 0.0,
             roughness: 0.5,
@@ -90,6 +93,8 @@ struct App {
     built: Option<(String, Vec<f32>)>,
     /// A pipeline being built on a worker thread, for this WGSL.
     compiling: Option<(String, std::sync::mpsc::Receiver<view::Gpu>)>,
+    /// Pipeline key whose build panicked (a shader the driver or wgpu rejected); not retried until it changes.
+    failed_build: Option<String>,
     yaw: f32,
     pitch: f32,
     dist: f32,
@@ -152,9 +157,12 @@ impl App {
         let (mut graph_arg, mut mesh_arg, mut open_mesh_export) = (None, None, false);
         let (mut batch_dir, mut batch_files): (Option<std::path::PathBuf>, Vec<std::path::PathBuf>) = (None, Vec::new());
         let mut mask_terms = Vec::new();
+        let mut show_mask = false;
         while let Some(a) = args.next() {
             if a == "--mesh" {
                 mesh_arg = args.next().map(std::path::PathBuf::from);
+            } else if a == "--show-mask" {
+                show_mask = true;
             } else if a == "--open-mesh-export" {
                 open_mesh_export = true;
             } else if a == "--mask" {
@@ -207,6 +215,7 @@ impl App {
             status,
             built: None,
             compiling: None,
+            failed_build: None,
             yaw: 0.6,
             pitch: 0.35,
             dist: 3.5,
@@ -244,6 +253,7 @@ impl App {
             app.start_mesh_load(p);
         }
         app.mesh_mask.terms = mask_terms;
+        app.pv.show_mask = show_mask;
         app.mesh_export_open = open_mesh_export; // for looking at the dialog without clicking
         // `--batch-out DIR --batch-file A.obj --batch-file B.obj` starts a batch right away.
         if batch_dir.is_some() && !batch_files.is_empty() {
@@ -1088,19 +1098,24 @@ impl eframe::App for App {
                     self.compiling = None;
                 }
                 Err(std::sync::mpsc::TryRecvError::Empty) => ui.ctx().request_repaint_after(std::time::Duration::from_millis(50)),
-                Err(std::sync::mpsc::TryRecvError::Disconnected) => self.compiling = None,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    self.failed_build = Some(wgsl.clone());
+                    self.status = "The shader could not be built (see the log); change the graph to try again".into();
+                    self.compiling = None;
+                }
             }
         }
         // The mesh displacement mask is only compiled when it is in use; the pipeline key says so.
         let mask_on = self.pv.prim == meshapp::MESH_PRIM && self.mesh.is_some() && !self.mesh_mask.terms.is_empty();
+        let mask_view = mask_on && self.pv.show_mask && !self.pv.cloud;
         if let Ok(c) = &compiled {
-            let key = format!("{}{}", if mask_on { "//mask\n" } else { "" }, c.wgsl);
+            let key = format!("{}{}{}", if mask_on { "//mask\n" } else { "" }, if mask_view { "//maskview\n" } else { "" }, c.wgsl);
             let built = self.built.as_ref().is_some_and(|b| b.0 == key);
             let queued = self.compiling.as_ref().is_some_and(|p| p.0 == key);
-            if !built && !queued {
+            if !built && !queued && self.failed_build.as_ref() != Some(&key) {
                 let (tx, rx) = std::sync::mpsc::channel();
                 let (device, queue, format, wgsl) = (self.rs.device.clone(), self.rs.queue.clone(), self.rs.target_format, c.wgsl.clone());
-                std::thread::spawn(move || _ = tx.send(view::build(&device, &queue, format, &wgsl, mask_on)));
+                std::thread::spawn(move || _ = tx.send(view::build(&device, &queue, format, &wgsl, mask_on, mask_view)));
                 self.compiling = Some((key.clone(), rx)); // a superseded build just finishes and is dropped
                 ui.ctx().request_repaint_after(std::time::Duration::from_millis(50));
             }

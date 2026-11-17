@@ -239,7 +239,7 @@ fn bench_preview() {
         wgsl = wgsl.replace("fn graph_density(p: vec3f) -> f32 { return ", &format!("fn graph_density(p: vec3f) -> f32 {{ return {n}e-30 + "));
     }
     let t0 = std::time::Instant::now();
-    let mut gpu = view::build(&device, &queue, wgpu::TextureFormat::Bgra8Unorm, &wgsl, false);
+    let mut gpu = view::build(&device, &queue, wgpu::TextureFormat::Bgra8Unorm, &wgsl, false, false);
     eprintln!("backend {:?}: pipeline build {:.0} ms", adapter.get_info().backend, t0.elapsed().as_secs_f32() * 1e3);
 
     let size = [1000u32, 1000];

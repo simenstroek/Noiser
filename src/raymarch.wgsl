@@ -46,7 +46,21 @@ fn mask_at(p: vec3f) -> f32 {
     return mesh_mask(mesh_tex, p / u.prim_size, u.mesh_origin, u.mesh_voxel, u.mesh_lo, u.mesh_hi, u.mask, u.mask_n);
 }
 
+// Heat colour for the mask view: blue at 0, green at 0.5, red at 1, magenta above 1, black below 0.
+fn mask_color(m: f32) -> vec3f {
+    if (m < 0.0) { return vec3f(0.0); }
+    if (m > 1.0) { return vec3f(1.0, 0.0, 1.0); }
+    let t = m * 2.0;
+    return select(mix(vec3f(0.0, 0.0, 1.0), vec3f(0.0, 1.0, 0.0), t), mix(vec3f(0.0, 1.0, 0.0), vec3f(1.0, 0.0, 0.0), t - 1.0), t > 1.0);
+}
+
+// Replaced by `true` in the mask-view variant of the shader (see view::shader_source): the mesh is then
+// drawn undisplaced and coloured by the mask. A separate variant, because a second inlined copy of the mask
+// in the normal shader makes the driver's compile take far too long.
+const MASK_VIEW: bool = false;
+
 fn displaced(p: vec3f, b: f32) -> f32 {
+    if (MASK_VIEW) { return b; }
     return b - u.amount * mask_at(p) * graph_density(p / u.tile_size);
 }
 
@@ -149,7 +163,13 @@ fn solid(ro: vec3f, rd: vec3f, bg: vec3f) -> vec3f {
     let shin = 2.0 / (rough * rough);
     let h = normalize(SUN - rd);
     let spec = u.look_a.w * pow(max(dot(n, h), 0.0), shin) * (0.15 + 0.85 * sh) * select(0.0, 1.0, diff > 0.0);
-    return u.look_a.xyz * (diff * sh * 0.9 + sky * 0.25) + vec3f(spec);
+    var albedo = u.look_a.xyz;
+    var highlight = 1.0;
+    if (MASK_VIEW) {
+        albedo = mask_color(mask_at(p));
+        highlight = 0.0; // the colour must stay readable
+    }
+    return albedo * (diff * sh * 0.9 + sky * 0.25) + vec3f(spec * highlight);
 }
 
 fn cloud(ro: vec3f, rd: vec3f, bg: vec3f) -> vec3f {

@@ -430,6 +430,8 @@ impl App {
         use crate::meshmask::{MAX_TERMS, MaskKind, MaskTerm};
         egui::CollapsingHeader::new("Displacement mask").default_open(!self.mesh_mask.terms.is_empty()).show(ui, |ui| {
             ui.weak("Varies how strongly the noise displaces each part of the mesh. With no terms every part moves equally. Strength is the sum of weight × term; every term is measured on the mesh itself. Applies to the Mesh shape.");
+            ui.add_enabled(!self.mesh_mask.terms.is_empty(), egui::Checkbox::new(&mut self.pv.show_mask, "Show mask on the mesh"))
+                .on_hover_text("Colours the surface by mask strength: blue 0, green 0.5, red 1; magenta above 1, black below 0. The preview only.");
             let mut remove = None;
             for (i, t) in self.mesh_mask.terms.iter_mut().enumerate() {
                 ui.group(|ui| {
