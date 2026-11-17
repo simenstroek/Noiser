@@ -61,6 +61,11 @@ Node graph (centre) · 3D view (primitive picker, solid/cloud, displacement amou
 | 7 | Mesh displacement (later) | import closed mesh → narrow-band SDF grid → apply noise → export VDB or a high-poly mesh (see §3a) |
 | 8 | Subgraphs + prefab library (later) | select nodes → collapse to subgraph; edges crossing the selection become subgraph inputs/outputs (like Unreal's "Collapse to Function"); save subgraphs to a library of prefab noises |
 
+### UI conventions
+- **Every value input has a reset-to-default button** in front of it (the `row`/`reset` helpers in `main.rs`).
+- **Interface icons come from Material Symbols** via Iconify (https://icon-sets.iconify.design/material-symbols/). Save each icon as an SVG in `assets/icons/` with `currentColor` replaced by white so egui can tint it. License: `assets/icons/LICENSE.txt`.
+- **The node editor is custom** (`src/editor.rs`), not egui-snarl: no node-graph crate supports egui 0.37, and box select is needed for subgraphs (milestone 8).
+
 ### Design rules that keep milestone 7 cheap
 - **The base shape is a swappable slot, outside the graph.** The shader calls `base_sdf(p)`, which is a primitive today and a sampled 3D texture of the mesh SDF later. The graph only defines the noise. The math-function export stays noise-only, and each sampler applies it to its own geometry.
 - **Noise lives in object space, with its own tile size.** The base shape's transform also moves the noise, so it sticks to the object. A separate **tile size** scales the tiling space relative to the object/mesh: `noise(p_object / tile_size)`. One tile is still 1 unit of *noise* space, so exports are unaffected.

@@ -112,6 +112,30 @@ impl Graph {
         self.edges.push(Edge { from, to, port });
     }
 
+    pub fn remove(&mut self, id: NodeId) {
+        self.nodes.remove(&id);
+        self.edges.retain(|e| e.from != id && e.to != id);
+    }
+
+    pub fn disconnect(&mut self, to: NodeId, port: usize) {
+        self.edges.retain(|e| !(e.to == to && e.port == port));
+    }
+
+    /// True if `target` is `id` or anywhere upstream of it. Connecting `a → b` makes a cycle iff `a` depends on `b`.
+    pub fn depends_on(&self, id: NodeId, target: NodeId) -> bool {
+        let mut stack = vec![id];
+        let mut seen = std::collections::BTreeSet::new();
+        while let Some(n) = stack.pop() {
+            if n == target {
+                return true;
+            }
+            if seen.insert(n) {
+                stack.extend(self.edges.iter().filter(|e| e.to == n).map(|e| e.from));
+            }
+        }
+        false
+    }
+
     pub fn input(&self, to: NodeId, port: usize) -> Option<NodeId> {
         self.edges.iter().find(|e| e.to == to && e.port == port).map(|e| e.from)
     }
@@ -309,6 +333,18 @@ mod tests {
         g.connect(a, b, 0);
         g.connect(b, a, 0);
         assert!(matches!(tiling_at(&g, a), Tiling::Broken(_)));
+    }
+
+    #[test]
+    fn depends_on_and_remove() {
+        let mut g = Graph::default_graph(); // 0 Position → 1 Noise → 2 OutDensity, 3 OutNormal
+        assert!(g.depends_on(2, 0));
+        assert!(g.depends_on(1, 1));
+        assert!(!g.depends_on(0, 1));
+        assert!(!g.depends_on(3, 0));
+        g.remove(1);
+        assert!(g.edges.is_empty());
+        assert!(!g.depends_on(2, 0));
     }
 
     #[test]
