@@ -1,65 +1,124 @@
-// 3D preview: raymarches the base shape displaced by the graph's density.
-// Concatenated after noise.wgsl and the generated graph code.
+// 3D preview: the base shape displaced by the graph's density, drawn as a solid surface or a cloud.
 
-struct Uniforms {
-    cam_pos: vec3f, aspect: f32,
-    cam_fwd: vec3f, amount: f32,
-    cam_right: vec3f, step_scale: f32,
-    cam_up: vec3f, seed: u32,
-    tile_size: f32, _pad0: f32, _pad1: f32, _pad2: f32,
-};
-@group(0) @binding(0) var<uniform> u: Uniforms;
-@group(0) @binding(1) var<storage, read> P: array<f32>;
+// ---- base shape (IQ, https://iquilezles.org/articles/distfunctions/) ----
 
-struct VsOut { @builtin(position) pos: vec4f, @location(0) uv: vec2f };
+fn sd_box(p: vec3f, b: vec3f) -> f32 {
+    let q = abs(p) - b;
+    return length(max(q, vec3f(0.0))) + min(max(q.x, max(q.y, q.z)), 0.0);
+}
 
-@vertex
-fn vs(@builtin(vertex_index) i: u32) -> VsOut {
-    // One triangle covering the viewport.
-    let p = vec2f(f32((i << 1u) & 2u), f32(i & 2u));
-    var o: VsOut;
-    o.pos = vec4f(p * 2.0 - 1.0, 0.0, 1.0);
-    o.uv = p * 2.0 - 1.0;
-    return o;
+fn unit_prim(p: vec3f) -> f32 {
+    switch u.prim {
+        case 1u: { return sd_box(p, vec3f(0.8)); }
+        case 2u: { return sd_box(p, vec3f(0.65)) - 0.15; } // round box
+        case 3u: { return length(vec2f(length(p.xz) - 0.9, p.y)) - 0.35; } // torus
+        case 4u: { // capped cylinder
+            let d = abs(vec2f(length(p.xz), p.y)) - vec2f(0.8, 0.8);
+            return min(max(d.x, d.y), 0.0) + length(max(d, vec2f(0.0)));
+        }
+        case 5u: { // capsule
+            let q = vec3f(p.x, p.y - clamp(p.y, -0.6, 0.6), p.z);
+            return length(q) - 0.5;
+        }
+        case 6u: { // octahedron (bound)
+            let q = abs(p);
+            return (q.x + q.y + q.z - 1.2) * 0.57735027;
+        }
+        default: { return length(p) - 1.0; } // sphere
+    }
 }
 
 // The base shape slot: a primitive now, a sampled mesh SDF later.
-fn base_sdf(p: vec3f) -> f32 { return length(p) - 1.0; }
+fn base_sdf(p: vec3f) -> f32 { return unit_prim(p / u.prim_size) * u.prim_size; }
 
 fn field(p: vec3f) -> f32 {
     return base_sdf(p) - u.amount * graph_density(p / u.tile_size);
 }
 
-fn normal_at(p: vec3f) -> vec3f {
+fn normal_at(p: vec3f, e: f32) -> vec3f {
     // IQ tetrahedral normal.
-    let e = 0.0015;
     let k = vec2f(1.0, -1.0);
     return normalize(
         k.xyy * field(p + k.xyy * e) + k.yyx * field(p + k.yyx * e) +
         k.yxy * field(p + k.yxy * e) + k.xxx * field(p + k.xxx * e));
 }
 
-@fragment
-fn fs(in: VsOut) -> @location(0) vec4f {
-    let rd = normalize(u.cam_fwd * 1.8 + u.cam_right * in.uv.x * u.aspect + u.cam_up * in.uv.y);
-    let ro = u.cam_pos;
-    let bg = mix(vec3f(0.10, 0.10, 0.12), vec3f(0.18, 0.19, 0.22), in.uv.y * 0.5 + 0.5);
+const FOCAL: f32 = 1.8;
+const SUN: vec3f = vec3f(0.5345, 0.7127, 0.4543); // normalize(0.6, 0.8, 0.51)
 
+fn background(uv: vec2f) -> vec3f {
+    return mix(vec3f(0.10, 0.10, 0.12), vec3f(0.18, 0.19, 0.22), uv.y * 0.5 + 0.5);
+}
+
+fn solid(ro: vec3f, rd: vec3f, bg: vec3f) -> vec3f {
+    // Pixel footprint per unit distance. Stopping and differentiating at that size
+    // filters out sub-pixel noise detail instead of aliasing it into speckles.
+    let pix = u.pixel / FOCAL;
     var t = 0.0;
+    var t_out = 0.0; // last t known to be outside
     var hit = false;
-    for (var i = 0; i < 256; i++) {
+    for (var i = 0; i < 300; i++) {
         let d = field(ro + rd * t);
-        if (abs(d) < 0.0005 * t) { hit = true; break; }
-        t += d * u.step_scale; // displacement breaks the distance bound, so step conservatively
+        if (d < 0.0 && i > 0) {
+            // Overshot into the surface (displacement breaks the distance bound): bisect back to it.
+            var a = t_out;
+            var b = t;
+            for (var k = 0; k < 12; k++) {
+                let m = 0.5 * (a + b);
+                if (field(ro + rd * m) > 0.0) { a = m; } else { b = m; }
+            }
+            t = 0.5 * (a + b);
+            hit = true;
+            break;
+        }
+        if (d < 0.5 * pix * t) { hit = true; break; }
+        t_out = t;
+        t += d * u.step_scale;
         if (t > 20.0) { break; }
     }
-    if (!hit) { return vec4f(pow(bg, vec3f(1.0 / 2.2)), 1.0); }
-
+    if (!hit) { return bg; }
     let p = ro + rd * t;
-    let n = normal_at(p);
-    let l = normalize(vec3f(0.6, 0.8, 0.4));
-    let diff = max(dot(n, l), 0.0);
+    let n = normal_at(p, max(pix * t, 1e-4));
+    let diff = max(dot(n, SUN), 0.0);
     let sky = 0.5 + 0.5 * n.y;
-    let col = vec3f(0.8, 0.78, 0.74) * (diff * 0.9 + sky * 0.25);
+    return vec3f(0.8, 0.78, 0.74) * (diff * 0.9 + sky * 0.25);
+}
+
+fn cloud(ro: vec3f, rd: vec3f, bg: vec3f) -> vec3f {
+    // March only through a sphere that bounds the displaced shape.
+    let r = 1.8 * u.prim_size + u.amount;
+    let b = dot(ro, rd);
+    let h = b * b - dot(ro, ro) + r * r;
+    if (h < 0.0) { return bg; }
+    let t0 = max(-b - sqrt(h), 0.0);
+    let t1 = -b + sqrt(h);
+    let steps = 128;
+    let dt = (t1 - t0) / f32(steps);
+    var trans = 1.0;
+    var light = vec3f(0.0);
+    for (var i = 0; i < steps; i++) {
+        let p = ro + rd * (t0 + (f32(i) + 0.5) * dt);
+        let sigma = u.cloud_density * max(-field(p), 0.0);
+        if (sigma <= 0.0) { continue; }
+        // Short shadow ray toward the sun.
+        var tau = 0.0;
+        for (var j = 1; j < 6; j++) {
+            tau += u.cloud_density * max(-field(p + SUN * f32(j) * 0.12), 0.0) * 0.12;
+        }
+        let lit = vec3f(1.0, 0.97, 0.9) * exp(-tau) + vec3f(0.25, 0.28, 0.35);
+        let a = 1.0 - exp(-sigma * dt);
+        light += trans * a * lit;
+        trans *= 1.0 - a;
+        if (trans < 0.01) { break; }
+    }
+    return light + bg * trans;
+}
+
+@fragment
+fn fs(in: VsOut) -> @location(0) vec4f {
+    let rd = normalize(u.cam_fwd * FOCAL + u.cam_right * in.uv.x * u.aspect + u.cam_up * in.uv.y);
+    let bg = background(in.uv);
+    var col: vec3f;
+    if (u.mode == 1u) { col = cloud(u.cam_pos, rd, bg); } else { col = solid(u.cam_pos, rd, bg); }
     return vec4f(pow(col, vec3f(1.0 / 2.2)), 1.0);
 }

@@ -255,7 +255,7 @@ mod tests {
     #[test]
     fn preview_shader_validates() {
         let c = compile(&Graph::default_graph()).unwrap();
-        let src = format!("{NOISE_LIB}\n{}\n{}", c.wgsl, include_str!("raymarch.wgsl"));
+        let src = crate::view::shader_source(&c.wgsl);
         let module = naga::front::wgsl::parse_str(&src).unwrap_or_else(|e| panic!("{}", e.emit_to_string(&src)));
         naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all())
             .validate(&module)

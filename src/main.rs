@@ -1,124 +1,49 @@
 mod codegen;
 mod editor;
 mod graph;
+mod view;
 
-use eframe::{egui, egui_wgpu, wgpu};
+use eframe::{egui, egui_wgpu};
 use graph::{Graph, MathOp, NodeKind, Tiling};
+use view::{MAX_PARAMS, Uniforms};
 
-/// shortcut: fixed-size param buffer (16 KiB); grow on demand if graphs ever need more.
-const MAX_PARAMS: usize = 4096;
+/// Primitive names, in the order `unit_prim` in raymarch.wgsl switches on.
+const PRIMS: [&str; 7] = ["Sphere", "Box", "Round box", "Torus", "Cylinder", "Capsule", "Octahedron"];
 
-#[repr(C)]
-#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-struct Uniforms {
-    cam_pos: [f32; 3],
-    aspect: f32,
-    cam_fwd: [f32; 3],
+/// Settings for the 3D and slice views (not part of the graph file).
+#[derive(Clone, PartialEq)]
+struct Preview {
     amount: f32,
-    cam_right: [f32; 3],
-    step_scale: f32,
-    cam_up: [f32; 3],
-    seed: u32,
     tile_size: f32,
-    _pad: [f32; 3],
+    seed: u32,
+    step_scale: f32,
+    prim: u32,
+    prim_size: f32,
+    cloud: bool,
+    cloud_density: f32,
+    slice_axis: u32,
+    slice_pos: f32,
+    heatmap: bool,
+    tiles_2x2: bool,
 }
 
-struct Gpu {
-    pipeline: wgpu::RenderPipeline,
-    uniforms: wgpu::Buffer,
-    params: wgpu::Buffer,
-    bind_group: wgpu::BindGroup,
-}
-
-struct Viewport {
-    uniforms: Uniforms,
-    params: Vec<f32>,
-}
-
-impl egui_wgpu::CallbackTrait for Viewport {
-    fn prepare(
-        &self,
-        _device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        _screen: &egui_wgpu::ScreenDescriptor,
-        _encoder: &mut wgpu::CommandEncoder,
-        res: &mut egui_wgpu::CallbackResources,
-    ) -> Vec<wgpu::CommandBuffer> {
-        let gpu: &Gpu = res.get().unwrap();
-        queue.write_buffer(&gpu.uniforms, 0, bytemuck::bytes_of(&self.uniforms));
-        queue.write_buffer(&gpu.params, 0, bytemuck::cast_slice(&self.params));
-        Vec::new()
+impl Default for Preview {
+    fn default() -> Self {
+        Self {
+            amount: 0.25,
+            tile_size: 1.0,
+            seed: 0,
+            step_scale: 0.6,
+            prim: 0,
+            prim_size: 1.0,
+            cloud: false,
+            cloud_density: 8.0,
+            slice_axis: 2,
+            slice_pos: 0.5,
+            heatmap: false,
+            tiles_2x2: false,
+        }
     }
-
-    fn paint(&self, _info: egui::PaintCallbackInfo, pass: &mut wgpu::RenderPass<'static>, res: &egui_wgpu::CallbackResources) {
-        let gpu: &Gpu = res.get().unwrap();
-        pass.set_pipeline(&gpu.pipeline);
-        pass.set_bind_group(0, &gpu.bind_group, &[]);
-        pass.draw(0..3, 0..1);
-    }
-}
-
-fn build_gpu(rs: &egui_wgpu::RenderState, graph_wgsl: &str) -> Gpu {
-    let device = &rs.device;
-    let src = format!("{}\n{graph_wgsl}\n{}", codegen::NOISE_LIB, include_str!("raymarch.wgsl"));
-    // shortcut: no error scope here; codegen output is naga-validated in tests. Add one if users hit shader panics.
-    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some("raymarch"),
-        source: wgpu::ShaderSource::Wgsl(src.into()),
-    });
-    let entry = |binding, ty| wgpu::BindGroupLayoutEntry {
-        binding,
-        visibility: wgpu::ShaderStages::FRAGMENT,
-        ty: wgpu::BindingType::Buffer { ty, has_dynamic_offset: false, min_binding_size: None },
-        count: None,
-    };
-    let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-        label: None,
-        entries: &[
-            entry(0, wgpu::BufferBindingType::Uniform),
-            entry(1, wgpu::BufferBindingType::Storage { read_only: true }),
-        ],
-    });
-    let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-        label: None,
-        bind_group_layouts: &[Some(&bgl)],
-        immediate_size: 0,
-    });
-    let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some("raymarch"),
-        layout: Some(&layout),
-        vertex: wgpu::VertexState {
-            module: &shader,
-            entry_point: Some("vs"),
-            compilation_options: Default::default(),
-            buffers: &[],
-        },
-        fragment: Some(wgpu::FragmentState {
-            module: &shader,
-            entry_point: Some("fs"),
-            compilation_options: Default::default(),
-            targets: &[Some(rs.target_format.into())],
-        }),
-        primitive: Default::default(),
-        depth_stencil: None,
-        multisample: Default::default(),
-        multiview_mask: None,
-        cache: None,
-    });
-    let buffer = |label, size, usage| {
-        device.create_buffer(&wgpu::BufferDescriptor { label: Some(label), size, usage: usage | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false })
-    };
-    let uniforms = buffer("uniforms", std::mem::size_of::<Uniforms>() as u64, wgpu::BufferUsages::UNIFORM);
-    let params = buffer("params", (MAX_PARAMS * 4) as u64, wgpu::BufferUsages::STORAGE);
-    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: None,
-        layout: &bgl,
-        entries: &[
-            wgpu::BindGroupEntry { binding: 0, resource: uniforms.as_entire_binding() },
-            wgpu::BindGroupEntry { binding: 1, resource: params.as_entire_binding() },
-        ],
-    });
-    Gpu { pipeline, uniforms, params, bind_group }
 }
 
 struct App {
@@ -133,19 +58,12 @@ struct App {
     yaw: f32,
     pitch: f32,
     dist: f32,
-    amount: f32,
-    tile_size: f32,
-    seed: u32,
-    step_scale: f32,
+    pv: Preview,
 }
 
 impl App {
-    /// Preview defaults: displacement, tile size, global seed, step safety.
-    const DEFAULTS: (f32, f32, u32, f32) = (0.25, 1.0, 0, 0.6);
-
     fn new(cc: &eframe::CreationContext) -> Self {
         egui_extras::install_image_loaders(&cc.egui_ctx);
-        let (amount, tile_size, seed, step_scale) = Self::DEFAULTS;
         Self {
             rs: cc.wgpu_render_state.clone().expect("Noiser needs the wgpu renderer"),
             graph: Graph::default_graph(),
@@ -156,31 +74,41 @@ impl App {
             yaw: 0.6,
             pitch: 0.35,
             dist: 3.5,
-            amount,
-            tile_size,
-            seed,
-            step_scale,
+            pv: Preview::default(),
         }
     }
 
-    fn uniforms(&self, aspect: f32) -> Uniforms {
+    fn uniforms(&self, view3d: egui::Rect, slice: egui::Rect) -> Uniforms {
         let (sy, cy) = self.yaw.sin_cos();
         let (sp, cp) = self.pitch.sin_cos();
         let pos = [self.dist * cp * sy, self.dist * sp, self.dist * cp * cy];
         let fwd = norm([-pos[0], -pos[1], -pos[2]]);
         let right = norm(cross(fwd, [0.0, 1.0, 0.0]));
         let up = cross(right, fwd);
+        let pv = &self.pv;
+        let aspect = |r: egui::Rect| r.width() / r.height().max(1.0);
         Uniforms {
             cam_pos: pos,
-            aspect,
+            aspect: aspect(view3d),
             cam_fwd: fwd,
-            amount: self.amount,
+            amount: pv.amount,
             cam_right: right,
-            step_scale: self.step_scale,
+            step_scale: pv.step_scale,
             cam_up: up,
-            seed: self.seed,
-            tile_size: self.tile_size,
-            _pad: [0.0; 3],
+            seed: pv.seed,
+            tile_size: pv.tile_size,
+            prim_size: pv.prim_size,
+            // Logical points are fine here: only the ratio to the view height matters.
+            pixel: 2.0 / view3d.height().max(1.0),
+            cloud_density: pv.cloud_density,
+            mode: pv.cloud as u32,
+            prim: pv.prim,
+            slice_axis: pv.slice_axis,
+            slice_mode: pv.heatmap as u32,
+            slice_pos: pv.slice_pos,
+            slice_aspect: aspect(slice),
+            slice_tiles: if pv.tiles_2x2 { 2.0 } else { 1.0 },
+            slice_res: view::SLICE_RES,
         }
     }
 
@@ -245,6 +173,45 @@ fn row<T: PartialEq>(ui: &mut egui::Ui, value: &mut T, default: T, widget: impl 
         reset(ui, value, default);
         widget(ui, value);
     });
+}
+
+fn preview_props(ui: &mut egui::Ui, pv: &mut Preview) {
+    let d = Preview::default();
+    ui.heading("3D view");
+    row(ui, &mut pv.cloud, d.cloud, |ui, v| {
+        ui.selectable_value(v, false, "Solid");
+        ui.selectable_value(v, true, "Cloud");
+    });
+    row(ui, &mut pv.prim, d.prim, |ui, v| {
+        egui::ComboBox::from_label("shape").selected_text(PRIMS[*v as usize]).show_ui(ui, |ui| {
+            for (i, name) in PRIMS.iter().enumerate() {
+                ui.selectable_value(v, i as u32, *name);
+            }
+        });
+    });
+    row(ui, &mut pv.prim_size, d.prim_size, |ui, v| _ = ui.add(egui::Slider::new(v, 0.25..=2.0).text("shape size")));
+    row(ui, &mut pv.amount, d.amount, |ui, v| _ = ui.add(egui::Slider::new(v, 0.0..=1.0).text("displacement")));
+    row(ui, &mut pv.tile_size, d.tile_size, |ui, v| _ = ui.add(egui::Slider::new(v, 0.25..=4.0).logarithmic(true).text("tile size")));
+    row(ui, &mut pv.seed, d.seed, |ui, v| _ = ui.add(egui::Slider::new(v, 0..=100).text("global seed")));
+    if pv.cloud {
+        row(ui, &mut pv.cloud_density, d.cloud_density, |ui, v| _ = ui.add(egui::Slider::new(v, 0.5..=64.0).logarithmic(true).text("cloud density")));
+    } else {
+        row(ui, &mut pv.step_scale, d.step_scale, |ui, v| _ = ui.add(egui::Slider::new(v, 0.1..=1.0).text("step safety")));
+    }
+    ui.separator();
+    ui.heading("Slice view");
+    row(ui, &mut pv.slice_axis, d.slice_axis, |ui, v| {
+        ui.label("axis");
+        for (i, name) in ["X", "Y", "Z"].iter().enumerate() {
+            ui.selectable_value(v, i as u32, *name);
+        }
+    });
+    row(ui, &mut pv.slice_pos, d.slice_pos, |ui, v| _ = ui.add(egui::Slider::new(v, 0.0..=1.0).text("position")));
+    row(ui, &mut pv.heatmap, d.heatmap, |ui, v| {
+        ui.selectable_value(v, false, "Grayscale");
+        ui.selectable_value(v, true, "Heatmap");
+    });
+    row(ui, &mut pv.tiles_2x2, d.tiles_2x2, |ui, v| _ = ui.checkbox(v, "show 2×2 tiles"));
 }
 
 /// Properties of one node.
@@ -335,12 +302,7 @@ impl eframe::App for App {
 
         egui::Panel::right("props").default_size(320.0).show(ui, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| {
-                ui.heading("Preview");
-                let d = Self::DEFAULTS;
-                row(ui, &mut self.amount, d.0, |ui, v| _ = ui.add(egui::Slider::new(v, 0.0..=1.0).text("displacement")));
-                row(ui, &mut self.tile_size, d.1, |ui, v| _ = ui.add(egui::Slider::new(v, 0.25..=4.0).logarithmic(true).text("tile size")));
-                row(ui, &mut self.seed, d.2, |ui, v| _ = ui.add(egui::Slider::new(v, 0..=100).text("global seed")));
-                row(ui, &mut self.step_scale, d.3, |ui, v| _ = ui.add(egui::Slider::new(v, 0.1..=1.0).text("step safety")));
+                preview_props(ui, &mut self.pv);
                 ui.separator();
                 let sel: Vec<_> = self.editor.selected.iter().copied().collect();
                 match sel.as_slice() {
@@ -368,30 +330,42 @@ impl eframe::App for App {
         };
         if let Ok(c) = &compiled {
             if self.built_wgsl.as_deref() != Some(&c.wgsl) {
-                let gpu = build_gpu(&self.rs, &c.wgsl);
+                let gpu = view::build(&self.rs, &c.wgsl);
                 self.rs.renderer.write().callback_resources.insert(gpu);
                 self.built_wgsl = Some(c.wgsl.clone());
             }
         }
 
         egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| {
-            let (rect, resp) = ui.allocate_exact_size(ui.available_size(), egui::Sense::drag());
+            let full = ui.available_rect_before_wrap();
+            let (r3d, rslice) = full.split_left_right_at_fraction(0.5);
+            let resp = ui.interact(r3d, ui.scope_id().with("view3d"), egui::Sense::drag());
             let d = resp.drag_delta();
             self.yaw -= d.x * 0.01;
             self.pitch = (self.pitch + d.y * 0.01).clamp(-1.5, 1.5);
+            let scroll = ui.input(|i| i.smooth_scroll_delta.y);
             if resp.hovered() {
-                let scroll = ui.input(|i| i.smooth_scroll_delta.y);
                 self.dist = (self.dist * (1.0 - scroll * 0.002)).clamp(1.2, 15.0);
+            }
+            // Scrolling over the slice moves it through the tile.
+            if ui.rect_contains_pointer(rslice) {
+                self.pv.slice_pos = (self.pv.slice_pos + scroll * 0.0005).clamp(0.0, 1.0);
             }
             match compiled {
                 Ok(c) => {
-                    let uniforms = self.uniforms(rect.width() / rect.height().max(1.0));
-                    let cb = Viewport { uniforms, params: c.params };
-                    ui.painter().add(egui_wgpu::Callback::new_paint_callback(rect, cb));
+                    let uniforms = self.uniforms(r3d, rslice);
+                    let painter = ui.painter();
+                    let cb3d = view::View3d { uniforms, params: c.params.clone() };
+                    painter.add(egui_wgpu::Callback::new_paint_callback(r3d, cb3d));
+                    let cbs = view::SliceView { uniforms, params: c.params };
+                    painter.add(egui_wgpu::Callback::new_paint_callback(rslice, cbs));
+                    let axis = ["X", "Y", "Z"][self.pv.slice_axis as usize];
+                    let label = format!("{axis} = {:.3}", self.pv.slice_pos);
+                    painter.text(rslice.left_top() + egui::vec2(8.0, 6.0), egui::Align2::LEFT_TOP, label, egui::FontId::monospace(12.0), egui::Color32::from_gray(200));
                 }
                 Err(e) => {
-                    ui.painter().rect_filled(rect, 0.0, egui::Color32::from_gray(30));
-                    ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, e, egui::FontId::proportional(16.0), egui::Color32::RED);
+                    ui.painter().rect_filled(full, 0.0, egui::Color32::from_gray(30));
+                    ui.painter().text(full.center(), egui::Align2::CENTER_CENTER, e, egui::FontId::proportional(16.0), egui::Color32::RED);
                 }
             }
         });
