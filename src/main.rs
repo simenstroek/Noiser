@@ -182,6 +182,8 @@ struct App {
     shortcuts_open: bool,
     prefs: Prefs,
     prefs_open: bool,
+    /// A New / Open that is waiting for the user to decide about unsaved changes.
+    pending: Option<Pending>,
     about_open: bool,
     /// Last window title sent, so it is only sent when it changes.
     title: String,
@@ -301,6 +303,7 @@ impl App {
             shortcuts_open: false,
             prefs: prefs.clone(),
             prefs_open: false,
+            pending: None,
             about_open: false,
             title: String::new(),
             close_prompt: false,
@@ -553,8 +556,39 @@ impl App {
     }
 
     fn open(&mut self) {
-        let Some(path) = Self::file_dialog().pick_file() else { return };
-        self.open_path(path);
+        self.request(Pending::OpenDialog);
+    }
+
+    /// Does `action` now, or first asks what to do with unsaved changes.
+    fn request(&mut self, action: Pending) {
+        if self.graph != self.saved {
+            self.pending = Some(action);
+        } else {
+            self.run_pending(action);
+        }
+    }
+
+    fn run_pending(&mut self, action: Pending) {
+        match action {
+            Pending::New => self.start_fresh(Graph::default_graph()),
+            Pending::Template(name) => self.start_fresh(Graph::template(name)),
+            Pending::OpenDialog => {
+                if let Some(path) = Self::file_dialog().pick_file() {
+                    self.open_path(path);
+                }
+            }
+            Pending::Path(path) => self.open_path(path),
+        }
+    }
+
+    /// Replaces the graph with a new, unsaved one.
+    fn start_fresh(&mut self, graph: Graph) {
+        self.graph = graph;
+        self.saved = self.graph.clone();
+        self.editor.selected.clear();
+        self.editor.frame_next = true;
+        self.editor.preview = None;
+        self.path = None;
     }
 
     fn open_path(&mut self, path: std::path::PathBuf) {
@@ -913,6 +947,15 @@ const SHORTCUTS: [(&str, &str); 17] = [
 const RECENT_KEY: &str = "recent_files";
 const PREFS_KEY: &str = "preferences";
 
+/// What to do once unsaved changes have been dealt with.
+#[derive(Clone, Debug)]
+enum Pending {
+    New,
+    Template(&'static str),
+    OpenDialog,
+    Path(std::path::PathBuf),
+}
+
 /// Settings that belong to the user, not to a graph; saved with the app state.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
@@ -987,7 +1030,7 @@ impl eframe::App for App {
                 if meshformats::is_mesh_file(&p) {
                     self.start_mesh_load(p);
                 } else {
-                    self.open_path(p);
+                    self.request(Pending::Path(p));
                 }
             }
         }
@@ -1006,6 +1049,27 @@ impl eframe::App for App {
         if ctx.input(|i| i.viewport().close_requested()) && dirty && !self.close_ok {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             self.close_prompt = true;
+        }
+        if let Some(action) = self.pending.clone() {
+            egui::Window::new("Unsaved changes").collapsible(false).resizable(false).anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0]).show(&ctx, |ui| {
+                ui.label("The graph has changes that are not saved.");
+                ui.horizontal(|ui| {
+                    if ui.button("Save").clicked() {
+                        self.save(false);
+                        if self.graph == self.saved {
+                            self.pending = None;
+                            self.run_pending(action.clone());
+                        }
+                    }
+                    if ui.button("Discard").clicked() {
+                        self.pending = None;
+                        self.run_pending(action.clone());
+                    }
+                    if ui.button("Cancel").clicked() {
+                        self.pending = None;
+                    }
+                });
+            });
         }
         if self.close_prompt {
             egui::Window::new("Unsaved changes").collapsible(false).resizable(false).anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0]).show(&ctx, |ui| {
@@ -1096,22 +1160,12 @@ impl eframe::App for App {
                 });
                 ui.menu_button("File", |ui| {
                     if ui.button("New").clicked() {
-                        self.graph = Graph::default_graph();
-                        self.saved = self.graph.clone();
-                        self.editor.selected.clear();
-                self.editor.frame_next = true;
-                        self.editor.preview = None;
-                        self.path = None;
+                        self.request(Pending::New);
                     }
                     ui.menu_button("New from template", |ui| {
                         for name in Graph::TEMPLATES {
                             if ui.button(name).clicked() {
-                                self.graph = Graph::template(name);
-                                self.saved = self.graph.clone();
-                                self.editor.selected.clear();
-                self.editor.frame_next = true;
-                                self.editor.preview = None;
-                                self.path = None;
+                                self.request(Pending::Template(name));
                                 ui.close();
                             }
                         }
@@ -1130,7 +1184,7 @@ impl eframe::App for App {
                                 }
                             }
                             if let Some(p) = pick {
-                                self.open_path(p);
+                                self.request(Pending::Path(p));
                             }
                         });
                     });
