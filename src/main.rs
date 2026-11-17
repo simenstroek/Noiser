@@ -121,6 +121,8 @@ struct App {
     /// How strongly the noise displaces each part of a mesh (see meshmask.rs).
     mesh_mask: meshmask::MaskSettings,
     history: history::History,
+    /// Most recently opened or saved graph files, newest first (kept across runs).
+    recent: Vec<std::path::PathBuf>,
 }
 
 /// An export running on a worker thread.
@@ -215,6 +217,7 @@ impl App {
             batch_job: None,
             mesh_mask: meshmask::MaskSettings::default(),
             history: history::History::new(&saved_for_history),
+            recent: cc.storage.and_then(|s| s.get_string(RECENT_KEY)).and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default(),
         };
         if let Some(p) = mesh_arg {
             app.start_mesh_load(p);
@@ -454,6 +457,10 @@ impl App {
 
     fn open(&mut self) {
         let Some(path) = Self::file_dialog().pick_file() else { return };
+        self.open_path(path);
+    }
+
+    fn open_path(&mut self, path: std::path::PathBuf) {
         match std::fs::read_to_string(&path).map_err(|e| e.to_string()).and_then(|s| Graph::from_json(&s)) {
             Ok(g) => {
                 self.saved = g.clone();
@@ -461,6 +468,7 @@ impl App {
                 self.editor.selected.clear();
                 self.editor.preview = None;
                 self.status = format!("Opened {}", path.display());
+                push_recent(&mut self.recent, path.clone());
                 self.path = Some(path);
             }
             Err(e) => self.status = format!("Could not open {}: {e}", path.display()),
@@ -479,6 +487,7 @@ impl App {
             Ok(()) => {
                 self.saved = self.graph.clone();
                 self.status = format!("Saved {}", path.display());
+                push_recent(&mut self.recent, path.clone());
                 self.path = Some(path);
             }
             Err(e) => self.status = format!("Could not save {}: {e}", path.display()),
@@ -743,11 +752,22 @@ fn node_props(ui: &mut egui::Ui, kind: &mut NodeKind) {
 }
 
 const PICKS_KEY: &str = "node_picks";
+const RECENT_KEY: &str = "recent_files";
+
+/// Moves `path` to the front of the recent list, without duplicates, at most 10 long.
+fn push_recent(list: &mut Vec<std::path::PathBuf>, path: std::path::PathBuf) {
+    list.retain(|p| *p != path);
+    list.insert(0, path);
+    list.truncate(10);
+}
 
 impl eframe::App for App {
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         if let Ok(s) = serde_json::to_string(&self.editor.picks) {
             storage.set_string(PICKS_KEY, s);
+        }
+        if let Ok(s) = serde_json::to_string(&self.recent) {
+            storage.set_string(RECENT_KEY, s);
         }
     }
 
@@ -802,6 +822,21 @@ impl eframe::App for App {
                     if ui.button("Open…").clicked() {
                         self.open();
                     }
+                    ui.add_enabled_ui(!self.recent.is_empty(), |ui| {
+                        ui.menu_button("Open recent", |ui| {
+                            let mut pick = None;
+                            for p in &self.recent {
+                                let name = p.file_name().map_or_else(|| p.display().to_string(), |n| n.to_string_lossy().into_owned());
+                                if ui.button(name).on_hover_text(p.display().to_string()).clicked() {
+                                    pick = Some(p.clone());
+                                    ui.close();
+                                }
+                            }
+                            if let Some(p) = pick {
+                                self.open_path(p);
+                            }
+                        });
+                    });
                     if ui.button("Save").clicked() {
                         self.save(false);
                     }
@@ -1215,4 +1250,22 @@ fn pattern_seed(ui: &mut egui::Ui, p: &mut graph::PatternParams, d: &graph::Patt
             *seed = None;
         }
     });
+}
+
+#[cfg(test)]
+mod recent_tests {
+    use super::push_recent;
+    use std::path::PathBuf;
+
+    #[test]
+    fn recent_list_is_newest_first_unique_and_capped() {
+        let mut l = Vec::new();
+        for i in 0..12 {
+            push_recent(&mut l, PathBuf::from(format!("{i}.noisegraph")));
+        }
+        push_recent(&mut l, PathBuf::from("5.noisegraph"));
+        assert_eq!(l.len(), 10);
+        assert_eq!(l[0], PathBuf::from("5.noisegraph"));
+        assert_eq!(l.iter().filter(|p| **p == PathBuf::from("5.noisegraph")).count(), 1);
+    }
 }

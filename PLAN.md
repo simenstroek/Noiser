@@ -209,3 +209,6 @@ Built: `history.rs`, whole-graph snapshots committed once the pointer is release
 
 ### Add-menu search (2026-11-17)
 Right-click menu on the canvas has a focused Search box; typing filters the node list, Enter adds the first match.
+
+### Recent files (2026-11-17)
+File > Open recent (last 10 opened or saved graphs, stored in eframe storage). Next: preferences window, frame/comment nodes, keyboard shortcut list, headless batch.
