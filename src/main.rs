@@ -124,6 +124,8 @@ struct App {
     /// Most recently opened or saved graph files, newest first (kept across runs).
     recent: Vec<std::path::PathBuf>,
     shortcuts_open: bool,
+    prefs: Prefs,
+    prefs_open: bool,
 }
 
 /// An export running on a worker thread.
@@ -165,6 +167,9 @@ impl App {
             },
             None => (Graph::default_graph(), None, String::new()),
         };
+        let prefs: Prefs = cc.storage.and_then(|s| s.get_string(PREFS_KEY)).and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
+        let prefs = prefs.sane();
+        cc.egui_ctx.set_zoom_factor(prefs.ui_scale);
         let mut editor = editor::Editor::default();
         // Wire-drop menu pick counts survive restarts.
         if let Some(picks) = cc.storage.and_then(|s| s.get_string(PICKS_KEY)).and_then(|s| serde_json::from_str(&s).ok()) {
@@ -219,6 +224,8 @@ impl App {
             mesh_mask: meshmask::MaskSettings::default(),
             history: history::History::new(&saved_for_history),
             shortcuts_open: false,
+            prefs: prefs.clone(),
+            prefs_open: false,
             recent: cc.storage.and_then(|s| s.get_string(RECENT_KEY)).and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default(),
         };
         if let Some(p) = mesh_arg {
@@ -767,6 +774,30 @@ const SHORTCUTS: [(&str, &str); 10] = [
     ("Drag in the 3D view", "Orbit (wheel zooms)"),
 ];
 const RECENT_KEY: &str = "recent_files";
+const PREFS_KEY: &str = "preferences";
+
+/// Settings that belong to the user, not to a graph; saved with the app state.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+struct Prefs {
+    /// Scale of the whole interface (egui zoom factor).
+    ui_scale: f32,
+    /// Rolling crash-recovery backups of the open graph.
+    backups: bool,
+}
+
+impl Default for Prefs {
+    fn default() -> Self {
+        Prefs { ui_scale: 1.0, backups: true }
+    }
+}
+
+impl Prefs {
+    fn sane(mut self) -> Self {
+        self.ui_scale = if self.ui_scale.is_finite() { self.ui_scale.clamp(0.75, 2.0) } else { 1.0 };
+        self
+    }
+}
 
 /// Moves `path` to the front of the recent list, without duplicates, at most 10 long.
 fn push_recent(list: &mut Vec<std::path::PathBuf>, path: std::path::PathBuf) {
@@ -782,6 +813,9 @@ impl eframe::App for App {
         }
         if let Ok(s) = serde_json::to_string(&self.recent) {
             storage.set_string(RECENT_KEY, s);
+        }
+        if let Ok(s) = serde_json::to_string(&self.prefs) {
+            storage.set_string(PREFS_KEY, s);
         }
     }
 
@@ -807,8 +841,22 @@ impl eframe::App for App {
                 }
             });
         });
+        let ctx = ui.ctx().clone();
+        egui::Window::new("Preferences").open(&mut self.prefs_open).collapsible(false).resizable(false).show(&ctx, |ui| {
+            let r = ui.add(egui::Slider::new(&mut self.prefs.ui_scale, 0.75..=2.0).text("Interface scale"));
+            r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Slider, true, "Interface scale"));
+            // Applied on release: rescaling under the dragged slider would move it.
+            if r.changed() && !r.dragged() || r.drag_stopped() {
+                ctx.set_zoom_factor(self.prefs.ui_scale);
+            }
+            ui.checkbox(&mut self.prefs.backups, "Keep rolling backups for crash recovery");
+            if ui.button("Reset to defaults").clicked() {
+                self.prefs = Prefs::default();
+                ctx.set_zoom_factor(1.0);
+            }
+        });
         self.export_window(&ui.ctx().clone());
-        if let Some(s) = self.session.as_mut().filter(|_| self.graph != self.saved) {
+        if let Some(s) = self.session.as_mut().filter(|_| self.graph != self.saved && self.prefs.backups) {
             if s.backup(&self.graph, self.path.as_deref()) {
                 ui.ctx().request_repaint_after(backup::INTERVAL); // flush the held-back change
             }
@@ -832,6 +880,11 @@ impl eframe::App for App {
                     }
                     if ui.add_enabled(self.history.can_redo(), egui::Button::new("Redo").shortcut_text("Ctrl+Y")).clicked() {
                         self.undo(true);
+                    }
+                    ui.separator();
+                    if ui.button("Preferences…").clicked() {
+                        self.prefs_open = true;
+                        ui.close();
                     }
                 });
                 ui.menu_button("File", |ui| {
@@ -1296,5 +1349,19 @@ mod recent_tests {
         assert_eq!(l.len(), 10);
         assert_eq!(l[0], PathBuf::from("5.noisegraph"));
         assert_eq!(l.iter().filter(|p| **p == PathBuf::from("5.noisegraph")).count(), 1);
+    }
+}
+
+#[cfg(test)]
+mod prefs_tests {
+    use super::Prefs;
+
+    #[test]
+    fn prefs_fill_missing_fields_and_clamp_the_scale() {
+        let p: Prefs = serde_json::from_str("{}").unwrap();
+        assert_eq!(p, Prefs::default());
+        let p: Prefs = serde_json::from_str(r#"{"ui_scale": 9.0}"#).unwrap();
+        assert_eq!(p.sane().ui_scale, 2.0);
+        assert_eq!(Prefs { ui_scale: f32::NAN, backups: true }.sane().ui_scale, 1.0);
     }
 }
