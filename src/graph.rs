@@ -13,6 +13,53 @@ pub enum MathOp {
     Divide,
     Min,
     Max,
+    /// Safe power: a negative base only takes whole exponents, and 0^x = 0.
+    Power,
+    /// Polynomial smooth minimum (Blender's), blending over the third input's width.
+    SmoothMin,
+    SmoothMax,
+    /// Dot product of two vectors, as a float.
+    Dot,
+}
+
+impl MathOp {
+    pub const ALL: [MathOp; 10] = [
+        MathOp::Add,
+        MathOp::Subtract,
+        MathOp::Multiply,
+        MathOp::Divide,
+        MathOp::Min,
+        MathOp::Max,
+        MathOp::Power,
+        MathOp::SmoothMin,
+        MathOp::SmoothMax,
+        MathOp::Dot,
+    ];
+
+    /// Name shown in the operator dropdown.
+    pub fn label(self) -> &'static str {
+        match self {
+            MathOp::Add => "Add",
+            MathOp::Subtract => "Subtract",
+            MathOp::Multiply => "Multiply",
+            MathOp::Divide => "Divide",
+            MathOp::Min => "Minimum",
+            MathOp::Max => "Maximum",
+            MathOp::Power => "Power",
+            MathOp::SmoothMin => "Smooth minimum",
+            MathOp::SmoothMax => "Smooth maximum",
+            MathOp::Dot => "Dot product",
+        }
+    }
+
+    /// Smooth min and max take a third input, the blend width.
+    pub fn is_smooth(self) -> bool {
+        matches!(self, MathOp::SmoothMin | MathOp::SmoothMax)
+    }
+}
+
+fn default_smooth() -> f32 {
+    0.5
 }
 
 /// The discriminant names the generated fBm function (`noise_k{n}`, see codegen.rs).
@@ -143,8 +190,28 @@ impl Default for NoiseParams {
 pub enum NodeKind {
     Float(f32),
     Vec3([f32; 3]),
-    /// Inputs: a, b. The stored values are used when an input is unconnected.
-    Math { op: MathOp, a: f32, b: f32 },
+    /// Inputs: a, b (and the blend width for smooth min/max). The stored values are used when an
+    /// input is unconnected.
+    Math {
+        op: MathOp,
+        a: f32,
+        b: f32,
+        #[serde(default = "default_smooth")]
+        c: f32,
+    },
+    /// Linear map of input 0 from [from min, from max] to [to min, to max]; the other four inputs
+    /// are those bounds. `vals` holds the unconnected defaults of all five inputs.
+    Remap { vals: [f32; 5], clamp: bool },
+    /// Distance to the nearest cell centre (or, with `corners`, the nearest cell corner) in a regular
+    /// grid of `counts` cells per tile, scaled to [-1, 1]: -1 at the reference point and +1 as far from
+    /// it as the grid gets. Input: position (defaults to world position). Saved as "Brick" before
+    /// the rename.
+    #[serde(alias = "Brick")]
+    Grid {
+        counts: [f32; 3],
+        #[serde(default)]
+        corners: bool,
+    },
     Position,
     /// Input: the field to differentiate. Output: unit gradient (points low → high unless flipped).
     Normal { flip: bool },
@@ -158,8 +225,34 @@ impl NodeKind {
     pub fn input_count(&self) -> usize {
         match self {
             NodeKind::Float(_) | NodeKind::Vec3(_) | NodeKind::Position => 0,
-            NodeKind::Math { .. } => 2,
-            NodeKind::Normal { .. } | NodeKind::Noise(_) | NodeKind::OutDensity | NodeKind::OutNormal => 1,
+            NodeKind::Math { op, .. } => if op.is_smooth() { 3 } else { 2 },
+            NodeKind::Remap { .. } => 5,
+            NodeKind::Normal { .. } | NodeKind::Noise(_) | NodeKind::Grid { .. } | NodeKind::OutDensity | NodeKind::OutNormal => 1,
+        }
+    }
+
+    /// The stored value an unconnected input falls back to, for nodes with such inputs.
+    pub fn const_input(&self, port: usize) -> Option<f32> {
+        match self {
+            NodeKind::Math { a, b, c, .. } if port < self.input_count() => Some([*a, *b, *c][port]),
+            NodeKind::Remap { vals, .. } => vals.get(port).copied(),
+            _ => None,
+        }
+    }
+
+    pub fn set_const_input(&mut self, port: usize, v: f32) {
+        match self {
+            NodeKind::Math { a, b, c, .. } => {
+                if let Some(x) = [a, b, c].into_iter().nth(port) {
+                    *x = v;
+                }
+            }
+            NodeKind::Remap { vals, .. } => {
+                if let Some(x) = vals.get_mut(port) {
+                    *x = v;
+                }
+            }
+            _ => {}
         }
     }
 }
@@ -205,6 +298,12 @@ impl Graph {
     pub fn remove(&mut self, id: NodeId) {
         self.nodes.remove(&id);
         self.edges.retain(|e| e.from != id && e.to != id);
+    }
+
+    /// Drops links into inputs a node no longer has (a Math node switched away from smooth min/max).
+    pub fn prune_edges(&mut self) {
+        let nodes = &self.nodes;
+        self.edges.retain(|e| nodes.get(&e.to).is_some_and(|n| e.port < n.kind.input_count()));
     }
 
     pub fn disconnect(&mut self, to: NodeId, port: usize) {
@@ -271,15 +370,12 @@ impl Graph {
     /// node's output must be a float that repeats every tile.
     pub fn cache_eligibility(&self, id: NodeId, tiling: &BTreeMap<NodeId, Tiling>) -> Result<(), String> {
         match &self.nodes.get(&id).ok_or("no such node")?.kind {
-            NodeKind::Noise(_) | NodeKind::Math { .. } => {}
-            _ => return Err("only Noise and Math nodes can be cached".into()),
+            NodeKind::Noise(_) | NodeKind::Math { .. } | NodeKind::Remap { .. } | NodeKind::Grid { .. } => {}
+            _ => return Err("only Noise, Math, Remap and Grid nodes can be cached".into()),
         }
-        if let NodeKind::Math { .. } = self.nodes[&id].kind {
-            // Math on a vector input yields a vector; caches hold floats.
-            let vec_in = (0..2).any(|p| self.input(id, p).is_some_and(|s| self.yields_vector(s)));
-            if vec_in {
-                return Err("this Math node outputs a vector; caches hold floats".into());
-            }
+        // Math on a vector input yields a vector (except dot); caches hold floats.
+        if matches!(self.nodes[&id].kind, NodeKind::Math { .. }) && self.yields_vector(id) {
+            return Err("this Math node outputs a vector; caches hold floats".into());
         }
         match tiling.get(&id) {
             Some(Tiling::Periodic) | Some(Tiling::Const) => Ok(()),
@@ -309,7 +405,7 @@ impl Graph {
     pub fn yields_vector(&self, id: NodeId) -> bool {
         match &self.nodes[&id].kind {
             NodeKind::Vec3(_) | NodeKind::Position | NodeKind::Normal { .. } => true,
-            NodeKind::Math { .. } => (0..2).any(|p| self.input(id, p).is_some_and(|s| self.yields_vector(s))),
+            NodeKind::Math { op, .. } => *op != MathOp::Dot && (0..2).any(|p| self.input(id, p).is_some_and(|s| self.yields_vector(s))),
             _ => false,
         }
     }
@@ -327,9 +423,13 @@ impl Graph {
                     if !seen.insert(n) {
                         continue;
                     }
-                    if let NodeKind::Noise(p) = &self.nodes[&n].kind {
-                        let oct = p.octaves_used();
-                        finest = finest.max(p.scale * p.lacunarity.max(1.0).powi(oct as i32 - 1));
+                    match &self.nodes[&n].kind {
+                        NodeKind::Noise(p) => {
+                            let oct = p.octaves_used();
+                            finest = finest.max(p.scale * p.lacunarity.max(1.0).powi(oct as i32 - 1));
+                        }
+                        NodeKind::Grid { counts, .. } => finest = finest.max(counts.iter().cloned().fold(0.0, f32::max)),
+                        _ => {}
                     }
                     stack.extend(self.edges.iter().filter(|e| e.to == n).map(|e| e.from));
                 }
@@ -395,9 +495,10 @@ impl Graph {
         let t = match &self.nodes[&id].kind {
             NodeKind::Float(_) | NodeKind::Vec3(_) => Const,
             NodeKind::Position => Coord,
-            NodeKind::Math { op, a, b } => {
+            NodeKind::Math { op, a, b, .. } => {
                 let ta = input(0, memo, stack).unwrap_or(Const);
                 let tb = input(1, memo, stack).unwrap_or(Const);
+                let tc = if op.is_smooth() { input(2, memo, stack) } else { None };
                 // Operand is a whole-number constant: the unconnected default, or a Float/Vec3 node.
                 let whole_const = |port: usize, default: f32| match self.input(id, port).map(|s| &self.nodes[&s].kind) {
                     None => is_whole(default),
@@ -405,7 +506,7 @@ impl Graph {
                     Some(NodeKind::Vec3(v)) => v.iter().all(|x| is_whole(*x)),
                     Some(_) => false,
                 };
-                match (&ta, &tb) {
+                let t = match (&ta, &tb) {
                     (Broken(r), _) | (_, Broken(r)) => Broken(r.clone()),
                     (Const, Const) => Const,
                     (Const | Periodic, Const | Periodic) => Periodic,
@@ -419,6 +520,34 @@ impl Graph {
                         MathOp::Multiply => Broken("position multiplied by a non-whole or non-constant value".into()),
                         _ => Broken(format!("{op:?} on a position does not tile")),
                     },
+                };
+                // The blend width of smooth min/max joins in: it must not depend on position.
+                match (t, tc) {
+                    (Broken(r), _) | (_, Some(Broken(r))) => Broken(r),
+                    (_, Some(Coord)) => Broken("blend width depends on position".into()),
+                    (Const, Some(Periodic)) | (Periodic, Some(Const | Periodic)) => Periodic,
+                    (t, _) => t,
+                }
+            }
+            NodeKind::Remap { .. } => {
+                // A nonlinear-looking map of position breaks tiling; the rest follows the inputs.
+                let ts: Vec<Tiling> = (0..5).filter_map(|p| input(p, memo, stack)).collect();
+                match ts.iter().find(|t| matches!(t, Broken(_) | Coord)) {
+                    Some(Broken(r)) => Broken(r.clone()),
+                    Some(_) => Broken("Remap on a position does not tile".into()),
+                    None if ts.iter().all(|t| *t == Const) => Const,
+                    None => Periodic,
+                }
+            }
+            NodeKind::Grid { counts, .. } => {
+                if counts.iter().any(|c| !is_whole(*c)) {
+                    Broken("grid counts are not whole numbers".into())
+                } else {
+                    match input(0, memo, stack) {
+                        None | Some(Coord | Periodic) => Periodic,
+                        Some(Const) => Const,
+                        Some(Broken(r)) => Broken(r),
+                    }
                 }
             }
             NodeKind::Noise(n) => {
@@ -454,6 +583,34 @@ impl Graph {
 
 // ---- value range -------------------------------------------------------
 
+/// What a pin or wire carries. Links convert implicitly (float to vector repeats, vector to float
+/// averages), so this is what the pin shows, not a restriction.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PortType {
+    Float,
+    Vector,
+}
+
+impl Graph {
+    /// The type of a node's output. A Math node favors vectors: it outputs one when either input is
+    /// a vector (the other is repeated), and only a float when it has to (dot product).
+    pub fn output_type(&self, id: NodeId) -> PortType {
+        if self.yields_vector(id) { PortType::Vector } else { PortType::Float }
+    }
+
+    /// The type an input expects; for Math it follows what is connected.
+    pub fn input_type(&self, id: NodeId, port: usize) -> PortType {
+        match &self.nodes[&id].kind {
+            NodeKind::Noise(_) | NodeKind::Grid { .. } | NodeKind::OutNormal => PortType::Vector,
+            NodeKind::Math { op, .. } if port < 2 => {
+                let vector = *op == MathOp::Dot || (0..2).any(|p| self.input(id, p).is_some_and(|s| self.yields_vector(s)));
+                if vector { PortType::Vector } else { PortType::Float }
+            }
+            _ => PortType::Float,
+        }
+    }
+}
+
 /// Closed interval [lo, hi]; infinite ends mean unbounded. Vectors use one interval for all components.
 pub type Range = (f32, f32);
 
@@ -481,14 +638,34 @@ impl Graph {
             NodeKind::Normal { .. } => (-1.0, 1.0),
             // noise.wgsl keeps every kind within [-1, 1] (Perlin and Simplex are clamped).
             NodeKind::Noise(n) => if n.normalize { (0.0, 1.0) } else { (-1.0, 1.0) },
-            NodeKind::Math { op, a, b } => {
+            NodeKind::Math { op, a, b, c } => {
                 let mut operand = |port: usize, default: f32| match self.input(id, port) {
                     Some(src) => self.range_of(src, stack),
                     None => (default, default),
                 };
-                let (ra, rb) = (operand(0, *a), operand(1, *b));
-                math_range(*op, ra, rb)
+                let (ra, rb, rc) = (operand(0, *a), operand(1, *b), operand(2, *c));
+                math_range(*op, ra, rb, rc)
             }
+            NodeKind::Remap { vals, clamp } => {
+                let [v, i0, i1, o0, o1] = *vals;
+                let linked = |p: usize| self.input(id, p).is_some();
+                let (lo, hi) = (o0.min(o1), o0.max(o1));
+                if *clamp && !linked(3) && !linked(4) {
+                    (lo, hi)
+                } else if (1..5).any(linked) {
+                    UNBOUNDED
+                } else if i0 == i1 || o0 == o1 {
+                    (o0, o0)
+                } else {
+                    let (x0, x1) = match self.input(id, 0) {
+                        Some(src) => self.range_of(src, stack),
+                        None => (v, v),
+                    };
+                    let f = |x: f32| o0 + (x - i0) / (i1 - i0) * (o1 - o0);
+                    if x0.is_finite() && x1.is_finite() { (f(x0).min(f(x1)), f(x0).max(f(x1))) } else { UNBOUNDED }
+                }
+            }
+            NodeKind::Grid { .. } => (-1.0, 1.0),
             NodeKind::OutDensity | NodeKind::OutNormal => UNBOUNDED,
         };
         stack.pop();
@@ -496,7 +673,7 @@ impl Graph {
     }
 }
 
-fn math_range(op: MathOp, (a0, a1): Range, (b0, b1): Range) -> Range {
+fn math_range(op: MathOp, (a0, a1): Range, (b0, b1): Range, (_, k1): Range) -> Range {
     let span = |v: [f32; 4]| {
         // NaN (0 × ∞) only comes from unbounded inputs, so treat it as unbounded.
         if v.iter().any(|x| x.is_nan()) {
@@ -513,6 +690,15 @@ fn math_range(op: MathOp, (a0, a1): Range, (b0, b1): Range) -> Range {
         MathOp::Divide => span([a0 / b0, a0 / b1, a1 / b0, a1 / b1]),
         MathOp::Min => (a0.min(b0), a1.min(b1)),
         MathOp::Max => (a0.max(b0), a1.max(b1)),
+        MathOp::Power => UNBOUNDED,
+        // Within k/6 of the plain min or max, on one side only.
+        MathOp::SmoothMin => (a0.min(b0) - k1.max(0.0) / 6.0, a1.min(b1)),
+        MathOp::SmoothMax => (a0.max(b0), a1.max(b1) + k1.max(0.0) / 6.0),
+        MathOp::Dot => {
+            // Every component lies in the range, so |dot| <= 3 * max|a| * max|b|.
+            let m = 3.0 * a0.abs().max(a1.abs()) * b0.abs().max(b1.abs());
+            if m.is_finite() { (-m, m) } else { UNBOUNDED }
+        }
     }
 }
 
@@ -527,8 +713,8 @@ mod tests {
         // noise * 3 + 0.5
         let noise = g.find(|k| matches!(k, NodeKind::Noise(_))).unwrap();
         let out = g.find(|k| *k == NodeKind::OutDensity).unwrap();
-        let mul = g.add(NodeKind::Math { op: MathOp::Multiply, a: 0.0, b: 3.0 }, [0.0; 2]);
-        let add = g.add(NodeKind::Math { op: MathOp::Add, a: 0.0, b: 0.5 }, [0.0; 2]);
+        let mul = g.add(NodeKind::Math { op: MathOp::Multiply, a: 0.0, b: 3.0, c: 0.5 }, [0.0; 2]);
+        let add = g.add(NodeKind::Math { op: MathOp::Add, a: 0.0, b: 0.5, c: 0.5 }, [0.0; 2]);
         g.connect(noise, mul, 0);
         g.connect(mul, add, 0);
         g.connect(add, out, 0);
@@ -538,8 +724,8 @@ mod tests {
         g.connect(pos, add, 1);
         assert_eq!(g.density_range(), UNBOUNDED);
         // Dividing by a range that spans zero is unbounded too.
-        assert_eq!(math_range(MathOp::Divide, (1.0, 1.0), (-1.0, 1.0)), UNBOUNDED);
-        assert_eq!(math_range(MathOp::Divide, (1.0, 2.0), (2.0, 4.0)), (0.25, 1.0));
+        assert_eq!(math_range(MathOp::Divide, (1.0, 1.0), (-1.0, 1.0), (0.5, 0.5)), UNBOUNDED);
+        assert_eq!(math_range(MathOp::Divide, (1.0, 2.0), (2.0, 4.0), (0.5, 0.5)), (0.25, 1.0));
     }
 
     fn tiling_at(g: &Graph, id: NodeId) -> Tiling {
@@ -583,11 +769,11 @@ mod tests {
     fn position_math_rules() {
         let mut g = Graph::default();
         let p = g.add(NodeKind::Position, [0.0; 2]);
-        let times2 = g.add(NodeKind::Math { op: MathOp::Multiply, a: 0.0, b: 2.0 }, [0.0; 2]);
-        let times_half = g.add(NodeKind::Math { op: MathOp::Multiply, a: 0.0, b: 0.5 }, [0.0; 2]);
+        let times2 = g.add(NodeKind::Math { op: MathOp::Multiply, a: 0.0, b: 2.0, c: 0.5 }, [0.0; 2]);
+        let times_half = g.add(NodeKind::Math { op: MathOp::Multiply, a: 0.0, b: 0.5, c: 0.5 }, [0.0; 2]);
         let n1 = g.add(NodeKind::Noise(NoiseParams::default()), [0.0; 2]);
         // Domain warp: noise(p + noise(p)) still tiles.
-        let warp = g.add(NodeKind::Math { op: MathOp::Add, a: 0.0, b: 0.0 }, [0.0; 2]);
+        let warp = g.add(NodeKind::Math { op: MathOp::Add, a: 0.0, b: 0.0, c: 0.5 }, [0.0; 2]);
         let n2 = g.add(NodeKind::Noise(NoiseParams::default()), [0.0; 2]);
         g.connect(p, times2, 0);
         g.connect(p, times_half, 0);
@@ -608,8 +794,8 @@ mod tests {
     #[test]
     fn cycle_is_reported() {
         let mut g = Graph::default();
-        let a = g.add(NodeKind::Math { op: MathOp::Add, a: 0.0, b: 0.0 }, [0.0; 2]);
-        let b = g.add(NodeKind::Math { op: MathOp::Add, a: 0.0, b: 0.0 }, [0.0; 2]);
+        let a = g.add(NodeKind::Math { op: MathOp::Add, a: 0.0, b: 0.0, c: 0.5 }, [0.0; 2]);
+        let b = g.add(NodeKind::Math { op: MathOp::Add, a: 0.0, b: 0.0, c: 0.5 }, [0.0; 2]);
         g.connect(a, b, 0);
         g.connect(b, a, 0);
         assert!(matches!(tiling_at(&g, a), Tiling::Broken(_)));
@@ -648,6 +834,64 @@ mod tests {
     }
 
     #[test]
+    fn math_favors_vectors_and_dot_gives_a_float() {
+        let mut g = Graph::default_graph(); // 0 Position → 1 Noise → 2 OutDensity
+        let add = g.add(NodeKind::Math { op: MathOp::Add, a: 0.0, b: 1.0, c: 0.5 }, [0.0; 2]);
+        assert_eq!(g.output_type(add), PortType::Float);
+        g.connect(0, add, 0); // a vector and an unconnected float
+        assert_eq!((g.output_type(add), g.input_type(add, 0), g.input_type(add, 1)), (PortType::Vector, PortType::Vector, PortType::Vector));
+        g.connect(1, add, 1); // a vector and a connected float
+        assert_eq!(g.output_type(add), PortType::Vector);
+        let dot = g.add(NodeKind::Math { op: MathOp::Dot, a: 0.0, b: 0.0, c: 0.5 }, [0.0; 2]);
+        assert_eq!((g.output_type(dot), g.input_type(dot, 0)), (PortType::Float, PortType::Vector));
+        assert_eq!((g.output_type(0), g.output_type(1)), (PortType::Vector, PortType::Float));
+        assert_eq!((g.input_type(1, 0), g.input_type(2, 0), g.input_type(3, 0)), (PortType::Vector, PortType::Float, PortType::Vector));
+        // Caches hold floats: a vector-valued Math node can't be cached, a dot can (when it tiles).
+        assert!(g.cache_eligibility(add, &g.tiling()).is_err());
+    }
+
+    #[test]
+    fn remap_grid_and_smooth_ops_in_the_graph() {
+        let mut g = Graph::default_graph(); // 0 Position → 1 Noise(-1..1) → 2 OutDensity
+        let t = |g: &Graph, id| g.tiling()[&id].clone();
+        // Smooth min/max grow a third input; switching away prunes the link into it.
+        let sm = g.add(NodeKind::Math { op: MathOp::SmoothMin, a: 0.0, b: 0.0, c: 0.5 }, [0.0; 2]);
+        assert_eq!(g.nodes[&sm].kind.input_count(), 3);
+        g.connect(1, sm, 2);
+        assert_eq!(t(&g, sm), Tiling::Periodic);
+        g.connect(0, sm, 2); // a position as the blend width doesn't tile
+        assert!(matches!(t(&g, sm), Tiling::Broken(_)));
+        g.nodes.get_mut(&sm).unwrap().kind = NodeKind::Math { op: MathOp::Add, a: 0.0, b: 0.0, c: 0.5 };
+        g.prune_edges();
+        assert!(g.input(sm, 2).is_none());
+        // Ranges.
+        let grid = g.add(NodeKind::Grid { counts: [8.0; 3], corners: false }, [0.0; 2]);
+        g.connect(grid, 2, 0);
+        assert_eq!(g.density_range(), (-1.0, 1.0));
+        let remap = g.add(NodeKind::Remap { vals: [0.0, 0.0, 1.0, -5.0, 5.0], clamp: false }, [0.0; 2]);
+        g.connect(1, remap, 0);
+        g.connect(remap, 2, 0);
+        assert_eq!(g.density_range(), (-15.0, 5.0)); // noise in [-1, 1] through a ×10 map from [0, 1]
+        if let NodeKind::Remap { clamp, .. } = &mut g.nodes.get_mut(&remap).unwrap().kind {
+            *clamp = true;
+        }
+        assert_eq!(g.density_range(), (-5.0, 5.0));
+        // Tiling.
+        assert_eq!(t(&g, grid), Tiling::Periodic);
+        assert_eq!(t(&g, remap), Tiling::Periodic);
+        g.connect(0, remap, 0);
+        assert!(matches!(t(&g, remap), Tiling::Broken(_))); // remapping a position
+        g.nodes.get_mut(&grid).unwrap().kind = NodeKind::Grid { counts: [8.5, 8.0, 8.0], corners: false };
+        assert!(matches!(t(&g, grid), Tiling::Broken(_)));
+        // The node was called Brick (without the corner option) until it was renamed.
+        let old = serde_json::from_str::<NodeKind>(r#"{"Brick":{"counts":[4.0,4.0,4.0]}}"#).unwrap();
+        assert_eq!(old, NodeKind::Grid { counts: [4.0; 3], corners: false });
+        // A Math node saved before the blend width existed still loads.
+        let old = r#"{"op":"Add","a":1.0,"b":2.0}"#;
+        assert!(matches!(serde_json::from_str::<NodeKind>(&format!("{{\"Math\":{old}}}")), Ok(NodeKind::Math { c, .. }) if c == 0.5));
+    }
+
+    #[test]
     fn cache_rules() {
         let mut g = Graph::default_graph(); // 0 Position → 1 Perlin(scale 4, 4 octaves, lac 2) → 2 OutDensity
         let t = g.tiling();
@@ -665,7 +909,7 @@ mod tests {
         }
         assert!(g.cache_eligibility(1, &g.tiling()).is_err());
         // Math on a vector yields a vector.
-        let m = g.add(NodeKind::Math { op: MathOp::Add, a: 0.0, b: 0.0 }, [0.0; 2]);
+        let m = g.add(NodeKind::Math { op: MathOp::Add, a: 0.0, b: 0.0, c: 0.5 }, [0.0; 2]);
         g.connect(0, m, 0);
         assert!(g.cache_eligibility(m, &g.tiling()).is_err());
     }
@@ -678,7 +922,7 @@ mod tests {
         g.nodes.get_mut(&1).unwrap().cache = Some(0);
         assert_eq!(g.cache_covered(&g.tiling(), &roots), BTreeSet::from([0]));
         // Position also feeds an uncached branch to the output, so it's still evaluated.
-        let m = g.add(NodeKind::Math { op: MathOp::Add, a: 0.0, b: 0.0 }, [0.0; 2]);
+        let m = g.add(NodeKind::Math { op: MathOp::Add, a: 0.0, b: 0.0, c: 0.5 }, [0.0; 2]);
         g.connect(1, m, 0);
         g.connect(0, m, 1);
         g.connect(m, 2, 0);

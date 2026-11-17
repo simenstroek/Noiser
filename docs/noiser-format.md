@@ -53,11 +53,31 @@ conversions:
 A constant: `value` is a number (float) or `[x, y, z]` (vector).
 
 ### `math`
-`fn` is one of `add`, `subtract`, `multiply`, `divide`, `min`, `max`. Operands `a` and `b` are
+`fn` is one of `add`, `subtract`, `multiply`, `divide`, `min`, `max`, `power`, `smooth_min`,
+`smooth_max`, `dot`. Operands `a` and `b` are
 either `{"node": id}` or a number. The result is a vector if either operand is a vector, and
 then both operands are converted to vectors and the op applies per component.
 
 - `divide` is Blender's safe divide: `x / 0 = 0` (per component).
+- `power` never gives NaN: `x^0 = 1`; for `x > 0` it is `pow(x, y)`; `0^y = 0`; a negative base takes only
+  whole exponents (sign kept for odd ones), otherwise 0.
+- `smooth_min` has a third operand `k` (a number or `{"node": id}`, always a float). For `k <= 0` it is `min`;
+  otherwise `h = max(k − |a − b|, 0) / k` and the result is `min(a, b) − h³·k/6` (Blender's polynomial
+  smooth minimum). `smooth_max(a, b, k) = −smooth_min(−a, −b, k)`.
+- `dot` converts both operands to vectors and returns the float `a·b`. Its `type` is `float`.
+
+### `remap`
+`value`, `from_min`, `from_max`, `to_min`, `to_max` (each a number or `{"node": id}`, converted to float),
+and `clamp`. With `t = (value − from_min) / (from_max − from_min)` (0 when the two are equal), the
+result is `to_min + t·(to_max − to_min)`, clamped between `min(to_min, to_max)` and `max(to_min, to_max)`
+when `clamp` is true. Type float.
+
+### `grid`
+`position` (op id or `null` for `p`), `counts` `[nx, ny, nz]` (cells per tile on each axis) and `reference`
+(`center` or `corner`). With `n = counts` and `f = fract(q·n)`, the offset from the reference point is
+`d = (f − 0.5) / n` for `center`, or `d = min(f, 1 − f) / n` (per component) for `corner`. The result is
+`|d| / (0.5·|1/n|)·2 − 1`: −1 at the reference point and +1 as far from it as the grid gets (the cell
+corners for `center`, the cell centres for `corner`). Tiles when every count is a whole number. Type float.
 
 ### `noise`
 Fields: `kind`, `position` (op id or `null` for `p`), `scale`, `normalize`, `octaves`,

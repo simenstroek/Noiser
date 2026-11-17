@@ -38,7 +38,7 @@ pub fn ops(g: &Graph, seed: u32) -> Result<Value, String> {
                 NodeKind::Position => json!({"op": "position"}),
                 NodeKind::Float(v) => json!({"op": "value", "value": v}),
                 NodeKind::Vec3(v) => json!({"op": "value", "value": v}),
-                NodeKind::Math { op, a, b } => {
+                NodeKind::Math { op, a, b, c } => {
                     let f = match op {
                         MathOp::Add => "add",
                         MathOp::Subtract => "subtract",
@@ -46,10 +46,26 @@ pub fn ops(g: &Graph, seed: u32) -> Result<Value, String> {
                         MathOp::Divide => "divide",
                         MathOp::Min => "min",
                         MathOp::Max => "max",
+                        MathOp::Power => "power",
+                        MathOp::SmoothMin => "smooth_min",
+                        MathOp::SmoothMax => "smooth_max",
+                        MathOp::Dot => "dot",
                     };
                     // An unconnected operand is its constant.
                     let operand = |port, c: f32| g.input(id, port).map_or(json!(c), |s| json!({"node": s}));
-                    json!({"op": "math", "fn": f, "a": operand(0, *a), "b": operand(1, *b)})
+                    let mut o = json!({"op": "math", "fn": f, "a": operand(0, *a), "b": operand(1, *b)});
+                    if op.is_smooth() {
+                        o["k"] = operand(2, *c);
+                    }
+                    o
+                }
+                NodeKind::Remap { vals, clamp } => {
+                    let operand = |port: usize| g.input(id, port).map_or(json!(vals[port]), |s| json!({"node": s}));
+                    json!({"op": "remap", "value": operand(0), "from_min": operand(1), "from_max": operand(2),
+                           "to_min": operand(3), "to_max": operand(4), "clamp": clamp})
+                }
+                NodeKind::Grid { counts, corners } => {
+                    json!({"op": "grid", "position": input(id, 0), "counts": counts, "reference": if *corners { "corner" } else { "center" }})
                 }
                 NodeKind::Normal { flip } => json!({"op": "normal", "field": input(id, 0), "flip": flip}),
                 NodeKind::Noise(n) => {
@@ -136,7 +152,7 @@ mod tests {
     #[test]
     fn ops_are_ordered_and_seeds_resolved() {
         let mut g = Graph::default_graph(); // 0 Position → 1 Noise → 2 OutDensity
-        let m = g.add(NodeKind::Math { op: MathOp::Multiply, a: 0.0, b: 2.0 }, [0.0; 2]);
+        let m = g.add(NodeKind::Math { op: MathOp::Multiply, a: 0.0, b: 2.0, c: 0.5 }, [0.0; 2]);
         g.connect(1, m, 0);
         g.connect(m, 2, 0);
         let v = ops(&g, 7).unwrap();

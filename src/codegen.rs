@@ -76,7 +76,15 @@ pub fn compile_with(g: &Graph, caches: &BTreeMap<NodeId, u32>) -> Result<Compile
         match &n.kind {
             NodeKind::Float(v) => params.push(*v),
             NodeKind::Vec3(v) => params.extend(v),
-            NodeKind::Math { a, b, .. } => params.extend([*a, *b]),
+            NodeKind::Math { a, b, c, .. } => params.extend([*a, *b, *c]),
+            NodeKind::Remap { vals, clamp } => {
+                params.extend(vals);
+                params.push(if *clamp { 1.0 } else { 0.0 });
+            }
+            NodeKind::Grid { counts, corners } => {
+                params.extend(counts);
+                params.push(if *corners { 1.0 } else { 0.0 });
+            }
             NodeKind::Noise(n) => params.extend([
                 n.scale,
                 if n.normalize { 1.0 } else { 0.0 },
@@ -226,10 +234,14 @@ impl Gen<'_> {
             NodeKind::Position => (Ty::V, "p".into()),
             NodeKind::Math { op, .. } => {
                 let in_ty = |port| self.g.input(id, port).map_or(Ty::F, |src| self.types[&src]);
-                let ty = if in_ty(0) == Ty::V || in_ty(1) == Ty::V { Ty::V } else { Ty::F };
-                let a = self.operand(id, 0, ty, &convert(&format!("P[{s}]"), Ty::F, ty));
-                let b = self.operand(id, 1, ty, &convert(&format!("P[{}]", s + 1), Ty::F, ty));
-                let zero = convert("0.0", Ty::F, ty);
+                // Dot takes vectors and gives a float; everything else is a vector if any input is.
+                let opty = if *op == MathOp::Dot || in_ty(0) == Ty::V || in_ty(1) == Ty::V { Ty::V } else { Ty::F };
+                let ty = if *op == MathOp::Dot { Ty::F } else { opty };
+                let a = self.operand(id, 0, opty, &convert(&format!("P[{s}]"), Ty::F, opty));
+                let b = self.operand(id, 1, opty, &convert(&format!("P[{}]", s + 1), Ty::F, opty));
+                let k = self.operand(id, 2, Ty::F, &format!("P[{}]", s + 2));
+                let zero = convert("0.0", Ty::F, opty);
+                let v = opty == Ty::V;
                 let e = match op {
                     MathOp::Add => format!("{a} + {b}"),
                     MathOp::Subtract => format!("{a} - {b}"),
@@ -238,8 +250,20 @@ impl Gen<'_> {
                     MathOp::Divide => format!("select({a} / {b}, {zero}, {b} == {zero})"),
                     MathOp::Min => format!("min({a}, {b})"),
                     MathOp::Max => format!("max({a}, {b})"),
+                    MathOp::Power => format!("{}({a}, {b})", if v { "pow_safe3" } else { "pow_safe" }),
+                    MathOp::SmoothMin => format!("{}({a}, {b}, {k})", if v { "smin3" } else { "smin" }),
+                    MathOp::SmoothMax => format!("{}({a}, {b}, {k})", if v { "smax3" } else { "smax" }),
+                    MathOp::Dot => format!("dot({a}, {b})"),
                 };
                 (ty, e)
+            }
+            NodeKind::Remap { .. } => {
+                let x: Vec<String> = (0..5).map(|p| self.operand(id, p, Ty::F, &format!("P[{}]", s + p))).collect();
+                (Ty::F, format!("remap({}, {}, {}, {}, {}, P[{}] > 0.5)", x[0], x[1], x[2], x[3], x[4], s + 5))
+            }
+            NodeKind::Grid { .. } => {
+                let q = self.operand(id, 0, Ty::V, "p");
+                (Ty::F, format!("grid_dist({q}, vec3f(P[{s}], P[{}], P[{}]), P[{}] > 0.5)", s + 1, s + 2, s + 3))
             }
             NodeKind::Normal { flip } => {
                 let sign = if *flip { "-" } else { "" };
@@ -319,7 +343,7 @@ mod tests {
     #[test]
     fn cycle_through_normal_is_an_error() {
         let mut g = Graph::default();
-        let m = g.add(NodeKind::Math { op: MathOp::Add, a: 0.0, b: 0.0 }, [0.0; 2]);
+        let m = g.add(NodeKind::Math { op: MathOp::Add, a: 0.0, b: 0.0, c: 0.5 }, [0.0; 2]);
         let n = g.add(NodeKind::Normal { flip: false }, [0.0; 2]);
         let o = g.add(NodeKind::OutDensity, [0.0; 2]);
         g.connect(m, n, 0);
@@ -336,7 +360,7 @@ mod tests {
         let f = g.add(NodeKind::Float(3.0), [0.0; 2]);
         let mut ops = Vec::new();
         for op in [MathOp::Add, MathOp::Subtract, MathOp::Multiply, MathOp::Divide, MathOp::Min, MathOp::Max] {
-            let m = g.add(NodeKind::Math { op, a: 1.0, b: 2.0 }, [0.0; 2]);
+            let m = g.add(NodeKind::Math { op, a: 1.0, b: 2.0, c: 0.5 }, [0.0; 2]);
             g.connect(p, m, 0);
             g.connect(v, m, 1);
             ops.push(m);
@@ -349,7 +373,7 @@ mod tests {
             noise = Some(match noise {
                 None => n,
                 Some(prev) => {
-                    let sum = g.add(NodeKind::Math { op: MathOp::Add, a: 0.0, b: 0.0 }, [0.0; 2]);
+                    let sum = g.add(NodeKind::Math { op: MathOp::Add, a: 0.0, b: 0.0, c: 0.5 }, [0.0; 2]);
                     g.connect(prev, sum, 0);
                     g.connect(n, sum, 1);
                     sum
@@ -358,7 +382,7 @@ mod tests {
         }
         let noise = noise.unwrap();
         // float * noise, then the normal of that, flipped.
-        let scaled = g.add(NodeKind::Math { op: MathOp::Multiply, a: 0.0, b: 0.0 }, [0.0; 2]);
+        let scaled = g.add(NodeKind::Math { op: MathOp::Multiply, a: 0.0, b: 0.0, c: 0.5 }, [0.0; 2]);
         g.connect(f, scaled, 0);
         g.connect(noise, scaled, 1);
         let nrm = g.add(NodeKind::Normal { flip: true }, [0.0; 2]);
@@ -396,8 +420,8 @@ mod tests {
     #[test]
     fn cycle_is_an_error() {
         let mut g = Graph::default();
-        let a = g.add(NodeKind::Math { op: MathOp::Add, a: 0.0, b: 0.0 }, [0.0; 2]);
-        let b = g.add(NodeKind::Math { op: MathOp::Add, a: 0.0, b: 0.0 }, [0.0; 2]);
+        let a = g.add(NodeKind::Math { op: MathOp::Add, a: 0.0, b: 0.0, c: 0.5 }, [0.0; 2]);
+        let b = g.add(NodeKind::Math { op: MathOp::Add, a: 0.0, b: 0.0, c: 0.5 }, [0.0; 2]);
         let o = g.add(NodeKind::OutDensity, [0.0; 2]);
         g.connect(a, b, 0);
         g.connect(b, a, 0);

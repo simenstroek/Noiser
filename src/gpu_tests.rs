@@ -5,16 +5,24 @@ use crate::codegen::{self, EVAL_BINDINGS, NOISE_LIB};
 use crate::graph::{Graph, NodeKind, NoiseKind, NoiseParams, WorleyFeature};
 use eframe::wgpu;
 
+/// GPU tests run one at a time. Several tests creating Vulkan devices and waiting on them at once
+/// intermittently deadlocked the whole suite (the stuck tests were always GPU tests).
+static GPU_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 pub(crate) struct Gpu {
     device: wgpu::Device,
     queue: wgpu::Queue,
+    /// Held until the test drops the device, so the next GPU test starts afterwards.
+    _serial: std::sync::MutexGuard<'static, ()>,
 }
 
 pub(crate) fn gpu() -> Option<Gpu> {
+    // A test that panicked while holding the lock poisons it; the lock has no data to protect.
+    let serial = GPU_TESTS.lock().unwrap_or_else(|e| e.into_inner());
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
     let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default())).ok()?;
     let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).ok()?;
-    Some(Gpu { device, queue })
+    Some(Gpu { device, queue, _serial: serial })
 }
 
 /// Evaluates the graph's density at each point.
@@ -409,11 +417,11 @@ fn noiser_files_for_blender() {
     let mut chain = perlin(NoiseParams { scale: 3.0, octaves: 2, ..Default::default() });
     let n = chain.find(|k| matches!(k, NodeKind::Noise(_))).unwrap();
     let o = chain.find(|k| *k == NodeKind::OutDensity).unwrap();
-    let m = chain.add(NodeKind::Math { op: crate::graph::MathOp::Divide, a: 0.0, b: 0.0 }, [0.0; 2]);
-    let k = chain.add(NodeKind::Math { op: crate::graph::MathOp::Multiply, a: 0.0, b: 0.8 }, [0.0; 2]);
+    let m = chain.add(NodeKind::Math { op: crate::graph::MathOp::Divide, a: 0.0, b: 0.0, c: 0.5 }, [0.0; 2]);
+    let k = chain.add(NodeKind::Math { op: crate::graph::MathOp::Multiply, a: 0.0, b: 0.8, c: 0.5 }, [0.0; 2]);
     chain.connect(n, m, 0); // noise / 0 (safe divide) feeds nothing useful; max keeps it in the graph
     chain.connect(n, k, 0);
-    let mx = chain.add(NodeKind::Math { op: crate::graph::MathOp::Max, a: 0.0, b: 0.0 }, [0.0; 2]);
+    let mx = chain.add(NodeKind::Math { op: crate::graph::MathOp::Max, a: 0.0, b: 0.0, c: 0.5 }, [0.0; 2]);
     chain.connect(k, mx, 0);
     chain.connect(m, mx, 1);
     chain.connect(mx, o, 0);
@@ -428,5 +436,113 @@ fn noiser_files_for_blender() {
         let ev = crate::export::Evaluator::new(&gpu.device, &gpu.queue, &g, 4).unwrap();
         let s = crate::noiser_file::file(&g, 4, |pts| ev.eval_points(pts)).unwrap();
         std::fs::write(dir.join(format!("{name}.noiser")), s).unwrap();
+    }
+}
+
+fn single_node_graph(kind: NodeKind) -> Graph {
+    let mut g = Graph::default();
+    let n = g.add(kind, [0.0; 2]);
+    let o = g.add(NodeKind::OutDensity, [0.0; 2]);
+    g.connect(n, o, 0);
+    g
+}
+
+fn near(got: f32, want: f32, what: &str) {
+    assert!((got - want).abs() < 1e-4, "{what}: got {got}, want {want}");
+}
+
+#[test]
+fn new_math_ops_match_reference() {
+    use crate::graph::MathOp::*;
+    let Some(gpu) = gpu() else { return eprintln!("no GPU adapter; skipping") };
+    let at = [[0.3, 0.6, 0.9]];
+    let math = |op, a, b, c| eval(&gpu, &single_node_graph(NodeKind::Math { op, a, b, c }), &at)[0];
+    near(math(Power, 2.0, 3.0, 0.5), 8.0, "2^3");
+    near(math(Power, -2.0, 3.0, 0.5), -8.0, "(-2)^3");
+    near(math(Power, -2.0, 2.0, 0.5), 4.0, "(-2)^2");
+    near(math(Power, -2.0, 0.5, 0.5), 0.0, "(-2)^0.5 is 0, not NaN");
+    near(math(Power, 0.0, 0.0, 0.5), 1.0, "0^0");
+    near(math(Power, 0.0, 2.0, 0.5), 0.0, "0^2");
+    // Blender's polynomial smooth min: 1 - h³k/6 with h = (0.5 - 0.2) / 0.5.
+    near(math(SmoothMin, 1.0, 1.2, 0.5), 1.0 - 0.6f32.powi(3) * 0.5 / 6.0, "smooth min");
+    near(math(SmoothMax, 1.0, 1.2, 0.5), 1.2 + 0.6f32.powi(3) * 0.5 / 6.0, "smooth max");
+    near(math(SmoothMin, 0.0, 5.0, 0.5), 0.0, "smooth min, far apart");
+    near(math(SmoothMin, 1.0, 1.2, 0.0), 1.0, "smooth min with k = 0 is min");
+    // The blend width can come from a link too.
+    let mut g = Graph::default();
+    let w = g.add(NodeKind::Float(0.5), [0.0; 2]);
+    let m = g.add(NodeKind::Math { op: SmoothMax, a: 1.0, b: 1.2, c: 0.0 }, [0.0; 2]);
+    let o = g.add(NodeKind::OutDensity, [0.0; 2]);
+    g.connect(w, m, 2);
+    g.connect(m, o, 0);
+    near(eval(&gpu, &g, &at)[0], 1.2 + 0.6f32.powi(3) * 0.5 / 6.0, "linked blend width");
+    // Dot product of two vectors.
+    let mut g = Graph::default();
+    let a = g.add(NodeKind::Vec3([1.0, 2.0, 3.0]), [0.0; 2]);
+    let b = g.add(NodeKind::Vec3([4.0, 5.0, 6.0]), [0.0; 2]);
+    let d = g.add(NodeKind::Math { op: Dot, a: 0.0, b: 0.0, c: 0.5 }, [0.0; 2]);
+    let o = g.add(NodeKind::OutDensity, [0.0; 2]);
+    g.connect(a, d, 0);
+    g.connect(b, d, 1);
+    g.connect(d, o, 0);
+    near(eval(&gpu, &g, &at)[0], 32.0, "dot");
+    // A vector with a float favors the vector: max((1, 2, 6), 3) = (3, 3, 6), whose average is 4
+    // (taking the vector's average first would give max(3, 3) = 3).
+    let mut g = Graph::default();
+    let v = g.add(NodeKind::Vec3([1.0, 2.0, 6.0]), [0.0; 2]);
+    let m = g.add(NodeKind::Math { op: Max, a: 0.0, b: 3.0, c: 0.5 }, [0.0; 2]);
+    let o = g.add(NodeKind::OutDensity, [0.0; 2]);
+    g.connect(v, m, 0);
+    g.connect(m, o, 0);
+    near(eval(&gpu, &g, &at)[0], 4.0, "float with vector stays a vector");
+}
+
+#[test]
+fn remap_matches_reference() {
+    let Some(gpu) = gpu() else { return eprintln!("no GPU adapter; skipping") };
+    let at = [[0.3, 0.6, 0.9]];
+    let remap = |x: f32, vals: [f32; 5], clamp: bool| {
+        let mut g = Graph::default();
+        let f = g.add(NodeKind::Float(x), [0.0; 2]);
+        let r = g.add(NodeKind::Remap { vals, clamp }, [0.0; 2]);
+        let o = g.add(NodeKind::OutDensity, [0.0; 2]);
+        g.connect(f, r, 0);
+        g.connect(r, o, 0);
+        eval(&gpu, &g, &at)[0]
+    };
+    near(remap(0.25, [0.0, 0.0, 1.0, 10.0, 20.0], false), 12.5, "linear");
+    near(remap(2.0, [0.0, 0.0, 1.0, 10.0, 20.0], false), 30.0, "extrapolates");
+    near(remap(2.0, [0.0, 0.0, 1.0, 10.0, 20.0], true), 20.0, "clamped high");
+    near(remap(-1.0, [0.0, 0.0, 1.0, 10.0, 20.0], true), 10.0, "clamped low");
+    near(remap(0.25, [0.0, 0.0, 1.0, 20.0, 10.0], false), 17.5, "reversed output");
+    near(remap(2.0, [0.0, 0.0, 1.0, 20.0, 10.0], true), 10.0, "clamped on a reversed output");
+    near(remap(0.7, [0.0, 1.0, 1.0, 10.0, 20.0], false), 10.0, "empty input range gives the output minimum");
+}
+
+#[test]
+fn grid_spans_minus_one_to_one_and_tiles() {
+    let Some(gpu) = gpu() else { return eprintln!("no GPU adapter; skipping") };
+    for corners in [false, true] {
+        for counts in [[8.0, 8.0, 8.0], [8.0, 4.0, 2.0]] {
+            let g = single_node_graph(NodeKind::Grid { counts, corners });
+            let centre = [0.5 / counts[0], 0.5 / counts[1], 0.5 / counts[2]];
+            let corner = [1.0 / counts[0], 2.0 / counts[1], 1.0 / counts[2]];
+            let v = eval(&gpu, &g, &[centre, corner]);
+            let (at_centre, at_corner) = if corners { (1.0, -1.0) } else { (-1.0, 1.0) };
+            near(v[0], at_centre, "cell centre");
+            near(v[1], at_corner, "cell corner");
+            let pts = points(20000, 5);
+            let v = eval(&gpu, &g, &pts);
+            let (lo, hi) = (v.iter().cloned().fold(f32::MAX, f32::min), v.iter().cloned().fold(f32::MIN, f32::max));
+            assert!(lo >= -1.0001 && hi <= 1.0001, "range {lo}..{hi}");
+            assert!(lo < -0.9 && hi > 0.9, "range {lo}..{hi} doesn't fill -1..1");
+            // One tile later it repeats, on every axis.
+            for axis in 0..3 {
+                let moved: Vec<[f32; 3]> = pts.iter().map(|p| { let mut q = *p; q[axis] += 1.0; q }).collect();
+                let w = eval(&gpu, &g, &moved);
+                let worst = v.iter().zip(&w).map(|(a, b)| (a - b).abs()).fold(0.0, f32::max);
+                assert!(worst < 2e-3, "axis {axis}: seam error {worst}");
+            }
+        }
     }
 }

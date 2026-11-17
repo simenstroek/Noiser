@@ -6,12 +6,20 @@
 //! disconnect it; drop a wire on empty space to pick a new node for it. The eye in a node's
 //! header previews that node in the 3D and slice views.
 
-use crate::graph::{Graph, MathOp, NodeId, NodeKind, NoiseKind, NoiseParams, Tiling};
+use crate::graph::{Graph, MathOp, NodeId, NodeKind, NoiseKind, NoiseParams, PortType, Tiling};
 use eframe::egui::{self, Color32, CornerRadius, Pos2, Rect, Sense, Stroke, StrokeKind, Vec2, epaint::CubicBezierShape};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub const ORANGE: Color32 = Color32::from_rgb(255, 150, 40);
 const ACCENT: Color32 = Color32::from_rgb(140, 190, 255);
+/// Pin and wire colors: floats blue, vectors yellow.
+fn type_color(t: PortType) -> Color32 {
+    match t {
+        PortType::Float => Color32::from_rgb(100, 165, 255),
+        PortType::Vector => Color32::from_rgb(255, 205, 70),
+    }
+}
+
 /// Cache on, and nodes a cache spares the preview from evaluating.
 const CACHED: Color32 = Color32::from_rgb(120, 220, 160);
 
@@ -47,6 +55,9 @@ pub struct Editor {
     box_start: Option<Pos2>,
     /// Graph-space point where the add menu was opened.
     menu_at: Pos2,
+    /// A scroll gesture over an operator dropdown already stepped it (egui smooths one wheel notch
+    /// over several frames, so a step happens once per gesture, not per frame).
+    op_scroll_stepped: bool,
     #[cfg(test)]
     debug_origin: Pos2,
 }
@@ -63,6 +74,7 @@ impl Default for Editor {
             pin_menu: None,
             box_start: None,
             menu_at: Pos2::ZERO,
+            op_scroll_stepped: false,
             #[cfg(test)]
             debug_origin: Pos2::ZERO,
         }
@@ -72,7 +84,9 @@ impl Default for Editor {
 pub fn title(kind: &NodeKind) -> String {
     match kind {
         NodeKind::Float(_) | NodeKind::Vec3(_) => "Value".into(),
-        NodeKind::Math { op, .. } => format!("Math · {op:?}"),
+        NodeKind::Math { .. } => "Math".into(), // the operator is the dropdown on the node
+        NodeKind::Remap { .. } => "Remap".into(),
+        NodeKind::Grid { .. } => "Grid".into(),
         NodeKind::Position => "Position".into(),
         NodeKind::Normal { .. } => "Normal".into(),
         NodeKind::Noise(n) => n.kind.name().into(),
@@ -84,7 +98,14 @@ pub fn title(kind: &NodeKind) -> String {
 fn input_label(kind: &NodeKind, port: usize) -> &'static str {
     match (kind, port) {
         (NodeKind::Math { .. }, 0) => "A",
-        (NodeKind::Math { .. }, _) => "B",
+        (NodeKind::Math { .. }, 1) => "B",
+        (NodeKind::Math { .. }, _) => "Blend",
+        (NodeKind::Remap { .. }, 0) => "Value",
+        (NodeKind::Remap { .. }, 1) => "From min",
+        (NodeKind::Remap { .. }, 2) => "From max",
+        (NodeKind::Remap { .. }, 3) => "To min",
+        (NodeKind::Remap { .. }, _) => "To max",
+        (NodeKind::Grid { .. }, _) => "Position",
         (NodeKind::Noise(_), _) => "Position",
         (NodeKind::Normal { .. }, _) => "Field",
         (NodeKind::OutDensity, _) => "Density",
@@ -114,7 +135,9 @@ fn palette() -> Vec<(&'static str, NodeKind)> {
         .into_iter()
         .chain([
             ("Value", NodeKind::Float(1.0)),
-            ("Math", NodeKind::Math { op: MathOp::Add, a: 0.0, b: 0.0 }),
+            ("Math", NodeKind::Math { op: MathOp::Add, a: 0.0, b: 0.0, c: 0.5 }),
+            ("Remap", NodeKind::Remap { vals: [0.0, 0.0, 1.0, 0.0, 1.0], clamp: false }),
+            ("Grid", NodeKind::Grid { counts: [8.0; 3], corners: false }),
             ("Position", NodeKind::Position),
             ("Normal", NodeKind::Normal { flip: false }),
             ("Density Output", NodeKind::OutDensity),
@@ -136,6 +159,20 @@ fn wire_choices(wire: Wire, picks: &BTreeMap<String, u32>) -> Vec<(&'static str,
     v
 }
 
+/// The operator dropdown inside a Math node whose rectangle is `rect`.
+fn op_field(rect: Rect, z: f32) -> Rect {
+    Rect::from_min_max(
+        Pos2::new(rect.left() + 8.0 * z, rect.top() + (HEADER_H + 2.0) * z),
+        Pos2::new(rect.right() - 8.0 * z, rect.top() + (HEADER_H + ROW_H - 2.0) * z),
+    )
+}
+
+/// Where a node's input rows start, measured from its top: below the header, and below the
+/// operator dropdown on Math nodes.
+fn body_top(kind: &NodeKind) -> f32 {
+    HEADER_H + if matches!(kind, NodeKind::Math { .. }) { ROW_H } else { 0.0 }
+}
+
 struct Layout {
     rect: Rect,
     inputs: Vec<Pos2>,
@@ -155,9 +192,10 @@ impl Editor {
         let z = self.zoom;
         let n_in = kind.input_count();
         let top_left = self.to_screen(origin, pos);
-        let h = (HEADER_H + ROW_H * n_in.max(1) as f32 + 6.0) * z;
+        let top = body_top(kind);
+        let h = (top + ROW_H * n_in.max(1) as f32 + 6.0) * z;
         let rect = Rect::from_min_size(top_left, Vec2::new(NODE_W * z, h));
-        let inputs = (0..n_in).map(|i| Pos2::new(rect.left(), rect.top() + (HEADER_H + ROW_H * (i as f32 + 0.5)) * z)).collect();
+        let inputs = (0..n_in).map(|i| Pos2::new(rect.left(), rect.top() + (top + ROW_H * (i as f32 + 0.5)) * z)).collect();
         let output = has_output(kind).then(|| Pos2::new(rect.right(), rect.top() + HEADER_H * 0.5 * z));
         Layout { rect, inputs, output }
     }
@@ -188,7 +226,12 @@ impl Editor {
         }
         if let Some(p) = pointer.filter(|p| canvas.contains(*p)) {
             let scroll = ui.input(|i| i.smooth_scroll_delta.y);
-            if scroll != 0.0 && self.pin_menu.is_none() {
+            // Over a Math node's operator dropdown the wheel steps the operator instead, and while
+            // any dropdown list or menu is open it belongs to that.
+            let over_op = graph.nodes.values().any(|n| {
+                matches!(n.kind, NodeKind::Math { .. }) && op_field(self.layout(origin, &n.kind, n.pos).rect, self.zoom).contains(p)
+            });
+            if scroll != 0.0 && self.pin_menu.is_none() && !over_op && !egui::Popup::is_any_open(ui.ctx()) {
                 let before = self.to_graph(origin, p);
                 self.zoom = (self.zoom * (1.0 + scroll * 0.002)).clamp(0.3, 2.5);
                 let after = self.to_graph(origin, p);
@@ -223,10 +266,9 @@ impl Editor {
         let layouts: BTreeMap<NodeId, Layout> =
             graph.nodes.iter().map(|(&id, n)| (id, self.layout(origin, &n.kind, n.pos))).collect();
         // Wires under nodes.
-        let wire_stroke = Stroke::new(2.0 * self.zoom, Color32::from_gray(170));
         for e in &graph.edges {
             if let (Some(a), Some(b)) = (layouts[&e.from].output, layouts[&e.to].inputs.get(e.port)) {
-                painter.add(bezier(a, *b, wire_stroke));
+                painter.add(bezier(a, *b, Stroke::new(2.0 * self.zoom, type_color(graph.output_type(e.from)))));
             }
         }
 
@@ -239,6 +281,7 @@ impl Editor {
         let mut toggle_preview = None;
         let mut toggle_cache = None;
         let mut set_value = None;
+        let mut set_op = None;
         let roots: Vec<_> = graph.nodes.iter().filter(|(_, n)| !has_output(&n.kind)).map(|(&id, _)| id).chain(self.preview).collect();
         let covered = graph.cache_covered(tiling, &roots);
         for (&id, node) in &graph.nodes {
@@ -268,7 +311,7 @@ impl Editor {
             let header = Rect::from_min_size(l.rect.min, Vec2::new(l.rect.width(), HEADER_H * z));
             let header_color = if has_output(&node.kind) { Color32::from_rgb(55, 70, 95) } else { Color32::from_rgb(80, 60, 95) };
             painter.rect_filled(header, CornerRadius { nw: r.nw, ne: r.ne, sw: 0, se: 0 }, header_color);
-            let cacheable = matches!(node.kind, NodeKind::Noise(_) | NodeKind::Math { .. });
+            let cacheable = matches!(node.kind, NodeKind::Noise(_) | NodeKind::Math { .. } | NodeKind::Remap { .. } | NodeKind::Grid { .. });
             // Keep the title clear of the header buttons.
             let title_clip = header.with_max_x(header.right() - (if cacheable { 48.0 } else { 28.0 }) * z);
             painter.with_clip_rect(title_clip).text(header.left_center() + Vec2::new(8.0 * z, 0.0), egui::Align2::LEFT_CENTER, title(&node.kind), font.clone(), Color32::WHITE);
@@ -336,15 +379,46 @@ impl Editor {
                 }
             }
 
+            // The Math operator as a dropdown on the node, like Blender, so switching it doesn't
+            // mean selecting the node and going to the details panel.
+            if let NodeKind::Math { op, .. } = node.kind {
+                let field = op_field(l.rect, z);
+                let mut cui = ui.new_child(egui::UiBuilder::new().max_rect(field).id_salt(("op", id)));
+                cui.style_mut().override_font_id = Some(small.clone());
+                cui.spacing_mut().interact_size.y = field.height();
+                let mut chosen = op;
+                let combo = egui::ComboBox::from_id_salt(("op combo", id)).selected_text(op.label()).width(field.width()).show_ui(&mut cui, |ui| {
+                    for o in MathOp::ALL {
+                        ui.selectable_value(&mut chosen, o, o.label());
+                    }
+                });
+                combo.response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::ComboBox, true, "Math operator"));
+                // The wheel over the closed dropdown steps through the operators (up = previous).
+                if ui.rect_contains_pointer(field) && !egui::Popup::is_any_open(ui.ctx()) {
+                    let scroll = ui.input(|i| i.smooth_scroll_delta.y);
+                    if scroll != 0.0 && !self.op_scroll_stepped {
+                        let at = MathOp::ALL.iter().position(|o| *o == op).unwrap_or(0);
+                        let to = if scroll > 0.0 { at.saturating_sub(1) } else { (at + 1).min(MathOp::ALL.len() - 1) };
+                        chosen = MathOp::ALL[to];
+                        self.op_scroll_stepped = true;
+                    } else if scroll == 0.0 {
+                        self.op_scroll_stepped = false;
+                    }
+                }
+                if chosen != op {
+                    set_op = Some((id, chosen));
+                }
+            }
+
             // Ports.
             for (port, &p) in l.inputs.iter().enumerate() {
                 let connected = graph.input(id, port);
-                painter.circle(p, PORT_R * z, if connected.is_some() { Color32::from_gray(200) } else { Color32::from_gray(90) }, Stroke::new(1.0, Color32::from_gray(200)));
+                let color = type_color(graph.input_type(id, port));
+                painter.circle(p, PORT_R * z, if connected.is_some() { color } else { color.gamma_multiply(0.3) }, Stroke::new(1.0, color));
                 painter.text(p + Vec2::new(10.0 * z, 0.0), egui::Align2::LEFT_CENTER, input_label(&node.kind, port), small.clone(), Color32::from_gray(210));
-                // Math's fallback values sit on the node, greyed out while the pin is connected.
-                if let NodeKind::Math { a, b, .. } = node.kind {
-                    let mut v = if port == 0 { a } else { b };
-                    let field = Rect::from_min_max(Pos2::new(l.rect.left() + 30.0 * z, p.y - ROW_H * 0.4 * z), Pos2::new(l.rect.right() - 8.0 * z, p.y + ROW_H * 0.4 * z));
+                // Fallback values (Math, Remap) sit on the node, greyed out while the pin is connected.
+                if let Some(mut v) = node.kind.const_input(port) {
+                    let field = Rect::from_min_max(Pos2::new(l.rect.left() + 58.0 * z, p.y - ROW_H * 0.4 * z), Pos2::new(l.rect.right() - 8.0 * z, p.y + ROW_H * 0.4 * z));
                     let mut fui = ui.new_child(egui::UiBuilder::new().max_rect(field).id_salt(("math value", id, port)));
                     fui.style_mut().override_font_id = Some(small.clone());
                     let r = fui.add_enabled(connected.is_none(), |ui: &mut egui::Ui| ui.add_sized(field.size(), egui::DragValue::new(&mut v).speed(0.01)));
@@ -367,7 +441,7 @@ impl Editor {
                 }
             }
             if let Some(p) = l.output {
-                painter.circle(p, PORT_R * z, ACCENT, Stroke::new(1.0, Color32::from_gray(220)));
+                painter.circle(p, PORT_R * z, type_color(graph.output_type(id)), Stroke::new(1.0, Color32::from_gray(220)));
                 let pr = ui.interact(Rect::from_center_size(p, Vec2::splat(PORT_R * 3.0 * z)), ui.scope_id().with(("out", id)), Sense::drag());
                 if pr.drag_started() {
                     self.wire = Some(Wire::FromOutput(id));
@@ -380,9 +454,15 @@ impl Editor {
         if let Some(n) = toggle_cache.and_then(|id| graph.nodes.get_mut(&id)) {
             n.cache = if n.cache.is_some() { None } else { Some(0) };
         }
+        if let Some((id, op)) = set_op {
+            if let Some(NodeKind::Math { op: current, .. }) = graph.nodes.get_mut(&id).map(|n| &mut n.kind) {
+                *current = op;
+            }
+            graph.prune_edges(); // smooth min/max have a third input the others don't
+        }
         if let Some((id, port, v)) = set_value {
-            if let Some(NodeKind::Math { a, b, .. }) = graph.nodes.get_mut(&id).map(|n| &mut n.kind) {
-                *if port == 0 { a } else { b } = v;
+            if let Some(n) = graph.nodes.get_mut(&id) {
+                n.kind.set_const_input(port, v);
             }
         }
         if let Some((to, port)) = detach {
@@ -400,7 +480,13 @@ impl Editor {
         // Wire being dragged: connect on release over a matching port, or offer new nodes on empty space.
         let released = ui.input(|i| i.pointer.primary_released());
         if let (Some(wire), Some(p)) = (self.wire, ui.input(|i| i.pointer.interact_pos())) {
-            let drag_stroke = Stroke::new(2.0 * z, ACCENT);
+            let drag_stroke = Stroke::new(
+                2.0 * z,
+                type_color(match wire {
+                    Wire::FromOutput(from) => graph.output_type(from),
+                    Wire::FromInput(to, port) => graph.input_type(to, port),
+                }),
+            );
             match wire {
                 Wire::FromOutput(from) => {
                     if let Some(a) = layouts.get(&from).and_then(|l| l.output) {
@@ -503,7 +589,7 @@ impl Editor {
             let (g, wire) = (menu.graph, menu.wire);
             // Place the new node so its connecting port sits at the drop point.
             let pos = match wire {
-                Wire::FromOutput(_) => [g.x, g.y - HEADER_H - ROW_H * 0.5],
+                Wire::FromOutput(_) => [g.x, g.y - body_top(&kind) - ROW_H * 0.5],
                 Wire::FromInput(..) => [g.x - NODE_W, g.y - HEADER_H * 0.5],
             };
             let id = graph.add(kind, pos);
@@ -636,6 +722,84 @@ mod tests {
         let g = &h.state().1;
         assert_eq!(g.nodes.len(), 5, "Math node should be added");
         assert!(g.edges.iter().any(|e| e.from == 0 && matches!(g.nodes[&e.to].kind, NodeKind::Math { .. })));
+    }
+
+    /// The operator dropdown on a Math node switches the mode without the details panel, and a
+    /// link into the blend input is dropped when the new operator has no such input.
+    #[test]
+    fn math_dropdown_switches_operator_on_the_node() {
+        use egui_kittest::{Harness, kittest::Queryable};
+        let mut g = Graph::default();
+        let m = g.add(NodeKind::Math { op: MathOp::Add, a: 0.0, b: 0.0, c: 0.5 }, [20.0, 20.0]);
+        let f = g.add(NodeKind::Float(1.0), [20.0, 200.0]);
+        let mut h = Harness::builder().with_size(Vec2::new(800.0, 500.0)).build_ui_state(
+            |ui, (ed, g): &mut (Editor, Graph)| {
+                egui_extras::install_image_loaders(ui.ctx());
+                ed.show(ui, g, &BTreeMap::new())
+            },
+            (Editor::default(), g),
+        );
+        h.run();
+        assert_eq!(h.state().1.nodes[&m].kind.input_count(), 2);
+        h.get_by_label("Math operator").click();
+        h.run();
+        h.get_by_label("Smooth minimum").click();
+        h.run();
+        assert!(matches!(h.state().1.nodes[&m].kind, NodeKind::Math { op: MathOp::SmoothMin, .. }));
+        assert_eq!(h.state().1.nodes[&m].kind.input_count(), 3);
+        h.state_mut().1.connect(f, m, 2);
+        h.run();
+        h.get_by_label("Math operator").click();
+        h.run();
+        h.get_by_label("Add").click();
+        h.run();
+        let g = &h.state().1;
+        assert!(matches!(g.nodes[&m].kind, NodeKind::Math { op: MathOp::Add, .. }));
+        assert!(g.input(m, 2).is_none(), "the link into the blend input should be dropped");
+    }
+
+    /// The wheel over a Math node's dropdown steps the operator and leaves the graph's zoom alone;
+    /// over empty canvas it still zooms.
+    #[test]
+    fn wheel_over_the_operator_dropdown_steps_it_instead_of_zooming() {
+        use egui_kittest::{Harness, kittest::Queryable};
+        let mut g = Graph::default();
+        let m = g.add(NodeKind::Math { op: MathOp::Add, a: 0.0, b: 0.0, c: 0.5 }, [20.0, 20.0]);
+        let mut h = Harness::builder().with_size(Vec2::new(800.0, 500.0)).build_ui_state(
+            |ui, (ed, g): &mut (Editor, Graph)| {
+                egui_extras::install_image_loaders(ui.ctx());
+                ed.show(ui, g, &BTreeMap::new())
+            },
+            (Editor::default(), g),
+        );
+        h.run();
+        let wheel = |h: &mut Harness<(Editor, Graph)>, at: Pos2, lines: f32| {
+            h.hover_at(at);
+            h.run();
+            h.event(egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Line,
+                delta: Vec2::new(0.0, lines),
+                phase: egui::TouchPhase::Move,
+                source: egui::MouseWheelSource::Wheel,
+                modifiers: Default::default(),
+            });
+            h.run();
+        };
+        let on_dropdown = h.get_by_label("Math operator").rect().center();
+        let op = |h: &Harness<(Editor, Graph)>| match h.state().1.nodes[&m].kind {
+            NodeKind::Math { op, .. } => op,
+            _ => unreachable!(),
+        };
+        wheel(&mut h, on_dropdown, -1.0); // scroll down: next operator
+        assert_eq!(op(&h), MathOp::Subtract);
+        assert_eq!(h.state().0.zoom, 1.0, "the wheel over the dropdown must not zoom the graph");
+        wheel(&mut h, on_dropdown, 1.0); // scroll up: previous operator
+        assert_eq!(op(&h), MathOp::Add);
+        wheel(&mut h, on_dropdown, 1.0); // already first: stays
+        assert_eq!(op(&h), MathOp::Add);
+        wheel(&mut h, Pos2::new(600.0, 400.0), 1.0); // empty canvas
+        assert!(h.state().0.zoom > 1.0, "the wheel over the canvas still zooms");
+        assert_eq!(op(&h), MathOp::Add);
     }
 
     #[test]

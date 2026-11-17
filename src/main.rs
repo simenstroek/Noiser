@@ -515,12 +515,28 @@ fn node_props(ui: &mut egui::Ui, kind: &mut NodeKind) {
         }
         NodeKind::Math { op, .. } => {
             row(ui, op, MathOp::Add, |ui, op| {
-                egui::ComboBox::from_label("operation").selected_text(format!("{op:?}")).show_ui(ui, |ui| {
-                    for o in [MathOp::Add, MathOp::Subtract, MathOp::Multiply, MathOp::Divide, MathOp::Min, MathOp::Max] {
-                        ui.selectable_value(op, o, format!("{o:?}"));
+                egui::ComboBox::from_label("operation").selected_text(op.label()).show_ui(ui, |ui| {
+                    for o in MathOp::ALL {
+                        ui.selectable_value(op, o, o.label());
                     }
                 });
             });
+        }
+        NodeKind::Remap { clamp, .. } => {
+            row(ui, clamp, false, |ui, c| _ = ui.checkbox(c, "clamp to the output range"));
+            ui.weak("The input values sit on the node.");
+        }
+        NodeKind::Grid { counts, corners } => {
+            row(ui, counts, [8.0; 3], |ui, v| {
+                for (c, label) in v.iter_mut().zip(["X ", "Y ", "Z "]) {
+                    ui.add(egui::DragValue::new(c).range(1.0..=64.0).speed(0.1).prefix(label));
+                }
+            });
+            row(ui, corners, false, |ui, v| {
+                ui.selectable_value(v, false, "Cell centres");
+                ui.selectable_value(v, true, "Cell corners");
+            });
+            ui.weak("Cells per tile on each axis; whole numbers tile. Outputs the distance to the nearest cell centre (or corner): -1 there, +1 as far from it as the grid gets.");
         }
         NodeKind::Normal { flip } => row(ui, flip, false, |ui, f| _ = ui.checkbox(f, "flip")),
         NodeKind::Noise(n) => {
@@ -629,10 +645,12 @@ impl eframe::App for App {
                     [id] if self.graph.nodes.contains_key(id) => {
                         let node = self.graph.nodes.get_mut(id).unwrap();
                         ui.heading(editor::title(&node.kind));
+                        node_props(ui, &mut node.kind);
+                        // Below the controls: appearing above them mid-drag shifted the slider out from
+                        // under the cursor and ended the drag.
                         if let Some(Tiling::Broken(why)) = tiling.get(id) {
                             ui.colored_label(editor::ORANGE, format!("Does not tile: {why}"));
                         }
-                        node_props(ui, &mut node.kind);
                         cache_props(ui, &mut self.graph, *id, &tiling, self.caches.bytes());
                     }
                     [] => _ = ui.weak("Select a node to edit it."),
@@ -640,6 +658,7 @@ impl eframe::App for App {
                 }
             });
         });
+        self.graph.prune_edges(); // a Math node switched away from smooth min/max loses its third input
         egui::Panel::bottom("graph").resizable(true).default_size(330.0).show(ui, |ui| {
             self.editor.show(ui, &mut self.graph, &tiling);
         });

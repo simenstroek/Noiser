@@ -66,7 +66,7 @@ Node graph (centre) · 3D view (primitive picker, solid/cloud, displacement amou
 - **Simplex** uses psrdnoise's BCC lattice (`uvw = M·x`, kernel `max(0.5 − r², 0)⁴`, gain 90). Its features are slightly finer than Perlin's at the same scale.
 - **Worley** (one node; Voronoi and Voronoi Fractal were merged into it on 2026-11-17) searches 3×3×3 cells, fully jittered. Feature: F1 (default), F2, F2−F1, or Cell value (a flat random value per cell, the old Voronoi). The first three map to signed [-1, 1] using typical ranges (1, 1.4, 1). **Fractal** is a checkbox: off means one octave, on shows octaves, lacunarity and roughness. Old files migrate on load (`migrate_noise_kinds` in `graph.rs`): Voronoi becomes Cell value, Voronoi Fractal adds Fractal, and a Worley saved with octaves above 1 stays fractal.
 - **Blue noise** is a lookup into precomputed void-and-cluster tables (4³, 8³, 16³, 32³) in `assets/bluenoise.bin`. It tiles only when the scale is a multiple of 4. The seed shifts the lookup by whole cells.
-- **GPU tests** (`src/gpu_tests.rs`): seam check per axis, a 1e-4-step continuity check across the tile edge, and a signed-range check. `cargo test noise_contact_sheet -- --ignored` writes `target/noise_sheet.pgm` for a visual check.
+- **GPU tests** (`src/gpu_tests.rs`): seam check per axis, a 1e-4-step continuity check across the tile edge, and a signed-range check. `cargo test noise_contact_sheet -- --ignored` writes `target/noise_sheet.pgm` for a visual check. GPU tests take a shared lock in `gpu()` so they run one at a time: with about ten of them creating Vulkan devices in parallel, the suite intermittently hung (always inside GPU tests); serialized, 15 of 15 full runs finished.
 
 ### Performance notes (2026-11-17)
 - **Measure** with the in-app overlay (GPU timestamps for the 3D pass and slice pass, plus CPU time for the UI), or headless with `cargo test --release bench_preview -- --ignored --nocapture` (1000×1000, median of 30 frames).
@@ -101,6 +101,7 @@ Node graph (centre) · 3D view (primitive picker, solid/cloud, displacement amou
 ### UI conventions
 - **Every value input has a reset-to-default button** in front of it (the `row`/`reset` helpers in `main.rs`).
 - **Interface icons come from Material Symbols** via Iconify (https://icon-sets.iconify.design/material-symbols/). Save each icon as an SVG in `assets/icons/` with `currentColor` replaced by white so egui can tint it. License: `assets/icons/LICENSE.txt`.
+- **Warnings go below the controls** in the details panel ("Does not tile: …"). When one appeared above the sliders it shifted the slider out from under the cursor mid-drag and ended the drag.
 - **The node editor is custom** (`src/editor.rs`), not egui-snarl: no node-graph crate supports egui 0.37, and box select is needed for subgraphs (milestone 8).
 
 ### Design rules that keep milestone 7 cheap
@@ -111,11 +112,15 @@ Node graph (centre) · 3D view (primitive picker, solid/cloud, displacement amou
 
 ---
 
-### Planned nodes (requested 2026-11-17)
-- **Curve**: a response curve edited in the details panel. Points can be Bézier (with handles), linear or step. Evaluated per sample on the GPU, so it needs a lookup table in the parameter buffer (or a small baked 1D texture).
-- **Remap**: input min/max and output min/max, with an optional clamp.
-- **Brick**: a primitive node that outputs a rectangular grid, default 8×8×8. (Details to confirm: what it outputs per cell, e.g. a brick pattern with mortar or just cell coordinates.)
-- **More Math operators**: dot product, smooth minimum, smooth maximum, power. Dot product takes two vectors and outputs a float, so Math needs per-operator output types, not just the vector/float rule it has now. (The first line of this request was cut off after "Remap", so there may be more.)
+### Nodes added after the first milestones (2026-11-17)
+- **Remap** (done): input value and the four bounds are all inputs with on-node fallback fields, like Math's A and B. Optional clamp (in the details panel, evaluated on the GPU, so toggling it doesn't recompile). An empty input range gives the output minimum.
+- **Grid** (done; was called Brick for a few hours): a regular grid, default 8×8×8 cells per tile; outputs the distance to the nearest cell centre, or with the "Cell corners" option to the nearest cell corner, scaled to fill [-1, 1] (-1 at the reference point, +1 as far from it as the grid gets, exactly). Takes a position input. Tiles when every count is whole. Files saved as "Brick" load as Grid (serde alias). It is a plain grid: the staggered brick wall, with offset rows and mortar, is the **Bricks** node in `docs/pattern-nodes-plan.md`.
+- **More Math operators** (done): power (safe: never NaN, a negative base takes only whole exponents, 0^x = 0), smooth minimum and maximum (Blender's polynomial form, with a third "Blend" input that only these two have; switching the operator away prunes a link into it), and dot product (two vectors in, a float out).
+- **Math operator dropdown on the node**: the operator is chosen from a dropdown inside the node, like Blender, so it can be switched without opening the details panel (which still has it too). The node header just says Math. Switching to an operator with fewer inputs drops a link into the removed input. The mouse wheel over the closed dropdown steps through the operators (up = previous, one step per scroll gesture, no wrap) instead of zooming the graph; while any dropdown list or menu is open the wheel doesn't zoom the graph either.
+- **Math output type**: favors vectors. A float with a vector gives a vector (the float is repeated per component); it gives a float only when it has to (dot product). Remap and Grid always output floats.
+- **Pin and wire colors**: floats blue, vectors yellow. A wire takes the color of what it carries; an input pin shows what it expects (Math inputs follow what is connected). Links still convert implicitly, so the colors are information, not a restriction.
+- **Pattern nodes, Worley variants, Math Absolute/Ridge** (planned, not built): Bricks, Dimples (absorbs Brick), Honeycomb, Truchet, Stripes, Checker, Gyroid, Fractal; Worley jitter, distance metric and cell edges; unary Math ops. Full spec in `docs/pattern-nodes-plan.md`.
+- **Curve** (not built): a response curve edited in the details panel, with Bézier points (handles), linear and step points. Evaluated per sample on the GPU, so it needs a lookup table in the parameter buffer or a small baked 1D texture.
 
 ## 3a. Mesh pipeline sketch (milestone 7)
 1. **Import**: OBJ (`tobj`) and glTF (`gltf`). FBX is out of scope.

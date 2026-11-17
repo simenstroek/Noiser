@@ -175,3 +175,42 @@ fn blue(x: vec3f, period: i32, seed: u32) -> f32 {
 fn tetra(k: u32) -> vec3f {
     return vec3f(select(-1.0, 1.0, k == 0u || k == 3u), select(-1.0, 1.0, k >= 2u), select(-1.0, 1.0, (k & 1u) == 1u));
 }
+
+// ---- Math and remap helpers used by generated graph code ------------------------
+
+// Power that never produces NaN: a negative base only takes whole exponents, 0^x = 0 and x^0 = 1.
+fn pow_safe(a: f32, b: f32) -> f32 {
+    if (b == 0.0) { return 1.0; }
+    if (a > 0.0) { return pow(a, b); }
+    if (a == 0.0 || fract(b) != 0.0) { return 0.0; }
+    let m = pow(-a, b);
+    return select(m, -m, fract(b * 0.5) != 0.0); // odd exponent keeps the sign
+}
+fn pow_safe3(a: vec3f, b: vec3f) -> vec3f { return vec3f(pow_safe(a.x, b.x), pow_safe(a.y, b.y), pow_safe(a.z, b.z)); }
+
+// Blender's polynomial smooth minimum; k <= 0 is a plain min.
+fn smin(a: f32, b: f32, k: f32) -> f32 {
+    if (k <= 0.0) { return min(a, b); }
+    let h = max(k - abs(a - b), 0.0) / k;
+    return min(a, b) - h * h * h * k * (1.0 / 6.0);
+}
+fn smax(a: f32, b: f32, k: f32) -> f32 { return -smin(-a, -b, k); }
+fn smin3(a: vec3f, b: vec3f, k: f32) -> vec3f { return vec3f(smin(a.x, b.x, k), smin(a.y, b.y, k), smin(a.z, b.z, k)); }
+fn smax3(a: vec3f, b: vec3f, k: f32) -> vec3f { return -smin3(-a, -b, k); }
+
+// Linear map of x from [a, b] to [c, d]; an empty input range gives c.
+fn remap(x: f32, a: f32, b: f32, c: f32, d: f32, clamped: bool) -> f32 {
+    let t = select(0.0, (x - a) / (b - a), b != a);
+    let r = c + t * (d - c);
+    return select(r, clamp(r, min(c, d), max(c, d)), clamped);
+}
+
+// Distance to the centre of the grid cell containing q (or, with `corners`, to the nearest cell
+// corner), for n cells per tile on each axis, scaled to [-1, 1]: -1 at the reference point, +1 as far
+// from it as the grid gets. Tiles when every count is a whole number.
+fn grid_dist(q: vec3f, n_in: vec3f, corners: bool) -> f32 {
+    let n = max(n_in, vec3f(1e-3));
+    let f = fract(q * n);
+    let d = select(f - 0.5, min(f, 1.0 - f), corners) / n;
+    return length(d) / (0.5 * length(1.0 / n)) * 2.0 - 1.0;
+}
