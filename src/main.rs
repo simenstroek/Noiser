@@ -1,5 +1,6 @@
 mod backup;
 mod bluenoise;
+mod cache;
 mod codegen;
 mod editor;
 mod export;
@@ -78,6 +79,7 @@ struct App {
     export_open: bool,
     export: export::Settings,
     export_job: Option<ExportJob>,
+    caches: cache::Caches,
 }
 
 /// An export running on a worker thread.
@@ -133,6 +135,7 @@ impl App {
             export_open: false,
             export: export::Settings::default(),
             export_job: None,
+            caches: cache::Caches::default(),
         }
     }
 
@@ -419,6 +422,54 @@ fn preview_props(ui: &mut egui::Ui, pv: &mut Preview) {
     row(ui, &mut pv.tiles_2x2, d.tiles_2x2, |ui, v| _ = ui.checkbox(v, "show 2×2 tiles"));
 }
 
+/// The per-node cache controls: preview-only, so they sit apart from the node's own parameters.
+fn cache_props(ui: &mut egui::Ui, graph: &mut Graph, id: graph::NodeId, tiling: &std::collections::BTreeMap<graph::NodeId, Tiling>, total_bytes: u64) {
+    ui.separator();
+    let eligible = graph.cache_eligibility(id, tiling);
+    let auto = {
+        // Resolution "Auto" would pick, whatever is stored now.
+        let mut probe = graph.clone();
+        probe.nodes.get_mut(&id).unwrap().cache = Some(0);
+        probe.cache_resolution(id)
+    };
+    let res = graph.cache_resolution(id);
+    let node = graph.nodes.get_mut(&id).unwrap();
+    let mut on = node.cache.is_some();
+    ui.horizontal(|ui| {
+        reset(ui, &mut node.cache, None);
+        let r = ui.add_enabled(eligible.is_ok(), egui::Checkbox::new(&mut on, "Cache in preview"));
+        let tip = match &eligible {
+            Ok(()) => "Bakes everything upstream of this node into a 3D texture so the preview stays fast.\nExport always uses the full graph.".to_string(),
+            Err(why) => format!("Can't cache: {why}"),
+        };
+        r.on_hover_text(tip);
+    });
+    if on != node.cache.is_some() {
+        node.cache = on.then_some(0);
+    }
+    if let (Some(cur), Ok(())) = (node.cache, &eligible) {
+        let label = |r: u32| if r == 0 { format!("Auto ({auto}³)") } else { format!("{r}³") };
+        let mut sel = cur;
+        ui.horizontal(|ui| {
+            reset(ui, &mut sel, 0);
+            egui::ComboBox::from_label("resolution").selected_text(label(sel)).show_ui(ui, |ui| {
+                for r in [0, 32, 64, 128, 256, 512, 1024] {
+                    ui.selectable_value(&mut sel, r, label(r));
+                }
+            });
+        });
+        node.cache = Some(sel);
+        let mb = |b: u64| b as f64 / (1 << 20) as f64;
+        ui.weak(format!("{:.0} MB for this cache · {:.0} MB for all", mb((res as u64).pow(3) * 4), mb(total_bytes)));
+        if res >= 1024 {
+            ui.colored_label(editor::ORANGE, "⚠ 1024³ needs 4 GB of GPU memory");
+        }
+    }
+    if let Err(why) = &eligible {
+        ui.weak(format!("Not cacheable: {why}"));
+    }
+}
+
 /// Properties of one node.
 fn node_props(ui: &mut egui::Ui, kind: &mut NodeKind) {
     match kind {
@@ -443,7 +494,7 @@ fn node_props(ui: &mut egui::Ui, kind: &mut NodeKind) {
                 _ => {}
             }
         }
-        NodeKind::Math { op, a, b } => {
+        NodeKind::Math { op, .. } => {
             row(ui, op, MathOp::Add, |ui, op| {
                 egui::ComboBox::from_label("operation").selected_text(format!("{op:?}")).show_ui(ui, |ui| {
                     for o in [MathOp::Add, MathOp::Subtract, MathOp::Multiply, MathOp::Divide, MathOp::Min, MathOp::Max] {
@@ -451,9 +502,6 @@ fn node_props(ui: &mut egui::Ui, kind: &mut NodeKind) {
                     }
                 });
             });
-            ui.label("Used when the input is not connected:");
-            row(ui, a, 0.0, |ui, a| _ = ui.add(egui::DragValue::new(a).speed(0.01).prefix("A ")));
-            row(ui, b, 0.0, |ui, b| _ = ui.add(egui::DragValue::new(b).speed(0.01).prefix("B ")));
         }
         NodeKind::Normal { flip } => row(ui, flip, false, |ui, f| _ = ui.checkbox(f, "flip")),
         NodeKind::Noise(n) => {
@@ -562,6 +610,7 @@ impl eframe::App for App {
                             ui.colored_label(editor::ORANGE, format!("Does not tile: {why}"));
                         }
                         node_props(ui, &mut node.kind);
+                        cache_props(ui, &mut self.graph, *id, &tiling, self.caches.bytes());
                     }
                     [] => _ = ui.weak("Select a node to edit it."),
                     _ => _ = ui.weak(format!("{} nodes selected", sel.len())),
@@ -577,7 +626,13 @@ impl eframe::App for App {
             None => std::borrow::Cow::Borrowed(&self.graph),
         };
         let range = shown.density_range();
-        let compiled = match codegen::compile(&shown) {
+        // Node caches: bake what changed (after this frame's edits), then compile against them.
+        let tiling_now = self.graph.tiling();
+        self.caches.update(&self.rs.device, &self.rs.queue, &self.graph, &tiling_now, self.pv.seed);
+        if self.caches.pending {
+            ui.ctx().request_repaint_after(std::time::Duration::from_millis(50));
+        }
+        let compiled = match codegen::compile_with(&shown, &self.caches.slots) {
             Ok(c) if c.params.len() > MAX_PARAMS => Err(format!("graph uses {} parameters (max {MAX_PARAMS})", c.params.len())),
             r => r,
         };
@@ -608,6 +663,12 @@ impl eframe::App for App {
                 b.1 = c.params.clone();
             }
         }
+        // (Re)bind cache textures when they changed or a freshly built pipeline doesn't have them yet.
+        if let Some(gpu) = self.rs.renderer.write().callback_resources.get_mut::<view::Gpu>() {
+            if gpu.cache_gen != self.caches.generation {
+                gpu.set_caches(&self.caches.views(), self.caches.generation);
+            }
+        }
         egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| {
             let full = ui.available_rect_before_wrap();
             let (r3d, rslice) = full.split_left_right_at_fraction(0.5);
@@ -636,9 +697,14 @@ impl eframe::App for App {
                         let cbs = view::SliceView { uniforms, params: params.clone() };
                         painter.add(egui_wgpu::Callback::new_paint_callback(rslice, cbs));
                     }
-                    if self.compiling.is_some() {
+                    let busy = match (self.compiling.is_some(), self.caches.pending) {
+                        (true, _) => Some("Compiling shader…"),
+                        (false, true) => Some("Baking cache…"),
+                        _ => None,
+                    };
+                    if let Some(msg) = busy {
                         let at = r3d.center_bottom() - egui::vec2(0.0, 14.0);
-                        painter.text(at, egui::Align2::CENTER_BOTTOM, "Compiling shader…", egui::FontId::proportional(14.0), egui::Color32::from_rgb(255, 210, 120));
+                        painter.text(at, egui::Align2::CENTER_BOTTOM, msg, egui::FontId::proportional(14.0), egui::Color32::from_rgb(255, 210, 120));
                     }
                     let axis = ["X", "Y", "Z"][self.pv.slice_axis as usize];
                     let mut label = format!("{axis} = {:.3}", self.pv.slice_pos);

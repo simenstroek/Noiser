@@ -1,7 +1,7 @@
 //! Node graph model, save/load, and tiling analysis.
 
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 pub type NodeId = u32;
 
@@ -136,6 +136,10 @@ pub struct Node {
     pub kind: NodeKind,
     /// Position in the graph editor.
     pub pos: [f32; 2],
+    /// Preview-only cache of this node's value: None = off, Some(0) = automatic resolution,
+    /// Some(n) = n³ texels per tile. Export always ignores it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache: Option<u32>,
 }
 
 /// Every node has a single output, so an edge is "output of `from` → input `port` of `to`".
@@ -155,7 +159,7 @@ pub struct Graph {
 impl Graph {
     pub fn add(&mut self, kind: NodeKind, pos: [f32; 2]) -> NodeId {
         let id = self.nodes.keys().next_back().map_or(0, |k| k + 1);
-        self.nodes.insert(id, Node { kind, pos });
+        self.nodes.insert(id, Node { kind, pos, cache: None });
         id
     }
 
@@ -226,6 +230,77 @@ impl Graph {
             g.connect(node, out, 0);
         }
         g
+    }
+
+    /// Whether `id` can be cached, or why not. A cache bakes one tile of a float field, so the
+    /// node's output must be a float that repeats every tile.
+    pub fn cache_eligibility(&self, id: NodeId, tiling: &BTreeMap<NodeId, Tiling>) -> Result<(), String> {
+        match &self.nodes.get(&id).ok_or("no such node")?.kind {
+            NodeKind::Noise(_) | NodeKind::Math { .. } => {}
+            _ => return Err("only Noise and Math nodes can be cached".into()),
+        }
+        if let NodeKind::Math { .. } = self.nodes[&id].kind {
+            // Math on a vector input yields a vector; caches hold floats.
+            let vec_in = (0..2).any(|p| self.input(id, p).is_some_and(|s| self.yields_vector(s)));
+            if vec_in {
+                return Err("this Math node outputs a vector; caches hold floats".into());
+            }
+        }
+        match tiling.get(&id) {
+            Some(Tiling::Periodic) | Some(Tiling::Const) => Ok(()),
+            Some(Tiling::Broken(why)) => Err(format!("it doesn't tile ({why})")),
+            _ => Err("its value depends directly on position".into()),
+        }
+    }
+
+    /// Nodes the preview no longer evaluates because every path from them to `roots` passes
+    /// through an active cache (the caches themselves excluded).
+    pub fn cache_covered(&self, tiling: &BTreeMap<NodeId, Tiling>, roots: &[NodeId]) -> BTreeSet<NodeId> {
+        let cached = |id: NodeId| self.nodes[&id].cache.is_some() && self.cache_eligibility(id, tiling).is_ok();
+        let upstream = |starts: Vec<NodeId>, stop_at_cache: bool| {
+            let (mut stack, mut seen) = (starts, BTreeSet::new());
+            while let Some(n) = stack.pop() {
+                if self.nodes.contains_key(&n) && seen.insert(n) && !(stop_at_cache && cached(n)) {
+                    stack.extend(self.edges.iter().filter(|e| e.to == n).map(|e| e.from));
+                }
+            }
+            seen
+        };
+        let evaluated = upstream(roots.to_vec(), true);
+        let behind: Vec<_> = self.edges.iter().filter(|e| cached(e.to)).map(|e| e.from).collect();
+        upstream(behind, false).difference(&evaluated).copied().collect()
+    }
+
+    fn yields_vector(&self, id: NodeId) -> bool {
+        match &self.nodes[&id].kind {
+            NodeKind::Vec3(_) | NodeKind::Position | NodeKind::Normal { .. } => true,
+            NodeKind::Math { .. } => (0..2).any(|p| self.input(id, p).is_some_and(|s| self.yields_vector(s))),
+            _ => false,
+        }
+    }
+
+    /// Cache resolution: the stored one, or for automatic about 4 texels per finest noise cell
+    /// upstream (a power of two, 16–512).
+    pub fn cache_resolution(&self, id: NodeId) -> u32 {
+        match self.nodes.get(&id).and_then(|n| n.cache) {
+            Some(r) if r > 0 => r,
+            _ => {
+                let mut finest = 0.0f32;
+                let mut stack = vec![id];
+                let mut seen = std::collections::BTreeSet::new();
+                while let Some(n) = stack.pop() {
+                    if !seen.insert(n) {
+                        continue;
+                    }
+                    if let NodeKind::Noise(p) = &self.nodes[&n].kind {
+                        let oct = if p.kind.has_octaves() { p.octaves.max(1) } else { 1 };
+                        finest = finest.max(p.scale * p.lacunarity.max(1.0).powi(oct as i32 - 1));
+                    }
+                    stack.extend(self.edges.iter().filter(|e| e.to == n).map(|e| e.from));
+                }
+                ((finest * 4.0).ceil().max(16.0) as u32).next_power_of_two().min(512)
+            }
+        }
     }
 
     /// Position → Perlin → Density, plus an unconnected Normal output.
@@ -503,6 +578,44 @@ mod tests {
         g.connect(a, b, 0);
         g.connect(b, a, 0);
         assert!(matches!(tiling_at(&g, a), Tiling::Broken(_)));
+    }
+
+    #[test]
+    fn cache_rules() {
+        let mut g = Graph::default_graph(); // 0 Position → 1 Perlin(scale 4, 4 octaves, lac 2) → 2 OutDensity
+        let t = g.tiling();
+        assert!(g.cache_eligibility(1, &t).is_ok());
+        assert!(g.cache_eligibility(0, &t).is_err()); // Position
+        assert!(g.cache_eligibility(2, &t).is_err()); // output
+        // Finest cells 4 × 2³ = 32 → 4 texels each → 128³.
+        g.nodes.get_mut(&1).unwrap().cache = Some(0);
+        assert_eq!(g.cache_resolution(1), 128);
+        g.nodes.get_mut(&1).unwrap().cache = Some(64);
+        assert_eq!(g.cache_resolution(1), 64);
+        // A non-tiling noise can't be cached.
+        if let NodeKind::Noise(n) = &mut g.nodes.get_mut(&1).unwrap().kind {
+            n.scale = 2.5;
+        }
+        assert!(g.cache_eligibility(1, &g.tiling()).is_err());
+        // Math on a vector yields a vector.
+        let m = g.add(NodeKind::Math { op: MathOp::Add, a: 0.0, b: 0.0 }, [0.0; 2]);
+        g.connect(0, m, 0);
+        assert!(g.cache_eligibility(m, &g.tiling()).is_err());
+    }
+
+    #[test]
+    fn cache_covers_only_nodes_no_uncached_path_needs() {
+        let mut g = Graph::default_graph(); // 0 Position → 1 Noise → 2 OutDensity
+        let roots = [2, 3];
+        assert!(g.cache_covered(&g.tiling(), &roots).is_empty());
+        g.nodes.get_mut(&1).unwrap().cache = Some(0);
+        assert_eq!(g.cache_covered(&g.tiling(), &roots), BTreeSet::from([0]));
+        // Position also feeds an uncached branch to the output, so it's still evaluated.
+        let m = g.add(NodeKind::Math { op: MathOp::Add, a: 0.0, b: 0.0 }, [0.0; 2]);
+        g.connect(1, m, 0);
+        g.connect(0, m, 1);
+        g.connect(m, 2, 0);
+        assert!(g.cache_covered(&g.tiling(), &roots).is_empty());
     }
 
     #[test]

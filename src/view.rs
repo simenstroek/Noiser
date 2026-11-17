@@ -149,6 +149,12 @@ pub struct Gpu {
     params: wgpu::Buffer,
     slice: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
+    cache_layout: wgpu::BindGroupLayout,
+    cache_sampler: wgpu::Sampler,
+    cache_dummy: wgpu::TextureView,
+    cache_bind: wgpu::BindGroup,
+    /// Which set of cache textures cache_bind holds (see set_caches).
+    pub cache_gen: u64,
     target: Option<Target>,
     pub timer: Option<Timer>,
 }
@@ -203,6 +209,7 @@ impl Gpu {
         });
         pass.set_pipeline(&self.raymarch);
         pass.set_bind_group(0, &self.bind_group, &[]);
+        pass.set_bind_group(1, &self.cache_bind, &[]);
         pass.draw(0..3, 0..1);
     }
 
@@ -216,6 +223,7 @@ impl Gpu {
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("slice"), timestamp_writes: timestamps });
         pass.set_pipeline(&self.slice_cs);
         pass.set_bind_group(0, &self.bind_group, &[]);
+        pass.set_bind_group(1, &self.cache_bind, &[]);
         let groups = SLICE_RES.div_ceil(8);
         pass.dispatch_workgroups(groups, groups, 1);
         drop(pass);
@@ -286,11 +294,33 @@ impl egui_wgpu::CallbackTrait for SliceView {
         let gpu: &Gpu = res.get().unwrap();
         pass.set_pipeline(&gpu.slice_fs);
         pass.set_bind_group(0, &gpu.bind_group, &[]);
+        pass.set_bind_group(1, &gpu.cache_bind, &[]);
         pass.draw(0..3, 0..1);
     }
 }
 
 // ---- construction --------------------------------------------------------------
+
+/// Node caches the preview shader can sample (bindings in common.wgsl).
+pub const CACHE_SLOTS: usize = 8;
+
+fn cache_bind_group(device: &wgpu::Device, layout: &wgpu::BindGroupLayout, sampler: &wgpu::Sampler, views: &[Option<&wgpu::TextureView>], dummy: &wgpu::TextureView) -> wgpu::BindGroup {
+    let mut entries = vec![wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::Sampler(sampler) }];
+    for slot in 0..CACHE_SLOTS {
+        let view = views.get(slot).copied().flatten().unwrap_or(dummy);
+        entries.push(wgpu::BindGroupEntry { binding: slot as u32 + 1, resource: wgpu::BindingResource::TextureView(view) });
+    }
+    device.create_bind_group(&wgpu::BindGroupDescriptor { label: Some("caches"), layout, entries: &entries })
+}
+
+impl Gpu {
+    /// Binds the cache textures, in slot order. `generation` identifies this set so the app can
+    /// tell when a freshly built pipeline still needs them.
+    pub fn set_caches(&mut self, views: &[Option<&wgpu::TextureView>], generation: u64) {
+        self.cache_bind = cache_bind_group(&self.device, &self.cache_layout, &self.cache_sampler, views, &self.cache_dummy);
+        self.cache_gen = generation;
+    }
+}
 
 /// Full shader source for a compiled graph.
 pub fn shader_source(graph_wgsl: &str) -> String {
@@ -314,13 +344,13 @@ struct VsOut { @builtin(position) pos: vec4f, @location(0) uv: vec2f };
 @fragment fn fs(in: VsOut) -> @location(0) vec4f { return textureSample(img, smp, in.uv); }
 ";
 
-/// Adds TIMESTAMP_QUERY to eframe's device request when the adapter supports it.
+/// Adds TIMESTAMP_QUERY (GPU timing) and FLOAT32_FILTERABLE (smooth caches) to eframe's device request when supported.
 pub fn request_timestamps(mut cfg: egui_wgpu::WgpuConfiguration) -> egui_wgpu::WgpuConfiguration {
     if let egui_wgpu::WgpuSetup::CreateNew(new) = &mut cfg.wgpu_setup {
         let base = new.device_descriptor.clone();
         new.device_descriptor = Arc::new(move |adapter| {
             let mut d = base(adapter);
-            d.required_features |= adapter.features() & wgpu::Features::TIMESTAMP_QUERY;
+            d.required_features |= adapter.features() & (wgpu::Features::TIMESTAMP_QUERY | crate::cache::FEATURE);
             d
         });
     }
@@ -349,9 +379,41 @@ pub fn build(device: &wgpu::Device, queue: &wgpu::Queue, format: wgpu::TextureFo
             entry(3, wgpu::BufferBindingType::Storage { read_only: true }),
         ],
     });
+    // Group 1: node caches (sampler + 8 float 3D textures). Without float32 filtering the
+    // caches are sampled unfiltered (blocky), but everything still binds.
+    let filterable = device.features().contains(crate::cache::FEATURE);
+    let tex = |binding| wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: stages,
+        ty: wgpu::BindingType::Texture {
+            sample_type: wgpu::TextureSampleType::Float { filterable },
+            view_dimension: wgpu::TextureViewDimension::D3,
+            multisampled: false,
+        },
+        count: None,
+    };
+    let mut cache_entries = vec![wgpu::BindGroupLayoutEntry {
+        binding: 0,
+        visibility: stages,
+        ty: wgpu::BindingType::Sampler(if filterable { wgpu::SamplerBindingType::Filtering } else { wgpu::SamplerBindingType::NonFiltering }),
+        count: None,
+    }];
+    cache_entries.extend((1..=CACHE_SLOTS as u32).map(tex));
+    let cache_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some("caches"), entries: &cache_entries });
+    let cache_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+        label: Some("caches"),
+        address_mode_u: wgpu::AddressMode::Repeat,
+        address_mode_v: wgpu::AddressMode::Repeat,
+        address_mode_w: wgpu::AddressMode::Repeat,
+        mag_filter: if filterable { wgpu::FilterMode::Linear } else { wgpu::FilterMode::Nearest },
+        min_filter: if filterable { wgpu::FilterMode::Linear } else { wgpu::FilterMode::Nearest },
+        ..Default::default()
+    });
+    let cache_dummy = crate::cache::texture(device, 1).create_view(&Default::default());
+    let cache_bind = cache_bind_group(device, &cache_layout, &cache_sampler, &[], &cache_dummy);
     let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: None,
-        bind_group_layouts: &[Some(&bgl)],
+        bind_group_layouts: &[Some(&bgl), Some(&cache_layout)],
         immediate_size: 0,
     });
     let render = |module: &wgpu::ShaderModule, layout: Option<&wgpu::PipelineLayout>, fs: &str| {
@@ -419,6 +481,11 @@ pub fn build(device: &wgpu::Device, queue: &wgpu::Queue, format: wgpu::TextureFo
         params,
         slice,
         bind_group,
+        cache_bind,
+        cache_layout,
+        cache_sampler,
+        cache_dummy,
+        cache_gen: 0,
         target: None,
         timer: Timer::new(device, queue),
     }

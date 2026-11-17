@@ -19,5 +19,6 @@ serde_json = "1.0.154"
 opt-level = 3
 
 [dev-dependencies]
+egui_kittest = "0.37"
 naga = { version = "30.0.2", features = ["wgsl-in"] }
 pollster = "1.0.2"

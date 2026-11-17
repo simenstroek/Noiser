@@ -5,12 +5,12 @@ use crate::codegen::{self, EVAL_BINDINGS, NOISE_LIB};
 use crate::graph::{Graph, NodeKind, NoiseKind, NoiseParams, WorleyFeature};
 use eframe::wgpu;
 
-struct Gpu {
+pub(crate) struct Gpu {
     device: wgpu::Device,
     queue: wgpu::Queue,
 }
 
-fn gpu() -> Option<Gpu> {
+pub(crate) fn gpu() -> Option<Gpu> {
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
     let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default())).ok()?;
     let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).ok()?;
@@ -312,6 +312,33 @@ fn slice_grid_png_places_slices_and_levels() {
     let flat = Settings { kind: Kind::Image2d, res: 32, format: Format::Png8, ..s };
     export::run(&ev, &flat, g.density_range(), &dir.join("flat.png"), &Default::default()).unwrap();
     assert_eq!(image::open(dir.join("flat.png")).unwrap().into_luma8().dimensions(), (32, 32));
+}
+
+#[test]
+fn cache_bake_matches_full_evaluation() {
+    let Some(gpu) = gpu() else { return eprintln!("no GPU adapter; skipping") };
+    let g = noise_graph(NoiseParams { kind: NoiseKind::Worley, octaves: 2, ..Default::default() });
+    let c = codegen::compile(&g).unwrap();
+    let res = 64u32; // 64 × 4 bytes = one 256-byte row, so the readback needs no padding
+    let tex = crate::cache::texture(&gpu.device, res);
+    crate::cache::Baker::new(&gpu.device, &gpu.queue, &c.wgsl).bake(&tex, res, &c.params, 0);
+    let bytes = (res * res * res * 4) as u64;
+    let read = gpu.device.create_buffer(&wgpu::BufferDescriptor { label: None, size: bytes, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+    let mut enc = gpu.device.create_command_encoder(&Default::default());
+    enc.copy_texture_to_buffer(
+        tex.as_image_copy(),
+        wgpu::TexelCopyBufferInfo { buffer: &read, layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(res * 4), rows_per_image: Some(res) } },
+        wgpu::Extent3d { width: res, height: res, depth_or_array_layers: res },
+    );
+    gpu.queue.submit([enc.finish()]);
+    read.map_async(wgpu::MapMode::Read, .., |r| r.unwrap());
+    gpu.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+    let baked: Vec<f32> = bytemuck::cast_slice(&read.get_mapped_range(..).unwrap()).to_vec();
+    // The export evaluator samples the same texel centres, x fastest, like the texture rows.
+    let ev = crate::export::Evaluator::new(&gpu.device, &gpu.queue, &g, 0).unwrap();
+    let want = ev.eval(res, [0; 3], [res; 3], false, None);
+    let worst = baked.iter().zip(&want).map(|(a, b)| (a - b).abs()).fold(0.0, f32::max);
+    assert!(worst < 1e-5, "bake differs from full evaluation by {worst}");
 }
 
 /// Writes target/check.vdb (20³, density = mean of the texel centre) for checking in OpenVDB.

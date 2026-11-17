@@ -12,6 +12,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 pub const ORANGE: Color32 = Color32::from_rgb(255, 150, 40);
 const ACCENT: Color32 = Color32::from_rgb(140, 190, 255);
+/// Cache on, and nodes a cache spares the preview from evaluating.
+const CACHED: Color32 = Color32::from_rgb(120, 220, 160);
 
 const NODE_W: f32 = 140.0;
 const HEADER_H: f32 = 22.0;
@@ -45,6 +47,8 @@ pub struct Editor {
     box_start: Option<Pos2>,
     /// Graph-space point where the add menu was opened.
     menu_at: Pos2,
+    #[cfg(test)]
+    debug_origin: Pos2,
 }
 
 impl Default for Editor {
@@ -59,6 +63,8 @@ impl Default for Editor {
             pin_menu: None,
             box_start: None,
             menu_at: Pos2::ZERO,
+            #[cfg(test)]
+            debug_origin: Pos2::ZERO,
         }
     }
 }
@@ -231,6 +237,10 @@ impl Editor {
         let mut moved = Vec2::ZERO;
         let mut detach = None;
         let mut toggle_preview = None;
+        let mut toggle_cache = None;
+        let mut set_value = None;
+        let roots: Vec<_> = graph.nodes.iter().filter(|(_, n)| !has_output(&n.kind)).map(|(&id, _)| id).chain(self.preview).collect();
+        let covered = graph.cache_covered(tiling, &roots);
         for (&id, node) in &graph.nodes {
             let l = &layouts[&id];
             let resp = ui.interact(l.rect, ui.scope_id().with(("node", id)), Sense::click_and_drag());
@@ -258,17 +268,24 @@ impl Editor {
             let header = Rect::from_min_size(l.rect.min, Vec2::new(l.rect.width(), HEADER_H * z));
             let header_color = if has_output(&node.kind) { Color32::from_rgb(55, 70, 95) } else { Color32::from_rgb(80, 60, 95) };
             painter.rect_filled(header, CornerRadius { nw: r.nw, ne: r.ne, sw: 0, se: 0 }, header_color);
-            painter.text(header.left_center() + Vec2::new(8.0 * z, 0.0), egui::Align2::LEFT_CENTER, title(&node.kind), font.clone(), Color32::WHITE);
+            let cacheable = matches!(node.kind, NodeKind::Noise(_) | NodeKind::Math { .. });
+            // Keep the title clear of the header buttons.
+            let title_clip = header.with_max_x(header.right() - (if cacheable { 48.0 } else { 28.0 }) * z);
+            painter.with_clip_rect(title_clip).text(header.left_center() + Vec2::new(8.0 * z, 0.0), egui::Align2::LEFT_CENTER, title(&node.kind), font.clone(), Color32::WHITE);
+            let is_covered = covered.contains(&id);
             let outline = if let Some(why) = &broken {
                 resp.on_hover_text(format!("Does not tile: {why}"));
                 Stroke::new(2.0 * z, ORANGE)
+            } else if is_covered {
+                resp.on_hover_text("Baked into a downstream cache: the preview doesn't evaluate this node");
+                Stroke::new(2.0 * z, CACHED)
             } else if self.selected.contains(&id) {
                 Stroke::new(1.5 * z, Color32::WHITE)
             } else {
                 Stroke::new(1.0, Color32::from_gray(70))
             };
             painter.rect_stroke(l.rect, r, outline, StrokeKind::Outside);
-            if broken.is_some() && self.selected.contains(&id) {
+            if (broken.is_some() || is_covered) && self.selected.contains(&id) {
                 painter.rect_stroke(l.rect.expand(3.0 * z), r, Stroke::new(1.0, Color32::WHITE), StrokeKind::Outside);
             }
             if previewing {
@@ -279,6 +296,31 @@ impl Editor {
             if !s.is_empty() {
                 let at = Pos2::new(l.rect.left() + 8.0 * z, l.rect.top() + (HEADER_H + ROW_H * 0.5) * z);
                 painter.text(at, egui::Align2::LEFT_CENTER, s, small.clone(), Color32::from_gray(190));
+            }
+
+            // Cache toggle, beside the eye.
+            if cacheable {
+                let at = Rect::from_center_size(Pos2::new(header.right() - 38.0 * z, header.center().y), Vec2::splat(14.0 * z));
+                let cr = ui.interact(at.expand(2.0 * z), ui.scope_id().with(("cache", id)), Sense::click_and_drag());
+                let eligible = graph.cache_eligibility(id, tiling);
+                let on = node.cache.is_some();
+                let tint = match (&eligible, on) {
+                    (Err(_), _) => Color32::from_gray(80),
+                    (Ok(()), true) => CACHED,
+                    (Ok(()), false) if cr.hovered() => Color32::WHITE,
+                    (Ok(()), false) => Color32::from_gray(140),
+                };
+                let icon = if on { egui::include_image!("../assets/icons/sync-saved-locally.svg") } else { egui::include_image!("../assets/icons/sync-saved-locally-outline.svg") };
+                egui::Image::new(icon).tint(tint).paint_at(ui, at);
+                let tip = match (&eligible, on) {
+                    (Err(why), _) => format!("Can't cache: {why}"),
+                    (Ok(()), true) => "Cached: the preview reads a baked 3D texture. Click to evaluate live again.".into(),
+                    (Ok(()), false) => "Cache in preview: bake everything upstream into a 3D texture.\nExport always uses the full graph.".into(),
+                };
+                // A stale cache on a node that became ineligible can still be switched off.
+                if cr.on_hover_text(tip).clicked() && (eligible.is_ok() || on) {
+                    toggle_cache = Some(id);
+                }
             }
 
             // Preview eye (registered after the body so it wins the hit test). Outputs are the normal view.
@@ -299,7 +341,20 @@ impl Editor {
                 let connected = graph.input(id, port);
                 painter.circle(p, PORT_R * z, if connected.is_some() { Color32::from_gray(200) } else { Color32::from_gray(90) }, Stroke::new(1.0, Color32::from_gray(200)));
                 painter.text(p + Vec2::new(10.0 * z, 0.0), egui::Align2::LEFT_CENTER, input_label(&node.kind, port), small.clone(), Color32::from_gray(210));
-                let pr = ui.interact(Rect::from_center_size(p, Vec2::splat(PORT_R * 3.0 * z)), ui.scope_id().with(("in", id, port)), Sense::drag());
+                // Math's fallback values sit on the node, greyed out while the pin is connected.
+                if let NodeKind::Math { a, b, .. } = node.kind {
+                    let mut v = if port == 0 { a } else { b };
+                    let field = Rect::from_min_max(Pos2::new(l.rect.left() + 30.0 * z, p.y - ROW_H * 0.4 * z), Pos2::new(l.rect.right() - 8.0 * z, p.y + ROW_H * 0.4 * z));
+                    let mut fui = ui.new_child(egui::UiBuilder::new().max_rect(field).id_salt(("math value", id, port)));
+                    fui.style_mut().override_font_id = Some(small.clone());
+                    let r = fui.add_enabled(connected.is_none(), |ui: &mut egui::Ui| ui.add_sized(field.size(), egui::DragValue::new(&mut v).speed(0.01)));
+                    let label = input_label(&node.kind, port);
+                    r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::SpinButton, connected.is_none(), label));
+                    if r.changed() {
+                        set_value = Some((id, port, v));
+                    }
+                }
+                let pr =ui.interact(Rect::from_center_size(p, Vec2::splat(PORT_R * 3.0 * z)), ui.scope_id().with(("in", id, port)), Sense::drag());
                 if pr.drag_started() {
                     self.wire = Some(match connected {
                         // Pull the existing link off its input.
@@ -321,6 +376,14 @@ impl Editor {
         }
         if let Some(id) = toggle_preview {
             self.preview = if self.preview == Some(id) { None } else { Some(id) };
+        }
+        if let Some(n) = toggle_cache.and_then(|id| graph.nodes.get_mut(&id)) {
+            n.cache = if n.cache.is_some() { None } else { Some(0) };
+        }
+        if let Some((id, port, v)) = set_value {
+            if let Some(NodeKind::Math { a, b, .. }) = graph.nodes.get_mut(&id).map(|n| &mut n.kind) {
+                *if port == 0 { a } else { b } = v;
+            }
         }
         if let Some((to, port)) = detach {
             graph.disconnect(to, port);
@@ -433,7 +496,9 @@ impl Editor {
                 }
             });
         });
-        let clicked_outside = ui.input(|i| i.pointer.any_pressed()) && !area.response.contains_pointer();
+        // Test the rect directly: the area's own contains_pointer() was false for presses on its
+        // buttons in the real app, so the menu closed on mouse-down before the click landed.
+        let clicked_outside = ui.input(|i| i.pointer.any_pressed() && !i.pointer.interact_pos().is_some_and(|p| area.response.rect.contains(p)));
         if let Some((label, kind)) = picked {
             let (g, wire) = (menu.graph, menu.wire);
             // Place the new node so its connecting port sits at the drop point.
@@ -516,6 +581,61 @@ mod tests {
         assert!(!g.edges.iter().any(|e| e.from == ids[1]));
         let c = ids.iter().fold(0.0, |acc, id| acc + g.nodes[id].pos[0] + NODE_W * 0.5) / 2.0;
         assert!((c - 1000.0).abs() < 1e-3);
+    }
+
+    /// Drag a wire from Position's output onto empty space, then pick Math from the menu.
+    #[test]
+    fn wire_drop_menu_adds_node() {
+        use egui_kittest::{Harness, kittest::{NodeT, Queryable}};
+        // Laid out like the app: the editor in a 330 px bottom panel of a 1600×900 window.
+        let mut h = Harness::builder().with_size(Vec2::new(1280.0, 800.0)).with_pixels_per_point(1.5).with_step_dt(1.0 / 60.0).build_ui_state(
+            |ui, (ed, g): &mut (Editor, Graph)| {
+                egui_extras::install_image_loaders(ui.ctx()); // no-op after the first frame
+                egui::Panel::top("menu").show(ui, |ui| ui.label("menu"));
+                egui::Panel::right("props").default_size(320.0).show(ui, |ui| ui.label("props"));
+                egui::Panel::bottom("graph").resizable(true).default_size(330.0).show(ui, |ui| {
+                    ed.debug_origin = ui.available_rect_before_wrap().min;
+                    ed.show(ui, g, &BTreeMap::new())
+                });
+                egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| {
+                    let r = ui.available_rect_before_wrap();
+                    ui.interact(r, ui.scope_id().with("view3d"), Sense::drag());
+                });
+            },
+            (Editor::default(), Graph::default_graph()),
+        );
+        h.run();
+        let press = |h: &mut Harness<(Editor, Graph)>, pos: Pos2, pressed: bool| {
+            h.event(egui::Event::PointerMoved(pos));
+            h.event(egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: Default::default() });
+            h.run();
+        };
+        let ed = &h.state().0;
+        let out = ed.to_screen(ed.debug_origin, [NODE_W, HEADER_H * 0.5]); // Position's output port
+        h.hover_at(out);
+        h.run();
+        press(&mut h, out, true);
+        for i in 1..=10 {
+            h.hover_at(out + Vec2::new(10.0 * i as f32, 15.0 * i as f32));
+            h.run();
+        }
+        let drop = out + Vec2::new(100.0, 150.0);
+        press(&mut h, drop, false);
+        assert!(h.state().0.pin_menu.is_some(), "menu should open");
+        let at = h.get_by_label("Math").rect().center();
+        for i in 1..=5 {
+            h.hover_at(drop + (at - drop) * i as f32 / 5.0);
+            h.run();
+        }
+        press(&mut h, at, true);
+        press(&mut h, at, false);
+        h.run();
+        // A is wired from Position, so only B's on-node field is editable.
+        assert!(h.get_by_label("A").accesskit_node().is_disabled());
+        assert!(!h.get_by_label("B").accesskit_node().is_disabled());
+        let g = &h.state().1;
+        assert_eq!(g.nodes.len(), 5, "Math node should be added");
+        assert!(g.edges.iter().any(|e| e.from == 0 && matches!(g.nodes[&e.to].kind, NodeKind::Math { .. })));
     }
 
     #[test]

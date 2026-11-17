@@ -50,6 +50,7 @@ fn convert(expr: &str, from: Ty, to: Ty) -> String {
 
 struct Gen<'a> {
     g: &'a Graph,
+    caches: &'a BTreeMap<NodeId, u32>,
     slots: BTreeMap<NodeId, usize>,
     types: BTreeMap<NodeId, Ty>,
     /// Cone functions already written (keyed by their root node).
@@ -61,6 +62,12 @@ struct Gen<'a> {
 }
 
 pub fn compile(g: &Graph) -> Result<Compiled, String> {
+    compile_with(g, &BTreeMap::new())
+}
+
+/// Like `compile`, but nodes in `caches` read their baked texture (`cache_sample(slot, p)`)
+/// instead of evaluating their upstream graph. Preview only.
+pub fn compile_with(g: &Graph, caches: &BTreeMap<NodeId, u32>) -> Result<Compiled, String> {
     // Parameter slots, in node-id order.
     let mut slots = BTreeMap::new();
     let mut params = Vec::new();
@@ -84,7 +91,7 @@ pub fn compile(g: &Graph) -> Result<Compiled, String> {
         }
     }
 
-    let mut cg = Gen { g, slots, types: BTreeMap::new(), done: BTreeSet::new(), building: BTreeSet::new(), kinds: BTreeSet::new(), out: String::new() };
+    let mut cg = Gen { g, caches, slots, types: BTreeMap::new(), done: BTreeSet::new(), building: BTreeSet::new(), kinds: BTreeSet::new(), out: String::new() };
     let density = g.find(|k| *k == NodeKind::OutDensity).and_then(|o| g.input(o, 0));
     let normal = g.find(|k| *k == NodeKind::OutNormal).and_then(|o| g.input(o, 0));
 
@@ -181,7 +188,9 @@ impl Gen<'_> {
             return Err("graph has a cycle".into());
         }
         let kind = &self.g.nodes[&id].kind;
-        if let NodeKind::Normal { .. } = kind {
+        if self.caches.contains_key(&id) {
+            // A cached node is a texture read; its upstream graph isn't evaluated here.
+        } else if let NodeKind::Normal { .. } = kind {
             if let Some(src) = self.g.input(id, 0) {
                 self.cone(src)?;
             }
@@ -207,6 +216,10 @@ impl Gen<'_> {
     }
 
     fn node_expr(&mut self, id: NodeId) -> Result<String, String> {
+        if let Some(slot) = self.caches.get(&id) {
+            self.types.insert(id, Ty::F);
+            return Ok(format!("cache_sample({slot}u, p)"));
+        }
         let s = self.slots[&id];
         let (ty, expr) = match &self.g.nodes[&id].kind {
             NodeKind::Float(_) => (Ty::F, format!("P[{s}]")),
@@ -291,6 +304,17 @@ mod tests {
         naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all())
             .validate(&module)
             .unwrap();
+    }
+
+    #[test]
+    fn cached_node_becomes_a_texture_read() {
+        let g = Graph::default_graph(); // 0 Position → 1 Perlin → 2 OutDensity
+        let c = compile_with(&g, &BTreeMap::from([(1, 3)])).unwrap();
+        assert!(c.wgsl.contains("cache_sample(3u, p)"));
+        assert!(!c.wgsl.contains("fn noise_k0(")); // the cached noise isn't evaluated
+        let src = crate::view::shader_source(&c.wgsl);
+        let module = naga::front::wgsl::parse_str(&src).unwrap_or_else(|e| panic!("{}", e.emit_to_string(&src)));
+        naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all()).validate(&module).unwrap();
     }
 
     #[test]

@@ -82,6 +82,14 @@ Node graph (centre) · 3D view (primitive picker, solid/cloud, displacement amou
 - **Budget:** 1024³ f16 is 2 GiB per node, and 20 of them would be 40 GiB, so caches must be chosen by hand and sized per node. The default resolution comes from the node's finest feature: about 4 samples per finest cell, where cells = scale × lacunarity^(octaves−1). Scale 4 with 4 octaves gives 128³ (4 MiB at f16). The user can override it, and a VRAM meter shows the total.
 - **Sampling:** cubic (B-spline, built from 8 linear fetches) rather than plain linear, so normals and Normal nodes downstream of a cache aren't faceted.
 - Graphs that don't tile bake over the base shape's bounds instead.
+- **Built (`src/cache.rs`)**:
+  - Noise and Math nodes that output a float and tile can be cached; the toggle is a button in the node header next to the eye (Material Symbols sync-saved-locally, outline when off), and its tooltip says why a node can't be cached. Resolution sits under the node's properties.
+  - Resolution is Auto (≈4 texels per finest noise cell, power of two, 16–512) or a fixed 32–1024; the panel shows MB for this cache and for all.
+  - Textures are R32Float with Repeat wrapping, sampled with a cubic B-spline built from 8 trilinear fetches. Needs the FLOAT32_FILTERABLE feature; without it caches are sampled unfiltered (blocky).
+  - At most 8 caches at once (shader slots).
+  - Bakes run as compute dispatches, and a new bake pipeline compiles on a worker thread, keyed by upstream WGSL. A parameter change only re-dispatches the bake.
+  - A bake evaluates the node's full upstream graph, so caches don't nest. Nodes that only feed caches (every path to an output or the previewed node passes through a cache) get a green outline, since the preview no longer evaluates them (`Graph::cache_covered`). The `cache` field is saved in the graph file.
+  - Export never uses caches.
 
 ### Crash recovery (`src/backup.rs`)
 - Each running instance has a session folder in `%APPDATA%\Noiser\data\sessions\`. It holds a `lock` file the instance keeps exclusively locked, plus rolling backups (the last 10, at most one per second).
