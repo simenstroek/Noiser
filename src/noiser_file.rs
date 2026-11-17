@@ -203,4 +203,38 @@ mod tests {
         assert_eq!(v["outputs"]["density"], m);
         assert!(v["outputs"]["normal"].is_null());
     }
+
+    /// Every op the writer emits for random graphs is a documented op, with unique ids and inputs defined earlier.
+    #[test]
+    fn random_graphs_export_documented_ops_in_order() {
+        let doc = include_str!("../docs/noiser-format.md");
+        let mut state = 0x1234_5678_9ABC_DEF1u64;
+        let mut rnd = move |n: usize| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state % n as u64) as usize
+        };
+        for _ in 0..300 {
+            let g = crate::codegen::random_graph(&mut rnd);
+            let v = ops(&g, 1).unwrap();
+            let mut defined = BTreeSet::new();
+            for o in v["ops"].as_array().unwrap() {
+                let name = o["op"].as_str().unwrap();
+                assert!(doc.contains(&format!("### `{name}`")), "op {name} is not documented");
+                if name == "math" {
+                    let f = o["fn"].as_str().unwrap();
+                    assert!(doc.contains(&format!("`{f}`")), "math fn {f} is not documented");
+                }
+                for key in ["a", "b", "k", "position", "value", "factor", "field", "from_min", "from_max", "to_min", "to_max"] {
+                    // Operands are {"node": id}; position and field are plain ids.
+                    let id = o.get(key).and_then(|x| x.get("node").and_then(|n| n.as_u64()).or_else(|| if key == "position" || key == "field" { x.as_u64() } else { None }));
+                    if let Some(id) = id {
+                        assert!(defined.contains(&id), "{name}.{key} reads node {id} before it is defined");
+                    }
+                }
+                assert!(defined.insert(o["id"].as_u64().unwrap()), "duplicate id");
+            }
+        }
+    }
 }
