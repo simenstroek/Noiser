@@ -55,6 +55,9 @@ pub struct Editor {
     box_start: Option<Pos2>,
     /// Graph-space point where the add menu was opened.
     menu_at: Pos2,
+    /// Text typed into the add menu's search box, and whether it still needs the keyboard focus.
+    menu_search: String,
+    menu_fresh: bool,
     /// A scroll gesture over an operator dropdown already stepped it (egui smooths one wheel notch
     /// over several frames, so a step happens once per gesture, not per frame).
     op_scroll_stepped: bool,
@@ -74,6 +77,8 @@ impl Default for Editor {
             pin_menu: None,
             box_start: None,
             menu_at: Pos2::ZERO,
+            menu_search: String::new(),
+            menu_fresh: false,
             op_scroll_stepped: false,
             #[cfg(test)]
             debug_origin: Pos2::ZERO,
@@ -262,12 +267,19 @@ impl Editor {
         if bg.secondary_clicked() {
             if let Some(p) = bg.interact_pointer_pos() {
                 self.menu_at = self.to_graph(origin, p);
+                self.menu_search.clear();
+                self.menu_fresh = true;
             }
         }
         bg.context_menu(|ui| {
             ui.label("Add node");
-            for (label, kind) in palette() {
-                if ui.button(label).clicked() {
+            let search = ui.add(egui::TextEdit::singleline(&mut self.menu_search).hint_text("Search…"));
+            if std::mem::take(&mut self.menu_fresh) {
+                search.request_focus();
+            }
+            let enter = search.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            for (i, (label, kind)) in palette_matching(&self.menu_search).into_iter().enumerate() {
+                if ui.button(label).clicked() || (enter && i == 0) {
                     let id = graph.add(kind, [self.menu_at.x, self.menu_at.y]);
                     self.selected = BTreeSet::from([id]);
                     ui.close();
@@ -659,6 +671,12 @@ pub fn duplicate(graph: &mut Graph, nodes: &BTreeSet<NodeId>, at: [f32; 2]) -> B
     map.into_values().collect()
 }
 
+/// The add-menu entries whose label contains `query` (case-insensitive); all of them when it is empty.
+fn palette_matching(query: &str) -> Vec<(&'static str, NodeKind)> {
+    let q = query.trim().to_lowercase();
+    palette().into_iter().filter(|(label, _)| label.to_lowercase().contains(&q)).collect()
+}
+
 fn bezier(a: Pos2, b: Pos2, stroke: Stroke) -> CubicBezierShape {
     let dx = ((b.x - a.x).abs() * 0.5).max(30.0);
     CubicBezierShape::from_points_stroke([a, a + Vec2::new(dx, 0.0), b - Vec2::new(dx, 0.0), b], false, Color32::TRANSPARENT, stroke)
@@ -667,6 +685,14 @@ fn bezier(a: Pos2, b: Pos2, stroke: Stroke) -> CubicBezierShape {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn add_menu_search_filters_by_label() {
+        assert_eq!(palette_matching("").len(), palette().len());
+        let hits = palette_matching("  PERL ");
+        assert!(!hits.is_empty() && hits.iter().all(|(l, _)| l.to_lowercase().contains("perl")));
+        assert!(palette_matching("zzzz-no-such-node").is_empty());
+    }
 
     #[test]
     fn duplicate_keeps_internal_links_and_centres_on_cursor() {

@@ -206,3 +206,6 @@ Built: Material section in the Preview panel (colour, specular, roughness, soft 
 
 ### Undo / redo (2026-11-17)
 Built: `history.rs`, whole-graph snapshots committed once the pointer is released (one drag = one step, 200 deep), Edit menu plus Ctrl+Z / Ctrl+Y / Ctrl+Shift+Z (not while a text field has focus). Opening a file or New is undoable. Not covered: viewport settings and mesh settings are not part of history. Next: node search in the add menu, frame/comment nodes, preferences window, recent files.
+
+### Add-menu search (2026-11-17)
+Right-click menu on the canvas has a focused Search box; typing filters the node list, Enter adds the first match.
