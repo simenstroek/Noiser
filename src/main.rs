@@ -36,7 +36,8 @@ impl Default for Preview {
             amount: 0.25,
             tile_size: 1.0,
             seed: 0,
-            step_scale: 0.6,
+            // Overshoot is caught and refined, so this only needs to avoid stepping through thin features.
+            step_scale: 0.9,
             prim: 0,
             prim_size: 1.0,
             cloud: false,
@@ -67,12 +68,20 @@ struct App {
 impl App {
     fn new(cc: &eframe::CreationContext) -> Self {
         egui_extras::install_image_loaders(&cc.egui_ctx);
+        // `noiser path.noisegraph` opens that graph.
+        let (graph, path, status) = match std::env::args().nth(1).map(std::path::PathBuf::from) {
+            Some(p) => match std::fs::read_to_string(&p).map_err(|e| e.to_string()).and_then(|s| Graph::from_json(&s)) {
+                Ok(g) => (g, Some(p.clone()), format!("Opened {}", p.display())),
+                Err(e) => (Graph::default_graph(), None, format!("Could not open {}: {e}", p.display())),
+            },
+            None => (Graph::default_graph(), None, String::new()),
+        };
         Self {
             rs: cc.wgpu_render_state.clone().expect("Noiser needs the wgpu renderer"),
-            graph: Graph::default_graph(),
+            graph,
             editor: editor::Editor::default(),
-            path: None,
-            status: String::new(),
+            path,
+            status,
             built_wgsl: None,
             yaw: 0.6,
             pitch: 0.35,
@@ -92,9 +101,7 @@ impl App {
         let aspect = |r: egui::Rect| r.width() / r.height().max(1.0);
         // How far the surface can move: amount × density range. Kept finite for the shader;
         // 1e6 effectively disables the shell skip for unbounded graphs.
-        let (lo, hi) = self.graph.density_range();
-        let (a, b) = (pv.amount * lo, pv.amount * hi); // NaN when amount is 0 and the range unbounded
-        let push = if a.is_nan() || b.is_nan() { (-1e6, 1e6) } else { (a.min(b).clamp(-1e6, 1e6), a.max(b).clamp(-1e6, 1e6)) };
+        let push = view::push_range(self.graph.density_range(), pv.amount);
         Uniforms {
             cam_pos: pos,
             aspect: aspect(view3d),
@@ -303,6 +310,7 @@ fn node_props(ui: &mut egui::Ui, kind: &mut NodeKind) {
 
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let cpu_start = std::time::Instant::now();
         let tiling = self.graph.tiling();
 
         egui::Panel::top("menu").show(ui, |ui| {
@@ -357,7 +365,7 @@ impl eframe::App for App {
         };
         if let Ok(c) = &compiled {
             if self.built_wgsl.as_deref() != Some(&c.wgsl) {
-                let gpu = view::build(&self.rs, &c.wgsl);
+                let gpu = view::build(&self.rs.device, &self.rs.queue, self.rs.target_format, &c.wgsl);
                 self.rs.renderer.write().callback_resources.insert(gpu);
                 self.built_wgsl = Some(c.wgsl.clone());
             }
@@ -382,13 +390,23 @@ impl eframe::App for App {
                 Ok(c) => {
                     let uniforms = self.uniforms(r3d, rslice);
                     let painter = ui.painter();
-                    let cb3d = view::View3d { uniforms, params: c.params.clone() };
+                    let px = (r3d.size() * ui.ctx().pixels_per_point()).round();
+                    let cb3d = view::View3d { uniforms, params: c.params.clone(), size: [px.x as u32, px.y as u32] };
                     painter.add(egui_wgpu::Callback::new_paint_callback(r3d, cb3d));
                     let cbs = view::SliceView { uniforms, params: c.params };
                     painter.add(egui_wgpu::Callback::new_paint_callback(rslice, cbs));
                     let axis = ["X", "Y", "Z"][self.pv.slice_axis as usize];
                     let label = format!("{axis} = {:.3}", self.pv.slice_pos);
-                    painter.text(rslice.left_top() + egui::vec2(8.0, 6.0), egui::Align2::LEFT_TOP, label, egui::FontId::monospace(12.0), egui::Color32::from_gray(200));
+                    let font = egui::FontId::monospace(12.0);
+                    let grey = egui::Color32::from_gray(200);
+                    painter.text(rslice.left_top() + egui::vec2(8.0, 6.0), egui::Align2::LEFT_TOP, label, font.clone(), grey);
+                    // GPU times come back a few frames late; CPU time is this frame's UI + graph work.
+                    let gpu_ms = self.rs.renderer.read().callback_resources.get::<view::Gpu>().and_then(|g| g.timer.as_ref().map(|t| t.ms));
+                    let timing = match gpu_ms {
+                        Some([a, b]) => format!("GPU 3D {a:.2} ms · slice {b:.2} ms · CPU {:.2} ms\n{}×{} px", cpu_start.elapsed().as_secs_f32() * 1e3, px.x, px.y),
+                        None => format!("GPU timing unavailable · CPU {:.2} ms", cpu_start.elapsed().as_secs_f32() * 1e3),
+                    };
+                    painter.text(r3d.left_top() + egui::vec2(8.0, 6.0), egui::Align2::LEFT_TOP, timing, font, grey);
                 }
                 Err(e) => {
                     ui.painter().rect_filled(full, 0.0, egui::Color32::from_gray(30));
@@ -403,6 +421,7 @@ impl eframe::App for App {
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         renderer: eframe::Renderer::Wgpu,
+        wgpu_options: view::request_timestamps(Default::default()),
         viewport: egui::ViewportBuilder::default().with_inner_size([1280.0, 800.0]).with_title("Noiser"),
         ..Default::default()
     };

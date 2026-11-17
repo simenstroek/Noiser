@@ -1,0 +1,162 @@
+{
+  "nodes": {
+    "2": {
+      "kind": "OutDensity",
+      "pos": [
+        1327.2524,
+        10.457496
+      ]
+    },
+    "3": {
+      "kind": "OutNormal",
+      "pos": [
+        1327.2524,
+        130.4575
+      ]
+    },
+    "6": {
+      "kind": "Position",
+      "pos": [
+        265.80338,
+        207.03247
+      ]
+    },
+    "7": {
+      "kind": {
+        "Math": {
+          "op": "Add",
+          "a": 0.0,
+          "b": 0.0
+        }
+      },
+      "pos": [
+        571.14984,
+        89.405624
+      ]
+    },
+    "8": {
+      "kind": {
+        "Noise": {
+          "kind": "Worley",
+          "feature": "F1",
+          "scale": 4.0,
+          "normalize": false,
+          "octaves": 4,
+          "lacunarity": 2.0,
+          "roughness": 0.5,
+          "distortion": 0.0,
+          "seed": null
+        }
+      },
+      "pos": [
+        809.3118,
+        78.95141
+      ]
+    },
+    "9": {
+      "kind": {
+        "Math": {
+          "op": "Multiply",
+          "a": 0.0,
+          "b": 0.0
+        }
+      },
+      "pos": [
+        1015.6051,
+        136.80087
+      ]
+    },
+    "10": {
+      "kind": {
+        "Float": -0.25
+      },
+      "pos": [
+        809.31177,
+        203.38232
+      ]
+    },
+    "11": {
+      "kind": {
+        "Math": {
+          "op": "Multiply",
+          "a": 0.0,
+          "b": 0.0
+        }
+      },
+      "pos": [
+        264.65375,
+        97.50693
+      ]
+    },
+    "12": {
+      "kind": {
+        "Float": 0.07
+      },
+      "pos": [
+        44.170853,
+        170.6373
+      ]
+    },
+    "13": {
+      "kind": {
+        "Noise": {
+          "kind": "Perlin",
+          "feature": "F1",
+          "scale": 4.0,
+          "normalize": false,
+          "octaves": 4,
+          "lacunarity": 2.0,
+          "roughness": 0.5,
+          "distortion": 0.0,
+          "seed": null
+        }
+      },
+      "pos": [
+        45.262375,
+        105.14737
+      ]
+    }
+  },
+  "edges": [
+    {
+      "from": 8,
+      "to": 9,
+      "port": 0
+    },
+    {
+      "from": 10,
+      "to": 9,
+      "port": 1
+    },
+    {
+      "from": 9,
+      "to": 2,
+      "port": 0
+    },
+    {
+      "from": 7,
+      "to": 8,
+      "port": 0
+    },
+    {
+      "from": 11,
+      "to": 7,
+      "port": 0
+    },
+    {
+      "from": 12,
+      "to": 11,
+      "port": 1
+    },
+    {
+      "from": 6,
+      "to": 7,
+      "port": 1
+    },
+    {
+      "from": 13,
+      "to": 11,
+      "port": 0
+    }
+  ]
+}

@@ -21,6 +21,14 @@ fn wrap_cell(c: vec3i, period: i32) -> vec3i {
     return c;
 }
 
+// Wraps a cell that is at most one period outside [0, period). Integer % is slow on GPUs, so
+// noises wrap their base cell once with wrap_cell and step to neighbours with this.
+fn wrap_near(c: vec3i, period: i32) -> vec3i {
+    if (period <= 0) { return c; }
+    let p = vec3i(period);
+    return select(select(c, c - p, c >= p), c + p, c < vec3i(0));
+}
+
 // Three uniform randoms in [0, 1] for a (wrapped) lattice cell.
 fn hash01(c: vec3i, seed: u32) -> vec3f {
     let h = pcg3d(bitcast<vec3u>(c) + vec3u(seed * 0x9E3779B9u, 0u, 0u));
@@ -33,17 +41,26 @@ fn fade(t: vec3f) -> vec3f { return t * t * t * (t * (t * 6.0 - 15.0) + 10.0); }
 
 // ---- Perlin ----------------------------------------------------------------
 
+// Gradient at wrapped base cell `i` + corner `o`, dotted with the offset to that corner.
+fn corner(i: vec3i, o: vec3i, f: vec3f, period: i32, seed: u32) -> f32 {
+    return dot(rand_dir(wrap_near(i + o, period), seed), f - vec3f(o));
+}
+
+// Written out per corner: a loop over a local array spills it out of registers.
 fn perlin(x: vec3f, period: i32, seed: u32) -> f32 {
-    let i = vec3i(floor(x));
+    let i = wrap_cell(vec3i(floor(x)), period);
     let f = fract(x);
     let w = fade(f);
-    var n: array<f32, 8>;
-    for (var k = 0; k < 8; k++) {
-        let o = vec3i(k & 1, (k >> 1) & 1, (k >> 2) & 1);
-        n[k] = dot(rand_dir(wrap_cell(i + o, period), seed), f - vec3f(o));
-    }
-    let x0 = mix(mix(n[0], n[1], w.x), mix(n[2], n[3], w.x), w.y);
-    let x1 = mix(mix(n[4], n[5], w.x), mix(n[6], n[7], w.x), w.y);
+    let n000 = corner(i, vec3i(0, 0, 0), f, period, seed);
+    let n100 = corner(i, vec3i(1, 0, 0), f, period, seed);
+    let n010 = corner(i, vec3i(0, 1, 0), f, period, seed);
+    let n110 = corner(i, vec3i(1, 1, 0), f, period, seed);
+    let n001 = corner(i, vec3i(0, 0, 1), f, period, seed);
+    let n101 = corner(i, vec3i(1, 0, 1), f, period, seed);
+    let n011 = corner(i, vec3i(0, 1, 1), f, period, seed);
+    let n111 = corner(i, vec3i(1, 1, 1), f, period, seed);
+    let x0 = mix(mix(n000, n100, w.x), mix(n010, n110, w.x), w.y);
+    let x1 = mix(mix(n001, n101, w.x), mix(n011, n111, w.x), w.y);
     return mix(x0, x1, w.z) * 1.5;
 }
 
@@ -61,24 +78,23 @@ fn simplex(x: vec3f, period: i32, seed: u32) -> f32 {
     let l = 1.0 - g;
     let o1 = min(g, l.zxy);
     let o2 = max(g, l.zxy);
-    let corners = array<vec3f, 4>(i0, i0 + o1, i0 + o2, i0 + 1.0);
-    let pf = f32(period);
-    var n = 0.0;
-    for (var k = 0; k < 4; k++) {
-        let c = corners[k];
-        let v = 0.5 * vec3f(-c.x + c.y + c.z, c.x - c.y + c.z, c.x + c.y - c.z); // M⁻¹ c
-        let d = x - v;
-        // 0.5 is the distance from a corner to the opposite face, squared: the kernel ends at the simplex.
-        let w = max(0.5 - dot(d, d), 0.0);
-        if (w > 0.0) {
-            var vw = v;
-            if (period > 0) { vw = v - floor(v / pf) * pf; }
-            let cw = vec3i(round(vec3f(vw.y + vw.z, vw.x + vw.z, vw.x + vw.y)));
-            let w2 = w * w;
-            n += w2 * w2 * dot(rand_dir(cw, seed), d);
-        }
-    }
+    let n = simplex_corner(x, i0, period, seed) + simplex_corner(x, i0 + o1, period, seed)
+          + simplex_corner(x, i0 + o2, period, seed) + simplex_corner(x, i0 + 1.0, period, seed);
     return n * SIMPLEX_GAIN;
+}
+
+// One simplex corner c (in lattice space uvw).
+fn simplex_corner(x: vec3f, c: vec3f, period: i32, seed: u32) -> f32 {
+    let v = 0.5 * vec3f(-c.x + c.y + c.z, c.x - c.y + c.z, c.x + c.y - c.z); // M⁻¹ c
+    let d = x - v;
+    // 0.5 is the distance from a corner to the opposite face, squared: the kernel ends at the simplex.
+    let w = max(0.5 - dot(d, d), 0.0);
+    if (w <= 0.0) { return 0.0; }
+    var vw = v;
+    if (period > 0) { let pf = f32(period); vw = v - floor(v / pf) * pf; }
+    let cw = vec3i(round(vec3f(vw.y + vw.z, vw.x + vw.z, vw.x + vw.y)));
+    let w2 = w * w;
+    return w2 * w2 * dot(rand_dir(cw, seed), d);
 }
 
 // Brings simplex to roughly [-1, 1]; measured by the range test in gpu_tests.rs.
@@ -87,29 +103,37 @@ const SIMPLEX_GAIN: f32 = 90.0;
 // ---- Cellular (Voronoi / Worley) ------------------------------------------
 
 // (F1, F2, random value of the nearest cell in [-1, 1]); feature points jittered over the whole cell.
-fn cells(x: vec3f, period: i32, seed: u32) -> vec3f {
-    let i = vec3i(floor(x));
-    let f = x - floor(x);
-    var f1 = 1e9;
+// The cell value costs one more hash, so only Voronoi asks for it.
+fn cells(x: vec3f, period: i32, seed: u32, want_value: bool) -> vec3f {
+    let i = wrap_cell(vec3i(floor(x)), period);
+    let f = fract(x);
+    var f1 = 1e9; // squared distances until the end
     var f2 = 1e9;
-    var val = 0.0;
-    for (var k = 0; k < 27; k++) {
-        let o = vec3i(k % 3 - 1, (k / 3) % 3 - 1, k / 9 - 1);
-        let c = wrap_cell(i + o, period);
-        let d = length(vec3f(o) + hash01(c, seed) - f);
-        if (d < f1) {
-            f2 = f1;
-            f1 = d;
-            val = hash01(c, seed + 0x51ED27u).x * 2.0 - 1.0;
-        } else if (d < f2) {
-            f2 = d;
+    var nearest = i;
+    for (var z = -1; z <= 1; z++) {
+        for (var y = -1; y <= 1; y++) {
+            for (var xx = -1; xx <= 1; xx++) {
+                let o = vec3i(xx, y, z);
+                let c = wrap_near(i + o, period);
+                let d = vec3f(o) + hash01(c, seed) - f;
+                let d2 = dot(d, d);
+                if (d2 < f1) {
+                    f2 = f1;
+                    f1 = d2;
+                    nearest = c;
+                } else if (d2 < f2) {
+                    f2 = d2;
+                }
+            }
         }
     }
-    return vec3f(f1, f2, val);
+    var val = 0.0;
+    if (want_value) { val = hash01(nearest, seed + 0x51ED27u).x * 2.0 - 1.0; }
+    return vec3f(sqrt(f1), sqrt(f2), val);
 }
 
 fn worley(x: vec3f, period: i32, seed: u32, feature: u32) -> f32 {
-    let c = cells(x, period, seed);
+    let c = cells(x, period, seed, false);
     // Typical range of each feature, used to map it to signed [-1, 1].
     switch feature {
         case 1u: { return clamp(c.y / 1.4 * 2.0 - 1.0, -1.0, 1.0); }
@@ -147,7 +171,7 @@ fn noise_base(x: vec3f, period: i32, seed: u32, kind: u32, feature: u32) -> f32 
     // Every kind stays within [-1, 1]; Graph::density_range relies on it.
     switch kind {
         case 1u: { return clamp(simplex(x, period, seed), -1.0, 1.0); }
-        case 2u, 3u: { return cells(x, period, seed).z; }
+        case 2u, 3u: { return cells(x, period, seed, true).z; }
         case 4u: { return worley(x, period, seed, feature); }
         case 5u: { return white(x, period, seed); }
         case 6u: { return blue(x, period, seed); }

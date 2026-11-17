@@ -174,6 +174,69 @@ fn noise_contact_sheet() {
     std::fs::write(concat!(env!("CARGO_MANIFEST_DIR"), "/target/noise_sheet.pgm"), out).unwrap();
 }
 
+/// GPU time of the 3D view (1000×1000 px) and the 512² slice for a graph file, median of 30 frames.
+/// `cargo test --release bench_preview -- --ignored --nocapture` (NOISER_BENCH_GRAPH=path to pick a file,
+/// default SimpleTestGraph.noisegraph in the repo root; NOISER_BENCH_STEP=step safety, default 0.6).
+#[test]
+#[ignore = "benchmark"]
+fn bench_preview() {
+    use crate::view;
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+    let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+        power_preference: wgpu::PowerPreference::HighPerformance,
+        ..Default::default()
+    }))
+    .unwrap();
+    let desc = wgpu::DeviceDescriptor { required_features: wgpu::Features::TIMESTAMP_QUERY, ..Default::default() };
+    let (device, queue) = pollster::block_on(adapter.request_device(&desc)).unwrap();
+    eprintln!("adapter: {}", adapter.get_info().name);
+
+    let path = std::env::var("NOISER_BENCH_GRAPH")
+        .unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/SimpleTestGraph.noisegraph").into());
+    let graph = Graph::from_json(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    let c = codegen::compile(&graph).unwrap();
+    let mut gpu = view::build(&device, &queue, wgpu::TextureFormat::Bgra8Unorm, &c.wgsl);
+
+    let size = [1000u32, 1000];
+    let step: f32 = std::env::var("NOISER_BENCH_STEP").ok().and_then(|s| s.parse().ok()).unwrap_or(0.6);
+    for (mode, name) in [(0u32, "solid"), (1, "cloud")] {
+        // Same camera and preview defaults as the app.
+        let (yaw, pitch, dist) = (0.6f32, 0.35f32, 3.5f32);
+        let pos = [dist * pitch.cos() * yaw.sin(), dist * pitch.sin(), dist * pitch.cos() * yaw.cos()];
+        let l = (pos[0] * pos[0] + pos[1] * pos[1] + pos[2] * pos[2]).sqrt();
+        let fwd = [-pos[0] / l, -pos[1] / l, -pos[2] / l];
+        let rl = (fwd[2] * fwd[2] + fwd[0] * fwd[0]).sqrt();
+        let right = [-fwd[2] / rl, 0.0, fwd[0] / rl];
+        let up = [right[1] * fwd[2] - right[2] * fwd[1], right[2] * fwd[0] - right[0] * fwd[2], right[0] * fwd[1] - right[1] * fwd[0]];
+        let push = view::push_range(graph.density_range(), 0.25);
+        let u = view::Uniforms {
+            cam_pos: pos, aspect: 1.0, cam_fwd: fwd, amount: 0.25, cam_right: right, step_scale: step, cam_up: up, seed: 0,
+            tile_size: 1.0, prim_size: 1.0, pixel: 2.0 / size[1] as f32, cloud_density: 8.0, mode, prim: 0,
+            slice_axis: 2, slice_mode: 0, slice_pos: 0.5, slice_aspect: 1.0, slice_tiles: 1.0, slice_res: view::SLICE_RES,
+            push_min: push.0, push_max: push.1, _pad: [0.0; 2],
+        };
+        let mut samples = Vec::new();
+        for _ in 0..30 {
+            gpu.upload(&queue, &u, &c.params);
+            let mut enc = device.create_command_encoder(&Default::default());
+            gpu.render_3d(&mut enc, size);
+            gpu.compute_slice(&queue, &mut enc);
+            queue.submit([enc.finish()]);
+            let t = gpu.timer.as_mut().unwrap();
+            t.collect(&device); // starts the map
+            device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+            t.collect(&device); // reads it
+            samples.push(t.ms);
+        }
+        let median = |i: usize| {
+            let mut v: Vec<f32> = samples[5..].iter().map(|s| s[i]).collect(); // skip warm-up
+            v.sort_by(f32::total_cmp);
+            v[v.len() / 2]
+        };
+        eprintln!("{name:5}: 3D {:7.2} ms  slice {:6.2} ms", median(0), median(1));
+    }
+}
+
 #[test]
 fn noises_stay_in_signed_range() {
     let Some(gpu) = gpu() else { return eprintln!("no GPU adapter; skipping") };

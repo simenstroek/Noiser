@@ -1,8 +1,11 @@
 //! GPU side of the 3D preview and 2D slice view: one shader module built from the graph,
-//! a raymarch pipeline, a slice compute pipeline and a slice display pipeline.
+//! a raymarch pipeline (rendering into an offscreen texture), a slice compute pipeline and a
+//! slice display pipeline, plus GPU timestamps for both views.
 
 use crate::codegen;
 use eframe::{egui, egui_wgpu, wgpu};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, Ordering};
 
 /// shortcut: fixed-size param buffer (16 KiB); grow on demand if graphs ever need more.
 pub const MAX_PARAMS: usize = 4096;
@@ -39,45 +42,223 @@ pub struct Uniforms {
     pub _pad: [f32; 2],
 }
 
+/// How far the surface can move in/out: amount × the graph's density range, kept finite for
+/// the shader (1e6 effectively disables the shell skip for unbounded graphs).
+pub fn push_range((lo, hi): (f32, f32), amount: f32) -> (f32, f32) {
+    let (a, b) = (amount * lo, amount * hi); // NaN when amount is 0 and the range unbounded
+    if a.is_nan() || b.is_nan() {
+        return (-1e6, 1e6);
+    }
+    (a.min(b).clamp(-1e6, 1e6), a.max(b).clamp(-1e6, 1e6))
+}
+
+// ---- GPU timing ------------------------------------------------------------
+
+const IDLE: u8 = 0;
+const WRITTEN: u8 = 1;
+const MAPPING: u8 = 2;
+const READY: u8 = 3;
+
+/// Timestamp queries around the 3D pass (0, 1) and the slice pass (2, 3), read back without
+/// stalling: written in one frame, mapped in a later one, read when the map completes.
+pub struct Timer {
+    set: wgpu::QuerySet,
+    resolve: wgpu::Buffer,
+    read: wgpu::Buffer,
+    state: Arc<AtomicU8>,
+    period_ns: f32,
+    /// Last measured GPU time in milliseconds: [3D view, slice].
+    pub ms: [f32; 2],
+}
+
+impl Timer {
+    fn new(device: &wgpu::Device, queue: &wgpu::Queue) -> Option<Self> {
+        if !device.features().contains(wgpu::Features::TIMESTAMP_QUERY) {
+            return None;
+        }
+        let set = device.create_query_set(&wgpu::QuerySetDescriptor { label: Some("timer"), ty: wgpu::QueryType::Timestamp, count: 4 });
+        let buf = |usage| device.create_buffer(&wgpu::BufferDescriptor { label: Some("timer"), size: 32, usage, mapped_at_creation: false });
+        Some(Self {
+            set,
+            resolve: buf(wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC),
+            read: buf(wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST),
+            state: Arc::new(AtomicU8::new(IDLE)),
+            period_ns: queue.get_timestamp_period(),
+            ms: [0.0; 2],
+        })
+    }
+
+    fn pass_writes(&self, pass: u32) -> Option<(u32, u32)> {
+        (self.state.load(Ordering::Acquire) == IDLE).then_some((pass * 2, pass * 2 + 1))
+    }
+
+    /// Copies this frame's timestamps out. Call after both passes are encoded.
+    fn resolve(&self, encoder: &mut wgpu::CommandEncoder) {
+        if self.state.load(Ordering::Acquire) == IDLE {
+            encoder.resolve_query_set(&self.set, 0..4, &self.resolve, 0);
+            encoder.copy_buffer_to_buffer(&self.resolve, 0, &self.read, 0, 32);
+            self.state.store(WRITTEN, Ordering::Release);
+        }
+    }
+
+    /// Advances the readback; call once per frame (before encoding) and after submits.
+    pub fn collect(&mut self, device: &wgpu::Device) {
+        match self.state.load(Ordering::Acquire) {
+            WRITTEN => {
+                self.state.store(MAPPING, Ordering::Release);
+                let state = self.state.clone();
+                self.read.map_async(wgpu::MapMode::Read, .., move |r| {
+                    state.store(if r.is_ok() { READY } else { IDLE }, Ordering::Release)
+                });
+            }
+            READY => {
+                {
+                    let view = self.read.get_mapped_range(..).unwrap();
+                    let t: &[u64] = bytemuck::cast_slice(&view);
+                    for i in 0..2 {
+                        self.ms[i] = t[2 * i + 1].saturating_sub(t[2 * i]) as f32 * self.period_ns / 1e6;
+                    }
+                }
+                self.read.unmap();
+                self.state.store(IDLE, Ordering::Release);
+            }
+            _ => {}
+        }
+        let _ = device.poll(wgpu::PollType::Poll);
+    }
+}
+
+// ---- pipelines and passes ----------------------------------------------------
+
+struct Target {
+    size: [u32; 2],
+    view: wgpu::TextureView,
+    blit: wgpu::BindGroup,
+}
+
 pub struct Gpu {
+    device: wgpu::Device,
+    format: wgpu::TextureFormat,
     raymarch: wgpu::RenderPipeline,
     slice_cs: wgpu::ComputePipeline,
     slice_fs: wgpu::RenderPipeline,
+    blit: wgpu::RenderPipeline,
+    blit_layout: wgpu::BindGroupLayout,
+    sampler: wgpu::Sampler,
     uniforms: wgpu::Buffer,
     params: wgpu::Buffer,
     slice: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
+    target: Option<Target>,
+    pub timer: Option<Timer>,
 }
 
-/// Uploads uniforms and params. Every callback does it (same data), so draw order doesn't matter.
-fn upload(queue: &wgpu::Queue, gpu: &Gpu, u: &Uniforms, params: &[f32]) {
-    queue.write_buffer(&gpu.uniforms, 0, bytemuck::bytes_of(u));
-    queue.write_buffer(&gpu.params, 0, bytemuck::cast_slice(params));
+impl Gpu {
+    /// Uploads uniforms and params. Both views do it (same data), so draw order doesn't matter.
+    pub fn upload(&self, queue: &wgpu::Queue, u: &Uniforms, params: &[f32]) {
+        queue.write_buffer(&self.uniforms, 0, bytemuck::bytes_of(u));
+        queue.write_buffer(&self.params, 0, bytemuck::cast_slice(params));
+    }
+
+    /// Raymarches the 3D view into the offscreen target (resized to `size` pixels as needed).
+    pub fn render_3d(&mut self, encoder: &mut wgpu::CommandEncoder, size: [u32; 2]) {
+        let size = [size[0].max(1), size[1].max(1)];
+        if self.target.as_ref().is_none_or(|t| t.size != size) {
+            let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("3d view"),
+                size: wgpu::Extent3d { width: size[0], height: size[1], depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: self.format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            });
+            let view = texture.create_view(&Default::default());
+            let blit = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: None,
+                layout: &self.blit_layout,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) },
+                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.sampler) },
+                ],
+            });
+            self.target = Some(Target { size, view, blit });
+        }
+        let timestamps = self.timer.as_ref().and_then(|t| {
+            t.pass_writes(0).map(|(b, e)| wgpu::RenderPassTimestampWrites { query_set: &t.set, beginning_of_pass_write_index: Some(b), end_of_pass_write_index: Some(e) })
+        });
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("3d view"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &self.target.as_ref().unwrap().view,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Store },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: timestamps,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_pipeline(&self.raymarch);
+        pass.set_bind_group(0, &self.bind_group, &[]);
+        pass.draw(0..3, 0..1);
+    }
+
+    /// Evaluates the graph over the slice and its min/max.
+    pub fn compute_slice(&self, queue: &wgpu::Queue, encoder: &mut wgpu::CommandEncoder) {
+        // Reset min/max (queue writes land before this frame's commands run).
+        queue.write_buffer(&self.slice, 0, bytemuck::cast_slice(&[u32::MAX, 0u32]));
+        let timestamps = self.timer.as_ref().and_then(|t| {
+            t.pass_writes(1).map(|(b, e)| wgpu::ComputePassTimestampWrites { query_set: &t.set, beginning_of_pass_write_index: Some(b), end_of_pass_write_index: Some(e) })
+        });
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("slice"), timestamp_writes: timestamps });
+        pass.set_pipeline(&self.slice_cs);
+        pass.set_bind_group(0, &self.bind_group, &[]);
+        let groups = SLICE_RES.div_ceil(8);
+        pass.dispatch_workgroups(groups, groups, 1);
+        drop(pass);
+        if let Some(t) = &self.timer {
+            t.resolve(encoder);
+        }
+    }
 }
+
+// ---- egui callbacks ------------------------------------------------------------
 
 pub struct View3d {
     pub uniforms: Uniforms,
     pub params: Vec<f32>,
+    /// Viewport size in physical pixels.
+    pub size: [u32; 2],
 }
 
 impl egui_wgpu::CallbackTrait for View3d {
     fn prepare(
         &self,
-        _device: &wgpu::Device,
+        device: &wgpu::Device,
         queue: &wgpu::Queue,
         _screen: &egui_wgpu::ScreenDescriptor,
-        _encoder: &mut wgpu::CommandEncoder,
+        encoder: &mut wgpu::CommandEncoder,
         res: &mut egui_wgpu::CallbackResources,
     ) -> Vec<wgpu::CommandBuffer> {
-        upload(queue, res.get().unwrap(), &self.uniforms, &self.params);
+        let gpu: &mut Gpu = res.get_mut().unwrap();
+        if let Some(t) = &mut gpu.timer {
+            t.collect(device);
+        }
+        gpu.upload(queue, &self.uniforms, &self.params);
+        gpu.render_3d(encoder, self.size);
         Vec::new()
     }
 
     fn paint(&self, _info: egui::PaintCallbackInfo, pass: &mut wgpu::RenderPass<'static>, res: &egui_wgpu::CallbackResources) {
         let gpu: &Gpu = res.get().unwrap();
-        pass.set_pipeline(&gpu.raymarch);
-        pass.set_bind_group(0, &gpu.bind_group, &[]);
-        pass.draw(0..3, 0..1);
+        if let Some(t) = &gpu.target {
+            pass.set_pipeline(&gpu.blit);
+            pass.set_bind_group(0, &t.blit, &[]);
+            pass.draw(0..3, 0..1);
+        }
     }
 }
 
@@ -96,14 +277,8 @@ impl egui_wgpu::CallbackTrait for SliceView {
         res: &mut egui_wgpu::CallbackResources,
     ) -> Vec<wgpu::CommandBuffer> {
         let gpu: &Gpu = res.get().unwrap();
-        upload(queue, gpu, &self.uniforms, &self.params);
-        // Reset min/max (queue writes land before this frame's commands run).
-        queue.write_buffer(&gpu.slice, 0, bytemuck::cast_slice(&[u32::MAX, 0u32]));
-        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("slice"), timestamp_writes: None });
-        pass.set_pipeline(&gpu.slice_cs);
-        pass.set_bind_group(0, &gpu.bind_group, &[]);
-        let groups = SLICE_RES.div_ceil(8);
-        pass.dispatch_workgroups(groups, groups, 1);
+        gpu.upload(queue, &self.uniforms, &self.params);
+        gpu.compute_slice(queue, encoder);
         Vec::new()
     }
 
@@ -114,6 +289,8 @@ impl egui_wgpu::CallbackTrait for SliceView {
         pass.draw(0..3, 0..1);
     }
 }
+
+// ---- construction --------------------------------------------------------------
 
 /// Full shader source for a compiled graph.
 pub fn shader_source(graph_wgsl: &str) -> String {
@@ -126,8 +303,31 @@ pub fn shader_source(graph_wgsl: &str) -> String {
     )
 }
 
-pub fn build(rs: &egui_wgpu::RenderState, graph_wgsl: &str) -> Gpu {
-    let device = &rs.device;
+const BLIT_WGSL: &str = "
+@group(0) @binding(0) var img: texture_2d<f32>;
+@group(0) @binding(1) var smp: sampler;
+struct VsOut { @builtin(position) pos: vec4f, @location(0) uv: vec2f };
+@vertex fn vs(@builtin(vertex_index) i: u32) -> VsOut {
+    let p = vec2f(f32((i << 1u) & 2u), f32(i & 2u));
+    return VsOut(vec4f(p * 2.0 - 1.0, 0.0, 1.0), vec2f(p.x, 1.0 - p.y));
+}
+@fragment fn fs(in: VsOut) -> @location(0) vec4f { return textureSample(img, smp, in.uv); }
+";
+
+/// Adds TIMESTAMP_QUERY to eframe's device request when the adapter supports it.
+pub fn request_timestamps(mut cfg: egui_wgpu::WgpuConfiguration) -> egui_wgpu::WgpuConfiguration {
+    if let egui_wgpu::WgpuSetup::CreateNew(new) = &mut cfg.wgpu_setup {
+        let base = new.device_descriptor.clone();
+        new.device_descriptor = Arc::new(move |adapter| {
+            let mut d = base(adapter);
+            d.required_features |= adapter.features() & wgpu::Features::TIMESTAMP_QUERY;
+            d
+        });
+    }
+    cfg
+}
+
+pub fn build(device: &wgpu::Device, queue: &wgpu::Queue, format: wgpu::TextureFormat, graph_wgsl: &str) -> Gpu {
     // shortcut: no error scope here; the full shader is naga-validated in tests. Add one if users hit shader panics.
     let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("preview"),
@@ -154,16 +354,16 @@ pub fn build(rs: &egui_wgpu::RenderState, graph_wgsl: &str) -> Gpu {
         bind_group_layouts: &[Some(&bgl)],
         immediate_size: 0,
     });
-    let render = |fs: &str| {
+    let render = |module: &wgpu::ShaderModule, layout: Option<&wgpu::PipelineLayout>, fs: &str| {
         device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some(fs),
-            layout: Some(&layout),
-            vertex: wgpu::VertexState { module: &module, entry_point: Some("vs"), compilation_options: Default::default(), buffers: &[] },
+            layout,
+            vertex: wgpu::VertexState { module, entry_point: Some("vs"), compilation_options: Default::default(), buffers: &[] },
             fragment: Some(wgpu::FragmentState {
-                module: &module,
+                module,
                 entry_point: Some(fs),
                 compilation_options: Default::default(),
-                targets: &[Some(rs.target_format.into())],
+                targets: &[Some(format.into())],
             }),
             primitive: Default::default(),
             depth_stencil: None,
@@ -172,8 +372,8 @@ pub fn build(rs: &egui_wgpu::RenderState, graph_wgsl: &str) -> Gpu {
             cache: None,
         })
     };
-    let raymarch = render("fs");
-    let slice_fs = render("fs_slice");
+    let raymarch = render(&module, Some(&layout), "fs");
+    let slice_fs = render(&module, Some(&layout), "fs_slice");
     let slice_cs = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
         label: Some("slice"),
         layout: Some(&layout),
@@ -182,6 +382,11 @@ pub fn build(rs: &egui_wgpu::RenderState, graph_wgsl: &str) -> Gpu {
         compilation_options: Default::default(),
         cache: None,
     });
+    let blit_module = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("blit"), source: wgpu::ShaderSource::Wgsl(BLIT_WGSL.into()) });
+    let blit = render(&blit_module, None, "fs");
+    let blit_layout = blit.get_bind_group_layout(0);
+    let sampler = device.create_sampler(&wgpu::SamplerDescriptor::default());
+
     let buffer = |label, size, usage| {
         device.create_buffer(&wgpu::BufferDescriptor { label: Some(label), size, usage: usage | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false })
     };
@@ -190,7 +395,7 @@ pub fn build(rs: &egui_wgpu::RenderState, graph_wgsl: &str) -> Gpu {
     let slice = buffer("slice", 8 + (SLICE_RES * SLICE_RES * 4) as u64, wgpu::BufferUsages::STORAGE);
     let blue: &[f32] = &crate::bluenoise::tables();
     let blue_noise = buffer("blue noise", std::mem::size_of_val(blue) as u64, wgpu::BufferUsages::STORAGE);
-    rs.queue.write_buffer(&blue_noise, 0, bytemuck::cast_slice(blue));
+    queue.write_buffer(&blue_noise, 0, bytemuck::cast_slice(blue));
     let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: None,
         layout: &bgl,
@@ -201,5 +406,20 @@ pub fn build(rs: &egui_wgpu::RenderState, graph_wgsl: &str) -> Gpu {
             wgpu::BindGroupEntry { binding: 3, resource: blue_noise.as_entire_binding() },
         ],
     });
-    Gpu { raymarch, slice_cs, slice_fs, uniforms, params, slice, bind_group }
+    Gpu {
+        device: device.clone(),
+        format,
+        raymarch,
+        slice_cs,
+        slice_fs,
+        blit,
+        blit_layout,
+        sampler,
+        uniforms,
+        params,
+        slice,
+        bind_group,
+        target: None,
+        timer: Timer::new(device, queue),
+    }
 }

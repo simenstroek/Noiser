@@ -19,15 +19,30 @@ fn slice_point(uv: vec2f) -> vec3f {
     }
 }
 
+var<workgroup> wg_lo: atomic<u32>;
+var<workgroup> wg_hi: atomic<u32>;
+
+// Min/max is reduced per workgroup first, so only one thread in 64 touches the global atomics.
 @compute @workgroup_size(8, 8)
-fn cs_slice(@builtin(global_invocation_id) id: vec3u) {
+fn cs_slice(@builtin(global_invocation_id) id: vec3u, @builtin(local_invocation_index) li: u32) {
+    if (li == 0u) {
+        atomicStore(&wg_lo, 0xffffffffu);
+        atomicStore(&wg_hi, 0u);
+    }
+    workgroupBarrier();
     let n = u.slice_res;
-    if (id.x >= n || id.y >= n) { return; }
-    let v = graph_density(slice_point((vec2f(id.xy) + 0.5) / f32(n)));
-    slice.vals[id.y * n + id.x] = v;
-    if (v == v) { // skip NaN
-        atomicMin(&slice.lo, ord(v));
-        atomicMax(&slice.hi, ord(v));
+    if (id.x < n && id.y < n) {
+        let v = graph_density(slice_point((vec2f(id.xy) + 0.5) / f32(n)));
+        slice.vals[id.y * n + id.x] = v;
+        if (v == v) { // skip NaN
+            atomicMin(&wg_lo, ord(v));
+            atomicMax(&wg_hi, ord(v));
+        }
+    }
+    workgroupBarrier();
+    if (li == 0u) {
+        atomicMin(&slice.lo, atomicLoad(&wg_lo));
+        atomicMax(&slice.hi, atomicLoad(&wg_hi));
     }
 }
 

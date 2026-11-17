@@ -33,7 +33,8 @@ fn base_sdf(p: vec3f) -> f32 { return unit_prim(p / u.prim_size) * u.prim_size; 
 
 // The displaced surface lies where base_sdf is between push_min and push_max. Beyond that shell
 // (plus a margin, so the bound never looks like a hit) a bound is enough and the graph is skipped.
-const SHELL_MARGIN: f32 = 0.1;
+// Must stay above the hit threshold (0.5 px × t), which is ~0.01 at the far end of the bounds.
+const SHELL_MARGIN: f32 = 0.02;
 
 fn displaced(p: vec3f, b: f32) -> f32 {
     return b - u.amount * graph_density(p / u.tile_size);
@@ -87,24 +88,30 @@ fn solid(ro: vec3f, rd: vec3f, bg: vec3f) -> vec3f {
     let span = bounds(ro, rd);
     if (span.x > span.y) { return bg; }
     var t = span.x;
-    var t_out = t; // last t known to be outside
+    var t_out = t; // last t known to be outside, and the field there
+    var d_out = 0.0;
     var hit = false;
     for (var i = 0; i < 300; i++) {
         let d = field(ro + rd * t);
         if (d < 0.0 && i > 0) {
-            // Overshot into the surface (displacement breaks the distance bound): bisect back to it.
+            // Overshot into the surface (displacement breaks the distance bound). The field is
+            // close to linear over one step, so a few false-position steps land on it.
             var a = t_out;
+            var fa = d_out;
             var b = t;
-            for (var k = 0; k < 12; k++) {
-                let m = 0.5 * (a + b);
-                if (field(ro + rd * m) > 0.0) { a = m; } else { b = m; }
+            var fb = d;
+            for (var k = 0; k < 4; k++) {
+                let m = a + (b - a) * fa / (fa - fb);
+                let fm = field(ro + rd * m);
+                if (fm > 0.0) { a = m; fa = fm; } else { b = m; fb = fm; }
             }
-            t = 0.5 * (a + b);
+            t = a + (b - a) * fa / (fa - fb);
             hit = true;
             break;
         }
         if (d < 0.5 * pix * t) { hit = true; break; }
         t_out = t;
+        d_out = d;
         t += d * u.step_scale;
         if (t > span.y) { break; }
     }

@@ -68,6 +68,13 @@ Node graph (centre) · 3D view (primitive picker, solid/cloud, displacement amou
 - **Blue noise** is a lookup into precomputed void-and-cluster tables (4³, 8³, 16³, 32³) in `assets/bluenoise.bin`. It tiles only when the scale is a multiple of 4. The seed shifts the lookup by whole cells.
 - **GPU tests** (`src/gpu_tests.rs`): seam check per axis, a 1e-4-step continuity check across the tile edge, and a signed-range check. `cargo test noise_contact_sheet -- --ignored` writes `target/noise_sheet.pgm` for a visual check.
 
+### Performance notes (2026-11-17)
+- **Measure** with the in-app overlay (GPU timestamps for the 3D pass and slice pass, plus CPU time for the UI), or headless with `cargo test --release bench_preview -- --ignored --nocapture` (1000×1000, median of 30 frames).
+- **Overlay numbers depend on GPU clocks.** egui only redraws on input, so the GPU idles and drops its clocks. The first frames after a pause can read 3–5× slower than the steady-state numbers in the benchmark.
+- **Noise inner loops:** avoid integer `%` per neighbour (wrap the base cell once, then `wrap_near`). Avoid loops over local arrays (they spill out of registers; write corners out by hand). Hash only what's needed. These changes alone took the 3D view from 24 to 10 ms and the slice from 1.2 to 0.24 ms.
+- **Raymarch:** noise runs only in the displacement shell (margin 0.02). Overshoot is fixed with 4 false-position steps rather than 12 bisection steps. The default step safety is 0.9, since overshoot is cheap to correct.
+- **Cloud mode costs about 10× solid** (69 ms at 1 MP with SimpleTestGraph): 128 steps × (1 + 5 shadow taps) of full graph calls inside the shape. The structural fix is the baked 3D texture (milestone 5 groundwork).
+
 ### UI conventions
 - **Every value input has a reset-to-default button** in front of it (the `row`/`reset` helpers in `main.rs`).
 - **Interface icons come from Material Symbols** via Iconify (https://icon-sets.iconify.design/material-symbols/). Save each icon as an SVG in `assets/icons/` with `currentColor` replaced by white so egui can tint it. License: `assets/icons/LICENSE.txt`.
