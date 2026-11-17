@@ -39,7 +39,7 @@ a node that breaks tiling gets an orange outline and says why in the details pan
 - **Math**: add, subtract, multiply, divide, min, max, power, smooth min and max, dot product, absolute, ridge. The
   operator is a dropdown on the node (the mouse wheel over it steps through them). A float with a vector
   gives a vector.
-- **Remap** (with optional clamp), **Curve** (a response curve through up to 16 points; linear, smooth or step), **Value**, **Position**, **Normal** (gradient of a field).
+- **Remap** (with optional clamp), **Curve** (a response curve through up to 16 points; linear, smooth, step or cubic), **Value**, **Position**, **Normal** (gradient of a field).
 - **Outputs**: Density and Normal.
 - Pins and wires are blue for floats and yellow for vectors.
 
@@ -66,7 +66,8 @@ OBJ or PLY of the same surface (as many samples along the longest side as you as
 bits removed and the mesh's own size and position restored. The mesh can be made of overlapping parts. A
 *displacement mask* varies how strongly the noise acts on each part of the mesh, as a weighted sum of terms: a ramp
 along an axis, which way the surface faces, occlusion, thickness and curvature. See `PLAN.md` for how it works and
-its limits.
+its limits. *Show mask on the mesh* colours the preview by mask strength. Open surfaces (terrains, leaves, sheets)
+work too: the side the normals face is outside, the other side is inside.
 
 **Batch.** Once a graph and settings look right on one mesh, *Batch displace meshes* applies them to many OBJ
 files at once: pick the files and an output folder, choose the same seed for all, the global seed plus one per
@@ -75,13 +76,26 @@ scaled to a unit sphere first, the noise is the same size relative to each mesh.
 reported and the rest continue; nothing is ever overwritten. From a script:
 `noiser.exe graph.noisegraph --batch-out DIR --batch-file a.obj --batch-file b.obj`.
 
+**Headless.** `noiser.exe --headless graph.noisegraph --batch-out DIR --batch-dir SRC` does the same without a window
+(options: `--amount`, `--tile`, `--size`, `--seed`, `--seed-mode same|increment|random`, `--res`, `--grid-res`,
+`--format obj|ply`, `--cull`, `--mask KIND`). Progress goes to the console and to `noiser-batch.log` in the output
+folder; the exit code is 1 if any mesh failed.
+
+**Editing.** Undo and redo, copy and paste of nodes (also between two Noiser windows), duplicate, mute (bypass) a
+node with M, frame the selection with F or everything with Home, search in the add menu, File > New from template
+(clouds, ridged mountains, cracked rock, brick wall, gyroid foam), Open recent, drag a `.noisegraph` or `.obj` file
+onto the window, and a prompt before closing with unsaved changes (the window title shows an asterisk).
+Edit > Preferences holds the interface scale and the backup switch; Help > Keyboard shortcuts lists the keys.
+The preview has material settings (colour, specular, roughness, soft shadows), a render resolution (full, half,
+quarter) and a march step limit; none of them affect exports.
+
 ## Controls
 
 | | |
 |---|---|
 | Node graph | Middle-drag pans, scroll zooms, left-drag on empty space box-selects, right-click adds a node |
 | | Drag from a pin to connect; drag a connected input away to disconnect; drop a wire on empty space to pick a node for it |
-| | Delete removes the selection, Ctrl+D duplicates it at the cursor |
+| | Delete removes the selection, Ctrl+D duplicates it at the cursor, Ctrl+C / Ctrl+V copy and paste, M mutes, F / Home frame |
 | 3D view | Drag orbits, scroll zooms |
 | Slice view | Scroll moves the slice |
 
@@ -93,5 +107,5 @@ reported and the rest continue; nothing is ever overwritten. From a script:
 
 ## Roadmap
 
-Next: Truchet pipes, then rendering and material settings for the viewport (march steps,
-lighting, material colour and roughness). See `PLAN.md` for the details.
+Next: an environment map and lighting setups for the viewport, vertex-colour masks for meshes, comment frames in
+the graph editor, exposed graph parameters for batch work. See `PLAN.md` for the details.
