@@ -54,7 +54,7 @@ A constant: `value` is a number (float) or `[x, y, z]` (vector).
 
 ### `math`
 `fn` is one of `add`, `subtract`, `multiply`, `divide`, `min`, `max`, `power`, `smooth_min`,
-`smooth_max`, `dot`, `absolute`, `ridge`. Operands `a` and `b` are
+`smooth_max`, `dot`, `absolute`, `ridge`, `floor`, `fract`, `sine`, `sqrt`, `modulo`, `greater`. Operands `a` and `b` are
 either `{"node": id}` or a number. The result is a vector if either operand is a vector, and
 then both operands are converted to vectors and the op applies per component.
 
@@ -66,6 +66,9 @@ then both operands are converted to vectors and the op applies per component.
   smooth minimum). `smooth_max(a, b, k) = −smooth_min(−a, −b, k)`.
 - `dot` converts both operands to vectors and returns the float `a·b`. Its `type` is `float`.
 - `absolute` and `ridge` are unary (`b` is ignored): `|a|` and `1 − |a|`, per component.
+- `floor`, `fract`, `sine` and `sqrt` are unary, per component: `floor(a)`, `a − floor(a)`, `sin(a)` (radians) and
+  `sqrt(max(a, 0))`.
+- `modulo` is `a − b·floor(a / b)` (the sign of `b`), 0 where `b` is 0. `greater` is 1 where `a > b`, else 0.
 
 ### `remap`
 `value`, `from_min`, `from_max`, `to_min`, `to_max` (each a number or `{"node": id}`, converted to float),

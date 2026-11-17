@@ -52,6 +52,12 @@ pub fn ops(g: &Graph, seed: u32) -> Result<Value, String> {
                         MathOp::Dot => "dot",
                         MathOp::Absolute => "absolute",
                         MathOp::Ridge => "ridge",
+                        MathOp::Floor => "floor",
+                        MathOp::Fract => "fract",
+                        MathOp::Sine => "sine",
+                        MathOp::Sqrt => "sqrt",
+                        MathOp::Modulo => "modulo",
+                        MathOp::Greater => "greater",
                     };
                     // An unconnected operand is its constant.
                     let operand = |port, c: f32| g.input(id, port).map_or(json!(c), |s| json!({"node": s}));

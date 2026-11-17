@@ -314,6 +314,12 @@ impl Gen<'_> {
                     MathOp::Dot => format!("dot({a}, {b})"),
                     MathOp::Absolute => format!("abs({a})"),
                     MathOp::Ridge => format!("{} - abs({a})", convert("1.0", Ty::F, opty)),
+                    MathOp::Floor => format!("floor({a})"),
+                    MathOp::Fract => format!("fract({a})"),
+                    MathOp::Sine => format!("sin({a})"),
+                    MathOp::Sqrt => format!("sqrt(max({a}, {zero}))"),
+                    MathOp::Modulo => format!("select({a} - {b} * floor({a} / {b}), {zero}, {b} == {zero})"),
+                    MathOp::Greater => format!("select({zero}, {}, {a} > {b})", convert("1.0", Ty::F, opty)),
                 };
                 (ty, e)
             }

@@ -60,10 +60,22 @@ pub enum MathOp {
     Absolute,
     /// 1 - |a| (unary): ridged noise when applied to noise.
     Ridge,
+    /// floor(a) (unary): steps and terraces when applied to a scaled field.
+    Floor,
+    /// a - floor(a) (unary): the fractional part, a sawtooth.
+    Fract,
+    /// sin(a) (unary, radians).
+    Sine,
+    /// sqrt(max(a, 0)) (unary).
+    Sqrt,
+    /// a - b * floor(a / b), 0 when b is 0 (the result has the sign of b).
+    Modulo,
+    /// 1 where a > b, else 0.
+    Greater,
 }
 
 impl MathOp {
-    pub const ALL: [MathOp; 12] = [
+    pub const ALL: [MathOp; 18] = [
         MathOp::Add,
         MathOp::Subtract,
         MathOp::Multiply,
@@ -76,6 +88,12 @@ impl MathOp {
         MathOp::Dot,
         MathOp::Absolute,
         MathOp::Ridge,
+        MathOp::Floor,
+        MathOp::Fract,
+        MathOp::Sine,
+        MathOp::Sqrt,
+        MathOp::Modulo,
+        MathOp::Greater,
     ];
 
     /// Name shown in the operator dropdown.
@@ -93,6 +111,12 @@ impl MathOp {
             MathOp::Dot => "Dot product",
             MathOp::Absolute => "Absolute",
             MathOp::Ridge => "Ridge (1 − |a|)",
+            MathOp::Floor => "Floor",
+            MathOp::Fract => "Fraction",
+            MathOp::Sine => "Sine",
+            MathOp::Sqrt => "Square root",
+            MathOp::Modulo => "Modulo",
+            MathOp::Greater => "Greater than",
         }
     }
 
@@ -103,7 +127,7 @@ impl MathOp {
 
     /// Absolute and Ridge use only the first input.
     pub fn is_unary(self) -> bool {
-        matches!(self, MathOp::Absolute | MathOp::Ridge)
+        matches!(self, MathOp::Absolute | MathOp::Ridge | MathOp::Floor | MathOp::Fract | MathOp::Sine | MathOp::Sqrt)
     }
 }
 
@@ -865,6 +889,9 @@ impl Graph {
                         MathOp::Multiply if ta == Coord && tb == Const && whole_const(1, *b) => Coord,
                         MathOp::Multiply if tb == Coord && ta == Const && whole_const(0, *a) => Coord,
                         MathOp::Multiply => Broken("position multiplied by a non-whole or non-constant value".into()),
+                        // The fractional part of a position repeats every tile (as does a modulo 1).
+                        MathOp::Fract => Periodic,
+                        MathOp::Modulo if ta == Coord && tb == Const && self.input(id, 1).is_none() && *b == 1.0 => Periodic,
                         _ => Broken(format!("{op:?} on a position does not tile")),
                     },
                 };
@@ -1067,6 +1094,12 @@ fn math_range(op: MathOp, (a0, a1): Range, (b0, b1): Range, (_, k1): Range) -> R
             let m = 3.0 * a0.abs().max(a1.abs()) * b0.abs().max(b1.abs());
             if m.is_finite() { (-m, m) } else { UNBOUNDED }
         }
+        MathOp::Floor => (a0.floor(), a1.floor()),
+        MathOp::Fract | MathOp::Greater => (0.0, 1.0),
+        MathOp::Sine => (-1.0, 1.0),
+        MathOp::Sqrt => (a0.max(0.0).sqrt(), a1.max(0.0).sqrt()),
+        MathOp::Modulo if b0 > 0.0 => (0.0, b1),
+        MathOp::Modulo => UNBOUNDED,
         MathOp::Absolute | MathOp::Ridge => {
             let abs = (if a0 <= 0.0 && a1 >= 0.0 { 0.0 } else { a0.abs().min(a1.abs()) }, a0.abs().max(a1.abs()));
             if op == MathOp::Absolute { abs } else { (1.0 - abs.1, 1.0 - abs.0) }

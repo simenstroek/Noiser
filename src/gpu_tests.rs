@@ -478,6 +478,16 @@ fn new_math_ops_match_reference() {
     g.connect(w, m, 2);
     g.connect(m, o, 0);
     near(eval(&gpu, &g, &at)[0], 1.2 + 0.6f32.powi(3) * 0.5 / 6.0, "linked blend width");
+    near(math(Floor, -2.5, 9.0, 0.5), -3.0, "floor of a negative");
+    near(math(Fract, -2.25, 9.0, 0.5), 0.75, "fraction of a negative");
+    near(math(Sine, std::f32::consts::FRAC_PI_2, 9.0, 0.5), 1.0, "sine");
+    near(math(Sqrt, 9.0, 0.0, 0.5), 3.0, "square root");
+    near(math(Sqrt, -4.0, 0.0, 0.5), 0.0, "square root of a negative is 0");
+    near(math(Modulo, -1.0, 3.0, 0.5), 2.0, "modulo takes the sign of the divisor");
+    near(math(Modulo, 7.5, 2.0, 0.5), 1.5, "modulo");
+    near(math(Modulo, 7.5, 0.0, 0.5), 0.0, "modulo by zero");
+    near(math(Greater, 2.0, 1.0, 0.5), 1.0, "greater");
+    near(math(Greater, 1.0, 1.0, 0.5), 0.0, "equal is not greater");
     near(math(Absolute, -2.5, 9.0, 0.5), 2.5, "absolute of a negative");
     near(math(Absolute, 2.5, 9.0, 0.5), 2.5, "absolute of a positive");
     near(math(Ridge, 0.25, 9.0, 0.5), 0.75, "ridge");
