@@ -205,9 +205,12 @@ impl App {
         let mut mask_terms = Vec::new();
         let mut show_mask = false;
         let mut lighting_arg: Option<String> = None;
+        let mut select_arg: Option<u32> = None;
         while let Some(a) = args.next() {
             if a == "--mesh" {
                 mesh_arg = args.next().map(std::path::PathBuf::from);
+            } else if a == "--select" {
+                select_arg = args.next().and_then(|n| n.parse::<u32>().ok());
             } else if a == "--lighting" {
                 lighting_arg = args.next();
             } else if a == "--show-mask" {
@@ -303,6 +306,9 @@ impl App {
         }
         app.mesh_mask.terms = mask_terms;
         app.pv.show_mask = show_mask;
+        if let Some(n) = select_arg.filter(|n| app.graph.nodes.contains_key(n)) {
+            app.editor.selected.insert(n);
+        }
         if let Some(p) = lighting_arg.and_then(|n| Lighting::PRESETS.iter().find(|(l, _)| l.eq_ignore_ascii_case(&n))) {
             app.pv.lighting = (p.1)();
         }
@@ -1134,9 +1140,6 @@ impl eframe::App for App {
         });
         egui::Panel::right("props").default_size(320.0).show(ui, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| {
-                preview_props(ui, &mut self.pv, self.mesh.is_some());
-                self.mesh_props(ui);
-                ui.separator();
                 let sel: Vec<_> = self.editor.selected.iter().copied().collect();
                 match sel.as_slice() {
                     [id] if self.graph.nodes.contains_key(id) => {
@@ -1153,6 +1156,9 @@ impl eframe::App for App {
                     [] => _ = ui.weak("Select a node to edit it."),
                     _ => _ = ui.weak(format!("{} nodes selected", sel.len())),
                 }
+                ui.separator();
+                preview_props(ui, &mut self.pv, self.mesh.is_some());
+                self.mesh_props(ui);
             });
         });
         self.graph.prune_edges(); // a Math node switched away from smooth min/max loses its third input
