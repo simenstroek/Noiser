@@ -891,7 +891,8 @@ fn node_props(ui: &mut egui::Ui, kind: &mut NodeKind) {
 }
 
 const PICKS_KEY: &str = "node_picks";
-const SHORTCUTS: [(&str, &str); 16] = [
+const SHORTCUTS: [(&str, &str); 17] = [
+    ("Ctrl+S / Ctrl+Shift+S / Ctrl+O", "Save / Save As / Open"),
     ("Ctrl+Z", "Undo"),
     ("Ctrl+Y / Ctrl+Shift+Z", "Redo"),
     ("Ctrl+D", "Duplicate the selected nodes at the cursor (graph editor)"),
@@ -1060,6 +1061,13 @@ impl eframe::App for App {
                 ui.ctx().request_repaint_after(backup::INTERVAL); // flush the held-back change
             }
         }
+        // File shortcuts work even with a text field focused (Ctrl+S would otherwise do nothing there).
+        let (ctrl_s, ctrl_o, ctrl_shift) = ui.input(|i| (i.modifiers.command && i.key_pressed(egui::Key::S), i.modifiers.command && i.key_pressed(egui::Key::O), i.modifiers.shift));
+        if ctrl_s {
+            self.save(ctrl_shift);
+        } else if ctrl_o {
+            self.open();
+        }
         // Ctrl+Z / Ctrl+Y (or Ctrl+Shift+Z), unless a text field has the keyboard.
         if !ui.ctx().egui_wants_keyboard_input() {
             let (z, y, shift) = ui.input(|i| (i.modifiers.command && i.key_pressed(egui::Key::Z), i.modifiers.command && i.key_pressed(egui::Key::Y), i.modifiers.shift));
@@ -1108,7 +1116,7 @@ impl eframe::App for App {
                             }
                         }
                     });
-                    if ui.button("Open…").clicked() {
+                    if ui.add(egui::Button::new("Open…").shortcut_text("Ctrl+O")).clicked() {
                         self.open();
                     }
                     ui.add_enabled_ui(!self.recent.is_empty(), |ui| {
@@ -1126,10 +1134,10 @@ impl eframe::App for App {
                             }
                         });
                     });
-                    if ui.button("Save").clicked() {
+                    if ui.add(egui::Button::new("Save").shortcut_text("Ctrl+S")).clicked() {
                         self.save(false);
                     }
-                    if ui.button("Save As…").clicked() {
+                    if ui.add(egui::Button::new("Save As…").shortcut_text("Ctrl+Shift+S")).clicked() {
                         self.save(true);
                     }
                     ui.separator();
