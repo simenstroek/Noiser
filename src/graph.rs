@@ -15,8 +15,8 @@ pub enum MathOp {
     Max,
 }
 
-/// The discriminant is the `kind` constant noise.wgsl switches on.
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+/// The discriminant names the generated fBm function (`noise_k{n}`, see codegen.rs).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum NoiseKind {
     Perlin = 0,
     Simplex = 1,

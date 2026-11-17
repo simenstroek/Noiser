@@ -2,9 +2,11 @@ mod backup;
 mod bluenoise;
 mod codegen;
 mod editor;
+mod export;
 mod graph;
 #[cfg(test)]
 mod gpu_tests;
+mod vdb;
 mod view;
 
 use eframe::{egui, egui_wgpu};
@@ -58,8 +60,10 @@ struct App {
     /// File the graph was last opened from / saved to.
     path: Option<std::path::PathBuf>,
     status: String,
-    /// WGSL the current pipeline was built from; a different compile result triggers a rebuild.
-    built_wgsl: Option<String>,
+    /// WGSL of the installed preview pipeline, and the graph parameters laid out for it.
+    built: Option<(String, Vec<f32>)>,
+    /// A pipeline being built on a worker thread, for this WGSL.
+    compiling: Option<(String, std::sync::mpsc::Receiver<view::Gpu>)>,
     yaw: f32,
     pitch: f32,
     dist: f32,
@@ -71,6 +75,15 @@ struct App {
     /// The graph as last opened, saved or created. Backups only run while the graph differs from it,
     /// so an untouched session never shadows a crashed session's real work.
     saved: Graph,
+    export_open: bool,
+    export: export::Settings,
+    export_job: Option<ExportJob>,
+}
+
+/// An export running on a worker thread.
+struct ExportJob {
+    progress: export::Progress,
+    done: std::sync::mpsc::Receiver<Result<String, String>>,
 }
 
 impl App {
@@ -109,14 +122,119 @@ impl App {
             editor,
             path,
             status,
-            built_wgsl: None,
+            built: None,
+            compiling: None,
             yaw: 0.6,
             pitch: 0.35,
             dist: 3.5,
             pv: Preview::default(),
             session,
             recovery,
+            export_open: false,
+            export: export::Settings::default(),
+            export_job: None,
         }
+    }
+
+    fn export_window(&mut self, ctx: &egui::Context) {
+        use export::{Format, Kind, Layout, Levels, Output};
+        // Finish a running export.
+        if let Some(job) = &self.export_job {
+            match job.done.try_recv() {
+                Ok(r) => {
+                    self.status = r.unwrap_or_else(|e| format!("Export failed: {e}"));
+                    self.export_job = None;
+                }
+                Err(_) => ctx.request_repaint_after(std::time::Duration::from_millis(100)),
+            }
+        }
+        if !self.export_open {
+            return;
+        }
+        let mut open = true;
+        let mut start = false;
+        egui::Window::new("Export").open(&mut open).resizable(false).show(ctx, |ui| {
+            let s = &mut self.export;
+            let d = export::Settings::default();
+            row(ui, &mut s.kind, d.kind, |ui, v| {
+                ui.selectable_value(v, Kind::Image2d, "2D image");
+                ui.selectable_value(v, Kind::SliceGrid, "3D slice grid");
+                ui.selectable_value(v, Kind::Vdb, "3D OpenVDB");
+            });
+            row(ui, &mut s.output, d.output, |ui, v| {
+                ui.selectable_value(v, Output::Density, "Density");
+                ui.selectable_value(v, Output::Normal, "Normal");
+            });
+            let res_default = if s.kind == Kind::Image2d { 1024 } else { 128 };
+            row(ui, &mut s.res, res_default, |ui, v| _ = ui.add(egui::DragValue::new(v).range(1..=16384).suffix(" px").speed(4.0)).on_hover_text("Texels per tile side"));
+            if s.kind != Kind::Vdb {
+                row(ui, &mut s.format, d.format, |ui, v| {
+                    ui.selectable_value(v, Format::Png8, "PNG 8-bit");
+                    ui.selectable_value(v, Format::Png16, "PNG 16-bit");
+                    ui.selectable_value(v, Format::Exr32, "EXR 32-bit");
+                });
+                if s.format != Format::Exr32 && s.output == Output::Density {
+                    row(ui, &mut s.levels, d.levels, |ui, v| {
+                        ui.selectable_value(v, Levels::GraphRange, "Graph range").on_hover_text("0–1 covers the graph's guaranteed range; the same for every export");
+                        ui.selectable_value(v, Levels::DataMinMax, "Data min/max").on_hover_text("0–1 covers this export's own values");
+                    });
+                }
+            }
+            if s.kind == Kind::SliceGrid {
+                row(ui, &mut s.layout, d.layout, |ui, v| {
+                    ui.selectable_value(v, Layout::Square, "Square grid");
+                    ui.selectable_value(v, Layout::Vertical, "Vertical strip");
+                });
+            }
+            match s.kind {
+                Kind::Image2d => _ = ui.weak(format!("Slice {} = {:.3}, from the slice view.", ["X", "Y", "Z"][self.pv.slice_axis as usize], self.pv.slice_pos)),
+                Kind::Vdb => _ = ui.weak("Float grid \"density\" with raw signed values, 1 tile = 1 unit."),
+                Kind::SliceGrid => {}
+            }
+            if s.format == Format::Exr32 && s.kind != Kind::Vdb {
+                ui.weak("EXR keeps raw signed values.");
+            }
+            let (file, _) = s.estimate();
+            let dims = s.image_size().map_or(format!("{0}×{0}×{0} voxels", s.res), |(w, h)| format!("{w}×{h} px"));
+            ui.label(format!("{dims}, about {:.1} MB", file as f64 / (1 << 20) as f64));
+            for w in s.warnings() {
+                ui.colored_label(editor::ORANGE, format!("⚠ {w}"));
+            }
+            ui.separator();
+            match &self.export_job {
+                Some(job) => {
+                    let p = job.progress.load(std::sync::atomic::Ordering::Relaxed) as f32 / 1000.0;
+                    ui.add(egui::ProgressBar::new(p).show_percentage());
+                }
+                None => start = ui.button("Export…").clicked(),
+            }
+        });
+        self.export_open = open;
+        if start {
+            self.start_export();
+        }
+    }
+
+    fn start_export(&mut self) {
+        let mut s = self.export.clone();
+        s.seed = self.pv.seed;
+        s.axis = self.pv.slice_axis;
+        s.pos = self.pv.slice_pos;
+        let name = self.path.as_ref().and_then(|p| p.file_stem()).map_or("noise".into(), |n| n.to_string_lossy().into_owned());
+        let Some(path) = rfd::FileDialog::new().add_filter("Export", &[s.extension()]).set_file_name(format!("{name}.{}", s.extension())).save_file() else { return };
+        // Export always evaluates the full graph: no preview, no caches. Compiling happens on the
+        // worker thread too, since the driver can take seconds.
+        let graph = self.graph.clone();
+        let range = graph.density_range();
+        let (device, queue) = (self.rs.device.clone(), self.rs.queue.clone());
+        let progress = export::Progress::default();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let p = progress.clone();
+        std::thread::spawn(move || {
+            let r = export::Evaluator::new(&device, &queue, &graph, s.seed).and_then(|ev| export::run(&ev, &s, range, &path, &p));
+            let _ = tx.send(r);
+        });
+        self.export_job = Some(ExportJob { progress, done: rx });
     }
 
     /// Asks whether to restore the backup of a session that didn't exit cleanly.
@@ -396,6 +514,7 @@ impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let cpu_start = std::time::Instant::now();
         self.recovery_prompt(&ui.ctx().clone());
+        self.export_window(&ui.ctx().clone());
         if let Some(s) = self.session.as_mut().filter(|_| self.graph != self.saved) {
             if s.backup(&self.graph, self.path.as_deref()) {
                 ui.ctx().request_repaint_after(backup::INTERVAL); // flush the held-back change
@@ -421,6 +540,10 @@ impl eframe::App for App {
                     }
                     if ui.button("Save As…").clicked() {
                         self.save(true);
+                    }
+                    ui.separator();
+                    if ui.button("Export…").clicked() {
+                        self.export_open = true;
                     }
                 });
                 ui.weak(&self.status);
@@ -458,11 +581,31 @@ impl eframe::App for App {
             Ok(c) if c.params.len() > MAX_PARAMS => Err(format!("graph uses {} parameters (max {MAX_PARAMS})", c.params.len())),
             r => r,
         };
+        // Pipelines compile on a worker thread (the driver can take seconds); until a new one is
+        // ready the previous pipeline keeps drawing with the parameters that belong to it.
+        if let Some((wgsl, rx)) = &self.compiling {
+            match rx.try_recv() {
+                Ok(gpu) => {
+                    self.rs.renderer.write().callback_resources.insert(gpu);
+                    self.built = Some((wgsl.clone(), Vec::new()));
+                    self.compiling = None;
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => ui.ctx().request_repaint_after(std::time::Duration::from_millis(50)),
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => self.compiling = None,
+            }
+        }
         if let Ok(c) = &compiled {
-            if self.built_wgsl.as_deref() != Some(&c.wgsl) {
-                let gpu = view::build(&self.rs.device, &self.rs.queue, self.rs.target_format, &c.wgsl);
-                self.rs.renderer.write().callback_resources.insert(gpu);
-                self.built_wgsl = Some(c.wgsl.clone());
+            let built = self.built.as_ref().is_some_and(|b| b.0 == c.wgsl);
+            let queued = self.compiling.as_ref().is_some_and(|p| p.0 == c.wgsl);
+            if !built && !queued {
+                let (tx, rx) = std::sync::mpsc::channel();
+                let (device, queue, format, wgsl) = (self.rs.device.clone(), self.rs.queue.clone(), self.rs.target_format, c.wgsl.clone());
+                std::thread::spawn(move || _ = tx.send(view::build(&device, &queue, format, &wgsl)));
+                self.compiling = Some((c.wgsl.clone(), rx)); // a superseded build just finishes and is dropped
+                ui.ctx().request_repaint_after(std::time::Duration::from_millis(50));
+            }
+            if let Some(b) = self.built.as_mut().filter(|b| b.0 == c.wgsl) {
+                b.1 = c.params.clone();
             }
         }
         egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| {
@@ -481,14 +624,22 @@ impl eframe::App for App {
                 self.pv.slice_pos = (self.pv.slice_pos + scroll * 0.0005).clamp(0.0, 1.0);
             }
             match compiled {
-                Ok(c) => {
+                Ok(_) => {
                     let uniforms = self.uniforms(r3d, rslice, range);
                     let painter = ui.painter();
                     let px = (r3d.size() * ui.ctx().pixels_per_point()).round();
-                    let cb3d = view::View3d { uniforms, params: c.params.clone(), size: [px.x as u32, px.y as u32] };
-                    painter.add(egui_wgpu::Callback::new_paint_callback(r3d, cb3d));
-                    let cbs = view::SliceView { uniforms, params: c.params };
-                    painter.add(egui_wgpu::Callback::new_paint_callback(rslice, cbs));
+                    // Draw with whichever pipeline is installed, using its own parameter layout.
+                    // Empty params: installed for a graph that has since changed again; wait for its successor.
+                    if let Some((_, params)) = self.built.as_ref().filter(|b| !b.1.is_empty()) {
+                        let cb3d = view::View3d { uniforms, params: params.clone(), size: [px.x as u32, px.y as u32] };
+                        painter.add(egui_wgpu::Callback::new_paint_callback(r3d, cb3d));
+                        let cbs = view::SliceView { uniforms, params: params.clone() };
+                        painter.add(egui_wgpu::Callback::new_paint_callback(rslice, cbs));
+                    }
+                    if self.compiling.is_some() {
+                        let at = r3d.center_bottom() - egui::vec2(0.0, 14.0);
+                        painter.text(at, egui::Align2::CENTER_BOTTOM, "Compiling shader…", egui::FontId::proportional(14.0), egui::Color32::from_rgb(255, 210, 120));
+                    }
                     let axis = ["X", "Y", "Z"][self.pv.slice_axis as usize];
                     let mut label = format!("{axis} = {:.3}", self.pv.slice_pos);
                     if let Some(node) = self.editor.preview.and_then(|id| self.graph.nodes.get(&id)) {

@@ -67,11 +67,13 @@ fn bounds(ro: vec3f, rd: vec3f) -> vec2f {
 }
 
 fn normal_at(p: vec3f, e: f32) -> vec3f {
-    // IQ tetrahedral normal.
-    let k = vec2f(1.0, -1.0);
-    return normalize(
-        k.xyy * field(p + k.xyy * e) + k.yyx * field(p + k.yyx * e) +
-        k.yxy * field(p + k.yxy * e) + k.xxx * field(p + k.xxx * e));
+    // IQ tetrahedral normal, as a loop so the graph is inlined once (driver compile time).
+    var n = vec3f(0.0);
+    for (var k = 0u; k < 4u; k++) {
+        let o = tetra(k);
+        n += o * field(p + o * e);
+    }
+    return normalize(n);
 }
 
 const FOCAL: f32 = 1.8;

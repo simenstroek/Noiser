@@ -4,7 +4,7 @@
 //! are read from the storage array `P` (filled from `Compiled::params`), so editing a value never
 //! changes the WGSL text. Only topology changes do, and the app rebuilds the pipeline when it differs.
 
-use crate::graph::{Graph, MathOp, NodeId, NodeKind};
+use crate::graph::{Graph, MathOp, NodeId, NodeKind, NoiseKind};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write;
 
@@ -55,6 +55,8 @@ struct Gen<'a> {
     /// Cone functions already written (keyed by their root node).
     done: BTreeSet<NodeId>,
     building: BTreeSet<NodeId>,
+    /// Noise kinds used, each getting its own fBm function.
+    kinds: BTreeSet<NoiseKind>,
     out: String,
 }
 
@@ -82,7 +84,7 @@ pub fn compile(g: &Graph) -> Result<Compiled, String> {
         }
     }
 
-    let mut cg = Gen { g, slots, types: BTreeMap::new(), done: BTreeSet::new(), building: BTreeSet::new(), out: String::new() };
+    let mut cg = Gen { g, slots, types: BTreeMap::new(), done: BTreeSet::new(), building: BTreeSet::new(), kinds: BTreeSet::new(), out: String::new() };
     let density = g.find(|k| *k == NodeKind::OutDensity).and_then(|o| g.input(o, 0));
     let normal = g.find(|k| *k == NodeKind::OutNormal).and_then(|o| g.input(o, 0));
 
@@ -108,19 +110,36 @@ pub fn compile(g: &Graph) -> Result<Compiled, String> {
     if params.is_empty() {
         params.push(0.0); // storage buffers cannot be empty
     }
-    Ok(Compiled { wgsl: cg.out, params })
+    let mut wgsl: String = cg.kinds.iter().map(|&k| fbm_function(k)).collect();
+    wgsl += &cg.out;
+    Ok(Compiled { wgsl, params })
 }
 
 /// Body of a function returning the normalized tetrahedral gradient (IQ) of the float field `sample(q)`.
+/// A loop, so the field is inlined once rather than four times (driver compile time).
 fn tetra_body(sample: impl Fn(&str) -> String) -> String {
-    let s = |o: &str| sample(&format!("p + vec3f({o}) * e"));
     format!(
-        "let e = 1e-3; return safe_normalize(vec3f(1.0, -1.0, -1.0) * {} + vec3f(-1.0, -1.0, 1.0) * {} + vec3f(-1.0, 1.0, -1.0) * {} + vec3f(1.0) * {});",
-        s("1.0, -1.0, -1.0"),
-        s("-1.0, -1.0, 1.0"),
-        s("-1.0, 1.0, -1.0"),
-        s("1.0, 1.0, 1.0"),
+        "let e = 1e-3; var g = vec3f(0.0); for (var k = 0u; k < 4u; k++) {{ let o = tetra(k); g += o * {}; }} return safe_normalize(g);",
+        sample("p + o * e")
     )
+}
+
+const FBM_TEMPLATE: &str = include_str!("noise_fbm.wgsl");
+
+/// The fBm wrapper for one noise kind (see noise_fbm.wgsl).
+fn fbm_function(kind: NoiseKind) -> String {
+    let base = match kind {
+        NoiseKind::Perlin => "clamp(perlin(x, period, seed + o), -1.0, 1.0)",
+        NoiseKind::Simplex => "clamp(simplex(x, period, seed + o), -1.0, 1.0)",
+        NoiseKind::Voronoi | NoiseKind::VoronoiFractal => "cells(x, period, seed + o, true).z",
+        NoiseKind::Worley => "worley(x, period, seed + o, feature)",
+        NoiseKind::White => "white(x, period, seed + o)",
+        NoiseKind::Blue => "blue(x, period, seed + o)",
+    };
+    FBM_TEMPLATE
+        .replace("KIND", &(kind as u32).to_string())
+        .replace("HAS_OCTAVES", if kind.has_octaves() { "true" } else { "false" })
+        .replace("BASE", base)
 }
 
 impl Gen<'_> {
@@ -228,7 +247,8 @@ impl Gen<'_> {
             }
             NodeKind::Noise(n) => {
                 let q = self.operand(id, 0, Ty::V, "p");
-                (Ty::F, format!("noise({q}, {s}u, {}u)", n.kind as u32))
+                self.kinds.insert(n.kind);
+                (Ty::F, format!("noise_k{}({q}, {s}u)", n.kind as u32))
             }
             NodeKind::OutDensity | NodeKind::OutNormal => return Err("output nodes cannot feed other nodes".into()),
         };
@@ -257,7 +277,9 @@ mod tests {
     #[test]
     fn default_graph_compiles() {
         let c = compile(&Graph::default_graph()).unwrap();
-        assert!(c.wgsl.contains("noise(v0, "));
+        assert!(c.wgsl.contains("noise_k0(v0, "));
+        // Only the kinds used get an fBm function.
+        assert!(c.wgsl.contains("fn noise_k0(") && !c.wgsl.contains("fn noise_k4("));
         validate(&c);
     }
 

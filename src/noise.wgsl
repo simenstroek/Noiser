@@ -165,51 +165,12 @@ fn blue(x: vec3f, period: i32, seed: u32) -> f32 {
     return BN[off + (u32(c.z) * ut + u32(c.y)) * ut + u32(c.x)] * 2.0 - 1.0;
 }
 
-// ---- Dispatch and fBm ------------------------------------------------------
+// ---- fBm -------------------------------------------------------------------
+// The per-node fBm wrapper lives in noise_fbm.wgsl and is instantiated per noise kind by
+// codegen.rs, so each call only contains its own noise (the driver compiles every inlined path).
 
-fn noise_base(x: vec3f, period: i32, seed: u32, kind: u32, feature: u32) -> f32 {
-    // Every kind stays within [-1, 1]; Graph::density_range relies on it.
-    switch kind {
-        case 1u: { return clamp(simplex(x, period, seed), -1.0, 1.0); }
-        case 2u, 3u: { return cells(x, period, seed, true).z; }
-        case 4u: { return worley(x, period, seed, feature); }
-        case 5u: { return white(x, period, seed); }
-        case 6u: { return blue(x, period, seed); }
-        default: { return clamp(perlin(x, period, seed), -1.0, 1.0); }
-    }
-}
-
-// A noise node with Blender's Noise Texture parameters. Params at P[s..s+8]:
-// scale, normalize, octaves, lacunarity, roughness, distortion, seed (-1 = global), worley feature.
-// `kind` is a NoiseKind discriminant; kinds without octaves always use one.
-fn noise(q: vec3f, s: u32, kind: u32) -> f32 {
-    let scale = P[s];
-    let normalize = P[s + 1u] > 0.5;
-    let has_octaves = kind == 0u || kind == 1u || kind == 3u || kind == 4u;
-    let octaves = select(1u, u32(P[s + 2u]), has_octaves);
-    let lacunarity = P[s + 3u];
-    let roughness = P[s + 4u];
-    let distortion = P[s + 5u];
-    let seed = select(u.seed, u32(P[s + 6u]), P[s + 6u] >= 0.0);
-    let feature = u32(P[s + 7u]);
-
-    // Whole-number scale and lacunarity tile; anything else samples the unwrapped lattice.
-    let tiles = fract(scale) == 0.0 && (octaves <= 1u || fract(lacunarity) == 0.0);
-    var period = select(0, i32(scale), tiles);
-    var x = q * scale;
-    if (distortion != 0.0) {
-        x += vec3f(perlin(x, period, seed + 1u), perlin(x, period, seed + 2u), perlin(x, period, seed + 3u)) * distortion;
-    }
-    var sum = 0.0;
-    var amp = 1.0;
-    var total = 0.0;
-    for (var o = 0u; o < max(octaves, 1u); o++) {
-        sum += amp * noise_base(x, period, seed + o, kind, feature);
-        total += amp;
-        amp *= roughness;
-        x *= lacunarity;
-        period *= i32(lacunarity);
-    }
-    let v = sum / max(total, 1e-6); // signed, roughly [-1, 1]
-    return select(v, v * 0.5 + 0.5, normalize);
+// Tetrahedral sample offsets (IQ), as a function of k = 0..3 so callers can loop with a single
+// call site instead of four inlined copies of the graph.
+fn tetra(k: u32) -> vec3f {
+    return vec3f(select(-1.0, 1.0, k == 0u || k == 3u), select(-1.0, 1.0, k >= 2u), select(-1.0, 1.0, (k & 1u) == 1u));
 }

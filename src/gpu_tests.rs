@@ -32,9 +32,28 @@ fn eval(gpu: &Gpu, graph: &Graph, points: &[[f32; 3]]) -> Vec<f32> {
     );
     let d = &gpu.device;
     let module = d.create_shader_module(wgpu::ShaderModuleDescriptor { label: None, source: wgpu::ShaderSource::Wgsl(src.into()) });
+    // Explicit layout: an automatic one drops bindings the graph doesn't use (e.g. blue noise).
+    let entry_layout = |binding, ty| wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::COMPUTE,
+        ty: wgpu::BindingType::Buffer { ty, has_dynamic_offset: false, min_binding_size: None },
+        count: None,
+    };
+    let ro = wgpu::BufferBindingType::Storage { read_only: true };
+    let bgl = d.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: None,
+        entries: &[
+            entry_layout(0, wgpu::BufferBindingType::Uniform),
+            entry_layout(1, ro),
+            entry_layout(3, ro),
+            entry_layout(4, ro),
+            entry_layout(5, wgpu::BufferBindingType::Storage { read_only: false }),
+        ],
+    });
+    let layout = d.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: None, bind_group_layouts: &[Some(&bgl)], immediate_size: 0 });
     let pipeline = d.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
         label: None,
-        layout: None,
+        layout: Some(&layout),
         module: &module,
         entry_point: Some("main"),
         compilation_options: Default::default(),
@@ -54,7 +73,7 @@ fn eval(gpu: &Gpu, graph: &Graph, points: &[[f32; 3]]) -> Vec<f32> {
     }
     let bind = d.create_bind_group(&wgpu::BindGroupDescriptor {
         label: None,
-        layout: &pipeline.get_bind_group_layout(0),
+        layout: &bgl,
         entries: &[entry(0, &uniforms), entry(1, &params), entry(3, &blue), entry(4, &pts), entry(5, &out)],
     });
     let mut enc = d.create_command_encoder(&Default::default());
@@ -195,7 +214,15 @@ fn bench_preview() {
         .unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/SimpleTestGraph.noisegraph").into());
     let graph = Graph::from_json(&std::fs::read_to_string(&path).unwrap()).unwrap();
     let c = codegen::compile(&graph).unwrap();
-    let mut gpu = view::build(&device, &queue, wgpu::TextureFormat::Bgra8Unorm, &c.wgsl);
+    // NOISER_BENCH_BUST=1: a unique dummy function so the driver's shader cache can't be used.
+    let mut wgsl = c.wgsl.clone();
+    if std::env::var("NOISER_BENCH_BUST").is_ok() {
+        let n = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos() % 1_000_000_007;
+        wgsl = wgsl.replace("fn graph_density(p: vec3f) -> f32 { return ", &format!("fn graph_density(p: vec3f) -> f32 {{ return {n}e-30 + "));
+    }
+    let t0 = std::time::Instant::now();
+    let mut gpu = view::build(&device, &queue, wgpu::TextureFormat::Bgra8Unorm, &wgsl);
+    eprintln!("backend {:?}: pipeline build {:.0} ms", adapter.get_info().backend, t0.elapsed().as_secs_f32() * 1e3);
 
     let size = [1000u32, 1000];
     let step: f32 = std::env::var("NOISER_BENCH_STEP").ok().and_then(|s| s.parse().ok()).unwrap_or(0.6);
@@ -235,6 +262,66 @@ fn bench_preview() {
         };
         eprintln!("{name:5}: 3D {:7.2} ms  slice {:6.2} ms", median(0), median(1));
     }
+}
+
+/// Density = mean(x, y, z), so every exported voxel has a known value.
+fn position_graph() -> Graph {
+    let mut g = Graph::default();
+    let p = g.add(NodeKind::Position, [0.0; 2]);
+    let o = g.add(NodeKind::OutDensity, [0.0; 2]);
+    g.connect(p, o, 0);
+    g
+}
+
+#[test]
+fn export_evaluates_texel_centres() {
+    let Some(gpu) = gpu() else { return eprintln!("no GPU adapter; skipping") };
+    let ev = crate::export::Evaluator::new(&gpu.device, &gpu.queue, &position_graph(), 0).unwrap();
+    let n = 20;
+    let v = ev.eval(n, [3, 5, 7], [4, 3, 2], false, None);
+    // Box value at local (x, y, z) = 1, 2, 1, x fastest.
+    let (x, y, z) = (3 + 1, 5 + 2, 7 + 1);
+    let want = ((x as f32 + 0.5) + (y as f32 + 0.5) + (z as f32 + 0.5)) / (3.0 * n as f32);
+    assert!((v[(1 * 3 + 2) * 4 + 1] - want).abs() < 1e-6);
+}
+
+#[test]
+fn slice_grid_png_places_slices_and_levels() {
+    use crate::export::{self, Format, Kind, Layout, Levels, Output, Settings};
+    let Some(gpu) = gpu() else { return eprintln!("no GPU adapter; skipping") };
+    let g = position_graph(); // unbounded range, so 16-bit falls back to data min/max
+    let ev = export::Evaluator::new(&gpu.device, &gpu.queue, &g, 0).unwrap();
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target");
+    let s = Settings { kind: Kind::SliceGrid, output: Output::Density, res: 8, format: Format::Png16, layout: Layout::Square, levels: Levels::GraphRange, ..Default::default() };
+    let png = dir.join("grid.png");
+    export::run(&ev, &s, g.density_range(), &png, &Default::default()).unwrap();
+    let img = image::open(&png).unwrap().into_luma16();
+    assert_eq!(img.dimensions(), (24, 24)); // 8 slices in a 3×3 grid of 8×8 tiles
+    // Slice z = 4 sits in tile (1, 1); check texel (2, 3) in it.
+    let v = |x: f32, y: f32, z: f32| (x + y + z + 1.5) / 24.0;
+    let (lo, hi) = (v(0.0, 0.0, 0.0), v(7.0, 7.0, 7.0));
+    let want = ((v(2.0, 3.0, 4.0) - lo) / (hi - lo) * 65535.0).round() as i32;
+    let got = img.get_pixel(8 + 2, 8 + 3).0[0] as i32;
+    assert!((got - want).abs() <= 1, "got {got}, want {want}");
+    // The unused ninth tile stays black.
+    assert_eq!(img.get_pixel(16 + 4, 16 + 4).0[0], 0);
+
+    // EXR and 2D variants write without error.
+    let exr = Settings { format: Format::Exr32, output: Output::Normal, ..s.clone() };
+    export::run(&ev, &exr, g.density_range(), &dir.join("grid.exr"), &Default::default()).unwrap();
+    let flat = Settings { kind: Kind::Image2d, res: 32, format: Format::Png8, ..s };
+    export::run(&ev, &flat, g.density_range(), &dir.join("flat.png"), &Default::default()).unwrap();
+    assert_eq!(image::open(dir.join("flat.png")).unwrap().into_luma8().dimensions(), (32, 32));
+}
+
+/// Writes target/check.vdb (20³, density = mean of the texel centre) for checking in OpenVDB.
+#[test]
+#[ignore = "writes target/check.vdb"]
+fn write_check_vdb() {
+    let gpu = gpu().unwrap();
+    let ev = crate::export::Evaluator::new(&gpu.device, &gpu.queue, &position_graph(), 0).unwrap();
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target").join("check.vdb");
+    crate::vdb::write(&path, 20, |o, s| ev.eval(20, o, s, false, None), |_| {}).unwrap();
 }
 
 #[test]
