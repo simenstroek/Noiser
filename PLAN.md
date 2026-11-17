@@ -75,6 +75,19 @@ Node graph (centre) · 3D view (primitive picker, solid/cloud, displacement amou
 - **Raymarch:** noise runs only in the displacement shell (margin 0.02). Overshoot is fixed with 4 false-position steps rather than 12 bisection steps. The default step safety is 0.9, since overshoot is cheap to correct.
 - **Cloud mode costs about 10× solid** (69 ms at 1 MP with SimpleTestGraph): 128 steps × (1 + 5 shadow taps) of full graph calls inside the shape. The structural fix is the baked 3D texture (milestone 5 groundwork).
 
+### Per-node cache (decided 2026-11-17, milestone 5)
+- **Resolution-independent detail is a core feature**, so the graph stays procedural by default. Each node gets a **cache toggle, off by default**. When it's on, the upstream subgraph is baked into one tile of a 3D texture (wrap sampling, exact because it tiles), and downstream nodes read the texture.
+- **Export ignores every cache** and evaluates the full graph at the output resolution.
+- **Budget:** 1024³ f16 is 2 GiB per node, and 20 of them would be 40 GiB, so caches must be chosen by hand and sized per node. The default resolution comes from the node's finest feature: about 4 samples per finest cell, where cells = scale × lacunarity^(octaves−1). Scale 4 with 4 octaves gives 128³ (4 MiB at f16). The user can override it, and a VRAM meter shows the total.
+- **Sampling:** cubic (B-spline, built from 8 linear fetches) rather than plain linear, so normals and Normal nodes downstream of a cache aren't faceted.
+- Graphs that don't tile bake over the base shape's bounds instead.
+
+### Crash recovery (`src/backup.rs`)
+- Each running instance has a session folder in `%APPDATA%\Noiser\data\sessions\`. It holds a `lock` file the instance keeps exclusively locked, plus rolling backups (the last 10, at most one per second).
+- Backups only run while the graph differs from what was last opened, saved or created.
+- **Clean exit** deletes the folder. After a **crash** the OS releases the lock, so on the next start any folder whose lock can be taken is a crashed session. Folders whose lock is still held belong to other running instances. The newest crashed backup is offered in a Restore/Discard prompt.
+- No "unsaved changes?" prompt on exit yet.
+
 ### UI conventions
 - **Every value input has a reset-to-default button** in front of it (the `row`/`reset` helpers in `main.rs`).
 - **Interface icons come from Material Symbols** via Iconify (https://icon-sets.iconify.design/material-symbols/). Save each icon as an SVG in `assets/icons/` with `currentColor` replaced by white so egui can tint it. License: `assets/icons/LICENSE.txt`.

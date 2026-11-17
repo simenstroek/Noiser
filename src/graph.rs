@@ -215,6 +215,19 @@ impl Graph {
         Ok(g)
     }
 
+    /// A copy whose Density output reads `node` instead, for previewing an intermediate node.
+    pub fn previewing(&self, node: NodeId) -> Graph {
+        let mut g = self.clone();
+        let out = match g.find(|k| *k == NodeKind::OutDensity) {
+            Some(o) => o,
+            None => g.add(NodeKind::OutDensity, [0.0, 0.0]),
+        };
+        if node != out && g.nodes.contains_key(&node) {
+            g.connect(node, out, 0);
+        }
+        g
+    }
+
     /// Position → Perlin → Density, plus an unconnected Normal output.
     pub fn default_graph() -> Self {
         let mut g = Graph::default();
@@ -490,6 +503,20 @@ mod tests {
         g.connect(a, b, 0);
         g.connect(b, a, 0);
         assert!(matches!(tiling_at(&g, a), Tiling::Broken(_)));
+    }
+
+    #[test]
+    fn previewing_rewires_density_only_in_the_copy() {
+        let g = Graph::default_graph(); // 0 Position → 1 Noise → 2 OutDensity
+        let p = g.previewing(0);
+        assert_eq!(p.input(2, 0), Some(0));
+        assert_eq!(g.input(2, 0), Some(1));
+        // Without a Density output one is added.
+        let mut bare = Graph::default();
+        let pos = bare.add(NodeKind::Position, [0.0; 2]);
+        let pv = bare.previewing(pos);
+        let out = pv.find(|k| *k == NodeKind::OutDensity).unwrap();
+        assert_eq!(pv.input(out, 0), Some(pos));
     }
 
     #[test]

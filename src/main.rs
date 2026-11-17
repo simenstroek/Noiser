@@ -1,3 +1,4 @@
+mod backup;
 mod bluenoise;
 mod codegen;
 mod editor;
@@ -63,6 +64,13 @@ struct App {
     pitch: f32,
     dist: f32,
     pv: Preview,
+    /// This run's backup session; None if the backup folder couldn't be created.
+    session: Option<backup::Session>,
+    /// Latest backup from sessions that didn't exit cleanly, waiting for the user to restore or discard it.
+    recovery: Option<(backup::Backup, Vec<std::path::PathBuf>)>,
+    /// The graph as last opened, saved or created. Backups only run while the graph differs from it,
+    /// so an untouched session never shadows a crashed session's real work.
+    saved: Graph,
 }
 
 impl App {
@@ -76,10 +84,29 @@ impl App {
             },
             None => (Graph::default_graph(), None, String::new()),
         };
+        let mut editor = editor::Editor::default();
+        // Wire-drop menu pick counts survive restarts.
+        if let Some(picks) = cc.storage.and_then(|s| s.get_string(PICKS_KEY)).and_then(|s| serde_json::from_str(&s).ok()) {
+            editor.picks = picks;
+        }
+        // Look for crashed sessions before starting ours.
+        let root = backup::root();
+        let recovery = root.as_deref().and_then(|r| {
+            let dirs = backup::crashed(r);
+            match backup::latest(&dirs) {
+                Some(b) => Some((b, dirs)),
+                None => {
+                    backup::remove(&dirs); // crashed before anything was backed up
+                    None
+                }
+            }
+        });
+        let session = root.and_then(|r| backup::Session::start(&r).ok());
         Self {
             rs: cc.wgpu_render_state.clone().expect("Noiser needs the wgpu renderer"),
+            saved: graph.clone(),
             graph,
-            editor: editor::Editor::default(),
+            editor,
             path,
             status,
             built_wgsl: None,
@@ -87,10 +114,49 @@ impl App {
             pitch: 0.35,
             dist: 3.5,
             pv: Preview::default(),
+            session,
+            recovery,
         }
     }
 
-    fn uniforms(&self, view3d: egui::Rect, slice: egui::Rect) -> Uniforms {
+    /// Asks whether to restore the backup of a session that didn't exit cleanly.
+    fn recovery_prompt(&mut self, ctx: &egui::Context) {
+        let Some((b, _)) = &self.recovery else { return };
+        let ago = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs()).saturating_sub(b.saved_unix);
+        let ago = match ago {
+            0..60 => format!("{ago} s ago"),
+            60..3600 => format!("{} min ago", ago / 60),
+            _ => format!("{} h ago", ago / 3600),
+        };
+        let file = b.path.as_ref().map_or("an unsaved graph".to_string(), |p| p.display().to_string());
+        let mut choice = None;
+        egui::Modal::new(egui::Id::unique("recovery")).show(ctx, |ui| {
+            ui.heading("Noiser didn't close properly");
+            ui.label(format!("A backup of {file} from {ago} is available."));
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                if ui.button("Restore backup").clicked() {
+                    choice = Some(true);
+                }
+                if ui.button("Discard").clicked() {
+                    choice = Some(false);
+                }
+            });
+        });
+        let Some(restore) = choice else { return };
+        let (b, dirs) = self.recovery.take().unwrap();
+        if restore {
+            self.graph = b.graph;
+            self.path = b.path;
+            self.editor.selected.clear();
+            self.editor.preview = None;
+            self.status = "Restored from backup (not saved yet)".into();
+        }
+        backup::remove(&dirs);
+    }
+
+    /// `range` is the density range of the graph being shown (the preview node's, when previewing).
+    fn uniforms(&self, view3d: egui::Rect, slice: egui::Rect, range: (f32, f32)) -> Uniforms {
         let (sy, cy) = self.yaw.sin_cos();
         let (sp, cp) = self.pitch.sin_cos();
         let pos = [self.dist * cp * sy, self.dist * sp, self.dist * cp * cy];
@@ -101,7 +167,7 @@ impl App {
         let aspect = |r: egui::Rect| r.width() / r.height().max(1.0);
         // How far the surface can move: amount × density range. Kept finite for the shader;
         // 1e6 effectively disables the shell skip for unbounded graphs.
-        let push = view::push_range(self.graph.density_range(), pv.amount);
+        let push = view::push_range(range, pv.amount);
         Uniforms {
             cam_pos: pos,
             aspect: aspect(view3d),
@@ -138,8 +204,10 @@ impl App {
         let Some(path) = Self::file_dialog().pick_file() else { return };
         match std::fs::read_to_string(&path).map_err(|e| e.to_string()).and_then(|s| Graph::from_json(&s)) {
             Ok(g) => {
+                self.saved = g.clone();
                 self.graph = g;
                 self.editor.selected.clear();
+                self.editor.preview = None;
                 self.status = format!("Opened {}", path.display());
                 self.path = Some(path);
             }
@@ -157,6 +225,7 @@ impl App {
         };
         match std::fs::write(&path, self.graph.to_json()) {
             Ok(()) => {
+                self.saved = self.graph.clone();
                 self.status = format!("Saved {}", path.display());
                 self.path = Some(path);
             }
@@ -308,9 +377,30 @@ fn node_props(ui: &mut egui::Ui, kind: &mut NodeKind) {
     }
 }
 
+const PICKS_KEY: &str = "node_picks";
+
 impl eframe::App for App {
+    fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        if let Ok(s) = serde_json::to_string(&self.editor.picks) {
+            storage.set_string(PICKS_KEY, s);
+        }
+    }
+
+    fn on_exit(&mut self) {
+        // A clean exit leaves nothing to recover. A pending prompt keeps its crashed sessions for next time.
+        if let Some(s) = self.session.take() {
+            s.end();
+        }
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let cpu_start = std::time::Instant::now();
+        self.recovery_prompt(&ui.ctx().clone());
+        if let Some(s) = self.session.as_mut().filter(|_| self.graph != self.saved) {
+            if s.backup(&self.graph, self.path.as_deref()) {
+                ui.ctx().request_repaint_after(backup::INTERVAL); // flush the held-back change
+            }
+        }
         let tiling = self.graph.tiling();
 
         egui::Panel::top("menu").show(ui, |ui| {
@@ -318,7 +408,9 @@ impl eframe::App for App {
                 ui.menu_button("File", |ui| {
                     if ui.button("New").clicked() {
                         self.graph = Graph::default_graph();
+                        self.saved = self.graph.clone();
                         self.editor.selected.clear();
+                        self.editor.preview = None;
                         self.path = None;
                     }
                     if ui.button("Open…").clicked() {
@@ -334,7 +426,6 @@ impl eframe::App for App {
                 ui.weak(&self.status);
             });
         });
-
         egui::Panel::right("props").default_size(320.0).show(ui, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| {
                 preview_props(ui, &mut self.pv);
@@ -354,12 +445,16 @@ impl eframe::App for App {
                 }
             });
         });
-
         egui::Panel::bottom("graph").resizable(true).default_size(330.0).show(ui, |ui| {
             self.editor.show(ui, &mut self.graph, &tiling);
         });
-
-        let compiled = match codegen::compile(&self.graph) {
+        // The views show the Density output, or the previewed node wired into it.
+        let shown = match self.editor.preview {
+            Some(id) => std::borrow::Cow::Owned(self.graph.previewing(id)),
+            None => std::borrow::Cow::Borrowed(&self.graph),
+        };
+        let range = shown.density_range();
+        let compiled = match codegen::compile(&shown) {
             Ok(c) if c.params.len() > MAX_PARAMS => Err(format!("graph uses {} parameters (max {MAX_PARAMS})", c.params.len())),
             r => r,
         };
@@ -370,7 +465,6 @@ impl eframe::App for App {
                 self.built_wgsl = Some(c.wgsl.clone());
             }
         }
-
         egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| {
             let full = ui.available_rect_before_wrap();
             let (r3d, rslice) = full.split_left_right_at_fraction(0.5);
@@ -388,7 +482,7 @@ impl eframe::App for App {
             }
             match compiled {
                 Ok(c) => {
-                    let uniforms = self.uniforms(r3d, rslice);
+                    let uniforms = self.uniforms(r3d, rslice, range);
                     let painter = ui.painter();
                     let px = (r3d.size() * ui.ctx().pixels_per_point()).round();
                     let cb3d = view::View3d { uniforms, params: c.params.clone(), size: [px.x as u32, px.y as u32] };
@@ -396,7 +490,10 @@ impl eframe::App for App {
                     let cbs = view::SliceView { uniforms, params: c.params };
                     painter.add(egui_wgpu::Callback::new_paint_callback(rslice, cbs));
                     let axis = ["X", "Y", "Z"][self.pv.slice_axis as usize];
-                    let label = format!("{axis} = {:.3}", self.pv.slice_pos);
+                    let mut label = format!("{axis} = {:.3}", self.pv.slice_pos);
+                    if let Some(node) = self.editor.preview.and_then(|id| self.graph.nodes.get(&id)) {
+                        label = format!("{label}\nPreviewing {}", editor::title(&node.kind));
+                    }
                     let font = egui::FontId::monospace(12.0);
                     let grey = egui::Color32::from_gray(200);
                     painter.text(rslice.left_top() + egui::vec2(8.0, 6.0), egui::Align2::LEFT_TOP, label, font.clone(), grey);
