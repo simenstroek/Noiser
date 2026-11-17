@@ -115,6 +115,9 @@ fn solid(ro: vec3f, rd: vec3f, bg: vec3f) -> vec3f {
     let span = bounds(ro, rd);
     if (span.x > span.y) { return bg; }
     var t = span.x;
+    // A ray that starts inside solid sees nothing: an open mesh such as a terrain is solid below its
+    // surface, and the bounding sphere cuts through that region.
+    if (u.prim == 7u && field(ro + rd * t) < 0.0) { return bg; }
     var t_out = t; // last t known to be outside, and the field there
     var d_out = 0.0;
     var hit = false;
