@@ -200,6 +200,25 @@ fn smin3(a: vec3f, b: vec3f, k: f32) -> vec3f { return vec3f(smin(a.x, b.x, k), 
 fn smax3(a: vec3f, b: vec3f, k: f32) -> vec3f { return -smin3(-a, -b, k); }
 
 // Linear map of x from [a, b] to [c, d]; an empty input range gives c.
+// A curve through the points stored at P[base...] as (x, y) pairs, sorted by x; n points.
+// mode: 0 linear, 1 smooth (smoothstep), 2 step.
+fn curve_eval(x: f32, base: u32, n: u32, mode: u32) -> f32 {
+    if (x <= P[base]) { return P[base + 1u]; }
+    for (var i = 1u; i < n; i++) {
+        let x1 = P[base + 2u * i];
+        if (x < x1) {
+            let x0 = P[base + 2u * (i - 1u)];
+            let y0 = P[base + 2u * (i - 1u) + 1u];
+            let y1 = P[base + 2u * i + 1u];
+            if (mode == 2u) { return y0; }
+            var t = (x - x0) / max(x1 - x0, 1e-12);
+            if (mode == 1u) { t = t * t * (3.0 - 2.0 * t); }
+            return mix(y0, y1, t);
+        }
+    }
+    return P[base + 2u * (n - 1u) + 1u];
+}
+
 fn remap(x: f32, a: f32, b: f32, c: f32, d: f32, clamped: bool) -> f32 {
     let t = select(0.0, (x - a) / (b - a), b != a);
     let r = c + t * (d - c);

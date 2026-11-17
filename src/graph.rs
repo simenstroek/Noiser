@@ -5,6 +5,39 @@ use std::collections::{BTreeMap, BTreeSet};
 
 pub type NodeId = u32;
 
+pub const MAX_CURVE_POINTS: usize = 16;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CurveMode {
+    Linear,
+    /// Smoothstep between neighbouring points (flat at every point).
+    Smooth,
+    /// Each y holds until the next point.
+    Step,
+}
+
+impl CurveMode {
+    pub const ALL: [CurveMode; 3] = [CurveMode::Linear, CurveMode::Smooth, CurveMode::Step];
+    pub fn label(self) -> &'static str {
+        match self {
+            CurveMode::Linear => "Linear",
+            CurveMode::Smooth => "Smooth",
+            CurveMode::Step => "Step",
+        }
+    }
+}
+
+/// A curve points sorted by x and limited to `MAX_CURVE_POINTS`; never empty.
+pub fn curve_points(points: &[[f32; 2]]) -> Vec<[f32; 2]> {
+    let mut p: Vec<[f32; 2]> = points.iter().copied().filter(|q| q[0].is_finite() && q[1].is_finite()).collect();
+    p.sort_by(|a, b| a[0].total_cmp(&b[0]));
+    p.truncate(MAX_CURVE_POINTS);
+    if p.is_empty() {
+        p.push([0.0, 0.0]);
+    }
+    p
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub enum MathOp {
     Add,
@@ -444,6 +477,9 @@ pub enum NodeKind {
     /// Linear map of input 0 from [from min, from max] to [to min, to max]; the other four inputs
     /// are those bounds. `vals` holds the unconnected defaults of all five inputs.
     Remap { vals: [f32; 5], clamp: bool },
+    /// A function of input 0 drawn through `points` (x, y), at most `MAX_CURVE_POINTS`; x need not be
+    /// sorted (use `curve_points`). Outside the first and last x the output holds the end values.
+    Curve { points: Vec<[f32; 2]>, mode: CurveMode },
     /// Distance to the nearest cell centre (or, with `corners`, the nearest cell corner) in a regular
     /// grid of `counts` cells per tile, scaled to [-1, 1]: -1 at the reference point and +1 as far from
     /// it as the grid gets. Input: position (defaults to world position). Saved as "Brick" before
@@ -471,6 +507,7 @@ impl NodeKind {
             NodeKind::Float(_) | NodeKind::Vec3(_) | NodeKind::Position => 0,
             NodeKind::Math { op, .. } => if op.is_smooth() { 3 } else if op.is_unary() { 1 } else { 2 },
             NodeKind::Remap { .. } => 5,
+            NodeKind::Curve { .. } => 1,
             NodeKind::Normal { .. } | NodeKind::Noise(_) | NodeKind::Grid { .. } | NodeKind::Pattern(_) | NodeKind::OutDensity | NodeKind::OutNormal => 1,
         }
     }
@@ -614,7 +651,7 @@ impl Graph {
     /// node's output must be a float that repeats every tile.
     pub fn cache_eligibility(&self, id: NodeId, tiling: &BTreeMap<NodeId, Tiling>) -> Result<(), String> {
         match &self.nodes.get(&id).ok_or("no such node")?.kind {
-            NodeKind::Noise(_) | NodeKind::Math { .. } | NodeKind::Remap { .. } | NodeKind::Grid { .. } | NodeKind::Pattern(_) => {}
+            NodeKind::Noise(_) | NodeKind::Math { .. } | NodeKind::Remap { .. } | NodeKind::Curve { .. } | NodeKind::Grid { .. } | NodeKind::Pattern(_) => {}
             _ => return Err("only Noise, Math, Remap, Grid and pattern nodes can be cached".into()),
         }
         // Math on a vector input yields a vector (except dot); caches hold floats.
@@ -774,6 +811,12 @@ impl Graph {
                     (t, _) => t,
                 }
             }
+            NodeKind::Curve { .. } => match input(0, memo, stack) {
+                Some(Broken(r)) => Broken(r),
+                Some(Coord) => Broken("A curve of a position does not tile".into()),
+                Some(t) => t,
+                None => Const,
+            },
             NodeKind::Remap { .. } => {
                 // A nonlinear-looking map of position breaks tiling; the rest follows the inputs.
                 let ts: Vec<Tiling> = (0..5).filter_map(|p| input(p, memo, stack)).collect();
@@ -920,6 +963,10 @@ impl Graph {
                     let f = |x: f32| o0 + (x - i0) / (i1 - i0) * (o1 - o0);
                     if x0.is_finite() && x1.is_finite() { (f(x0).min(f(x1)), f(x0).max(f(x1))) } else { UNBOUNDED }
                 }
+            }
+            NodeKind::Curve { points, .. } => {
+                let p = curve_points(points);
+                (p.iter().map(|q| q[1]).fold(f32::MAX, f32::min), p.iter().map(|q| q[1]).fold(f32::MIN, f32::max))
             }
             NodeKind::Grid { .. } | NodeKind::Pattern(_) => (-1.0, 1.0),
             NodeKind::OutDensity | NodeKind::OutNormal => UNBOUNDED,

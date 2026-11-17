@@ -533,6 +533,32 @@ fn remap_matches_reference() {
 }
 
 #[test]
+fn curve_matches_reference() {
+    use crate::graph::CurveMode::*;
+    let Some(gpu) = gpu() else { return eprintln!("no GPU adapter; skipping") };
+    let at = [[0.3, 0.6, 0.9]];
+    // Deliberately unsorted: the node sorts them.
+    let pts = vec![[1.0, 0.0], [0.0, 1.0], [0.5, 3.0]];
+    let curve = |x: f32, mode| {
+        let mut g = Graph::default();
+        let f = g.add(NodeKind::Float(x), [0.0; 2]);
+        let c = g.add(NodeKind::Curve { points: pts.clone(), mode }, [0.0; 2]);
+        let o = g.add(NodeKind::OutDensity, [0.0; 2]);
+        g.connect(f, c, 0);
+        g.connect(c, o, 0);
+        eval(&gpu, &g, &at)[0]
+    };
+    near(curve(0.25, Linear), 2.0, "linear first segment");
+    near(curve(0.75, Linear), 1.5, "linear second segment");
+    near(curve(-1.0, Linear), 1.0, "holds the first value");
+    near(curve(2.0, Linear), 0.0, "holds the last value");
+    near(curve(0.25, Smooth), 2.0, "smoothstep at the midpoint");
+    near(curve(0.125, Smooth), 1.0 + 2.0 * (3.0 * 0.0625 - 2.0 * 0.015625), "smoothstep off the midpoint");
+    near(curve(0.25, Step), 1.0, "step holds the left value");
+    near(curve(0.75, Step), 3.0, "step second segment");
+}
+
+#[test]
 fn grid_spans_minus_one_to_one_and_tiles() {
     let Some(gpu) = gpu() else { return eprintln!("no GPU adapter; skipping") };
     for corners in [false, true] {

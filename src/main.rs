@@ -621,6 +621,33 @@ fn node_props(ui: &mut egui::Ui, kind: &mut NodeKind) {
             row(ui, clamp, false, |ui, c| _ = ui.checkbox(c, "clamp to the output range"));
             ui.weak("The input values sit on the node.");
         }
+        NodeKind::Curve { points, mode } => {
+            ui.horizontal(|ui| {
+                ui.label("Interpolation");
+                for m in graph::CurveMode::ALL {
+                    ui.selectable_value(mode, m, m.label());
+                }
+            });
+            let mut remove = None;
+            for (i, q) in points.iter_mut().enumerate() {
+                ui.horizontal(|ui| {
+                    ui.add(egui::DragValue::new(&mut q[0]).speed(0.01).prefix("x "));
+                    ui.add(egui::DragValue::new(&mut q[1]).speed(0.01).prefix("y "));
+                    if ui.small_button("x").on_hover_text("Remove point").clicked() {
+                        remove = Some(i);
+                    }
+                });
+            }
+            if let Some(i) = remove.filter(|_| points.len() > 1) {
+                points.remove(i);
+            }
+            if points.len() < graph::MAX_CURVE_POINTS && ui.button("Add point").clicked() {
+                let x = points.iter().map(|q| q[0]).fold(f32::MIN, f32::max) + 0.25;
+                let y = points.last().map_or(0.0, |q| q[1]);
+                points.push([x, y]);
+            }
+            ui.weak("Points are sorted by x when evaluated. Before the first point and after the last, the output holds the end value.");
+        }
         NodeKind::Pattern(p) => pattern_props(ui, p),
         NodeKind::Grid { counts, corners } => {
             row(ui, counts, [8.0; 3], |ui, v| {

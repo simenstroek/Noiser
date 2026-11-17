@@ -73,6 +73,12 @@ and `clamp`. With `t = (value − from_min) / (from_max − from_min)` (0 when t
 result is `to_min + t·(to_max − to_min)`, clamped between `min(to_min, to_max)` and `max(to_min, to_max)`
 when `clamp` is true. Type float.
 
+### `curve`
+`value` (op id or a number, float), `points` (a list of `[x, y]`, already sorted by x, 1 to 16 of them) and
+`mode` (`linear`, `smooth` or `step`). Below the first x the result is the first y and above the last x the
+last y. Between points i and i+1, with `t = (value − x_i) / (x_i+1 − x_i)`: `linear` gives `mix(y_i, y_i+1, t)`,
+`smooth` the same with `t` replaced by `t²(3 − 2t)`, and `step` gives `y_i`. Type float.
+
 ### `grid`
 `position` (op id or `null` for `p`), `counts` `[nx, ny, nz]` (cells per tile on each axis) and `reference`
 (`center` or `corner`). With `n = counts` and `f = fract(q·n)`, the offset from the reference point is

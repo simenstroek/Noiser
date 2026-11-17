@@ -97,6 +97,14 @@ pub fn compile_with(g: &Graph, caches: &BTreeMap<NodeId, u32>) -> Result<Compile
                 params.extend(vals);
                 params.push(if *clamp { 1.0 } else { 0.0 });
             }
+            NodeKind::Curve { points, mode } => {
+                let p = crate::graph::curve_points(points);
+                params.push(*mode as u32 as f32);
+                params.push(p.len() as f32);
+                for i in 0..crate::graph::MAX_CURVE_POINTS {
+                    params.extend(p.get(i).copied().unwrap_or(*p.last().unwrap()));
+                }
+            }
             NodeKind::Grid { counts, corners } => {
                 params.extend(counts);
                 params.push(if *corners { 1.0 } else { 0.0 });
@@ -312,6 +320,10 @@ impl Gen<'_> {
             NodeKind::Remap { .. } => {
                 let x: Vec<String> = (0..5).map(|p| self.operand(id, p, Ty::F, &format!("P[{}]", s + p))).collect();
                 (Ty::F, format!("remap({}, {}, {}, {}, {}, P[{}] > 0.5)", x[0], x[1], x[2], x[3], x[4], s + 5))
+            }
+            NodeKind::Curve { .. } => {
+                let x = self.operand(id, 0, Ty::F, "0.0");
+                (Ty::F, format!("curve_eval({x}, {}u, u32(P[{}]), u32(P[{}]))", s + 2, s + 1, s))
             }
             NodeKind::Grid { .. } => {
                 let q = self.operand(id, 0, Ty::V, "p");
