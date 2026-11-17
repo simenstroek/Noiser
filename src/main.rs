@@ -646,10 +646,19 @@ fn node_props(ui: &mut egui::Ui, kind: &mut NodeKind) {
             if n.kind == graph::NoiseKind::Worley {
                 row(ui, &mut n.feature, d.feature, |ui, v| {
                     use graph::WorleyFeature::*;
-                    for (f, name) in [(F1, "F1"), (F2, "F2"), (F2MinusF1, "F2 − F1"), (CellValue, "Cell value")] {
+                    for (f, name) in [(F1, "F1"), (F2, "F2"), (F2MinusF1, "F2 − F1"), (CellValue, "Cell value"), (Edges, "Cell edges")] {
                         ui.selectable_value(v, f, name);
                     }
                 });
+                row(ui, &mut n.jitter, d.jitter, |ui, v| _ = ui.add(egui::Slider::new(v, 0.0..=1.0).text("jitter")).on_hover_text("0 puts every point in the middle of its cell (a perfect lattice), 1 anywhere in it"));
+                if n.feature != graph::WorleyFeature::Edges {
+                    row(ui, &mut n.metric, d.metric, |ui, v| {
+                        use graph::WorleyMetric::*;
+                        ui.selectable_value(v, Euclidean, "Euclidean");
+                        ui.selectable_value(v, Manhattan, "Manhattan").on_hover_text("Diamond-shaped cells");
+                        ui.selectable_value(v, Chebyshev, "Chebyshev").on_hover_text("Square cells");
+                    });
+                }
                 row(ui, &mut n.fractal, d.fractal, |ui, v| _ = ui.checkbox(v, "fractal (octaves)"));
             }
             row(ui, &mut n.scale, d.scale, |ui, v| _ = ui.add(egui::Slider::new(v, 0.5..=32.0).text("scale (cells/tile)")));
@@ -803,17 +812,20 @@ impl eframe::App for App {
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => self.compiling = None,
             }
         }
+        // The mesh displacement mask is only compiled when it is in use; the pipeline key says so.
+        let mask_on = self.pv.prim == meshapp::MESH_PRIM && self.mesh.is_some() && !self.mesh_mask.terms.is_empty();
         if let Ok(c) = &compiled {
-            let built = self.built.as_ref().is_some_and(|b| b.0 == c.wgsl);
-            let queued = self.compiling.as_ref().is_some_and(|p| p.0 == c.wgsl);
+            let key = format!("{}{}", if mask_on { "//mask\n" } else { "" }, c.wgsl);
+            let built = self.built.as_ref().is_some_and(|b| b.0 == key);
+            let queued = self.compiling.as_ref().is_some_and(|p| p.0 == key);
             if !built && !queued {
                 let (tx, rx) = std::sync::mpsc::channel();
                 let (device, queue, format, wgsl) = (self.rs.device.clone(), self.rs.queue.clone(), self.rs.target_format, c.wgsl.clone());
-                std::thread::spawn(move || _ = tx.send(view::build(&device, &queue, format, &wgsl)));
-                self.compiling = Some((c.wgsl.clone(), rx)); // a superseded build just finishes and is dropped
+                std::thread::spawn(move || _ = tx.send(view::build(&device, &queue, format, &wgsl, mask_on)));
+                self.compiling = Some((key.clone(), rx)); // a superseded build just finishes and is dropped
                 ui.ctx().request_repaint_after(std::time::Duration::from_millis(50));
             }
-            if let Some(b) = self.built.as_mut().filter(|b| b.0 == c.wgsl) {
+            if let Some(b) = self.built.as_mut().filter(|b| b.0 == key) {
                 b.1 = c.params.clone();
             }
         }

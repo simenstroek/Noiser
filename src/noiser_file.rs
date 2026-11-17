@@ -93,7 +93,15 @@ pub fn ops(g: &Graph, seed: u32) -> Result<Value, String> {
                             WorleyFeature::F2 => "f2",
                             WorleyFeature::F2MinusF1 => "f2_minus_f1",
                             WorleyFeature::CellValue => "cell_value",
+                            WorleyFeature::Edges => "edges",
                         });
+                        // Only when they differ from the defaults, so older samplers keep working on older graphs.
+                        if n.metric != crate::graph::WorleyMetric::Euclidean {
+                            o["metric"] = json!(if n.metric == crate::graph::WorleyMetric::Manhattan { "manhattan" } else { "chebyshev" });
+                        }
+                        if n.jitter != 1.0 {
+                            o["jitter"] = json!(n.jitter);
+                        }
                     }
                     o
                 }

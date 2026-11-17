@@ -140,10 +140,10 @@ pub struct MeshEvaluator {
 
 impl MeshEvaluator {
     /// `mesh` is the baked distance grid (see `MeshSdf::upload`); `origin` and `voxel` describe it.
-    pub fn new(device: &wgpu::Device, queue: &wgpu::Queue, graph: &Graph, seed: u32, mesh: wgpu::TextureView, origin: V3, voxel: f32, bounds: (V3, V3)) -> Result<Self, String> {
+    pub fn new(device: &wgpu::Device, queue: &wgpu::Queue, graph: &Graph, seed: u32, mesh: wgpu::TextureView, origin: V3, voxel: f32, bounds: (V3, V3), mask: bool) -> Result<Self, String> {
         use wgpu::util::DeviceExt;
         let c = codegen::compile(graph)?;
-        let src = format!("{NOISE_LIB}\n{}\n{EVAL_BINDINGS}\n{MESH_EVAL_WGSL}", c.wgsl);
+        let src = format!("{NOISE_LIB}\n{}\n{}\n{EVAL_BINDINGS}\n{MESH_EVAL_WGSL}", codegen::mesh_mask_lib(mask), c.wgsl);
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("mesh export"), source: wgpu::ShaderSource::Wgsl(src.into()) });
         let buffer = |binding, ty| wgpu::BindGroupLayoutEntry {
             binding,
@@ -376,7 +376,7 @@ impl FileJob<'_> {
         let sdf = crate::meshsdf::MeshSdf::build(&mesh, self.grid_res, self.grid_pad, &Default::default());
         let (_texture, view) = sdf.upload(self.device, self.queue); // keep the texture alive for the whole job
         let (lo, hi) = mesh.bounds();
-        let ev = MeshEvaluator::new(self.device, self.queue, self.graph, self.seed, view, sdf.origin, sdf.voxel, (lo, hi))?;
+        let ev = MeshEvaluator::new(self.device, self.queue, self.graph, self.seed, view, sdf.origin, sdf.voxel, (lo, hi), self.d.mask.count > 0)?;
         let job = Job { ev: &ev, d: self.d, lo, hi, reach: reach(self.graph, self.d.amount, self.d.mask.range, self.grid_pad), norm, settings: self.settings.clone() };
         job.run(output, progress)
     }

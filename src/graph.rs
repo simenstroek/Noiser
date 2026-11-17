@@ -124,6 +124,23 @@ pub enum WorleyFeature {
     F2MinusF1 = 2,
     /// A flat random value per cell (what the Voronoi node used to output).
     CellValue = 3,
+    /// The exact distance to the nearest cell wall: 0 on the cracks between cells.
+    Edges = 4,
+}
+
+/// How Worley measures distance to its feature points.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WorleyMetric {
+    #[default]
+    Euclidean = 0,
+    /// Sum of the axis distances: diamond-shaped cells.
+    Manhattan = 1,
+    /// Largest axis distance: square cells.
+    Chebyshev = 2,
+}
+
+fn one() -> f32 {
+    1.0
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -135,6 +152,13 @@ pub struct NoiseParams {
     /// Worley only: sum octaves (lacunarity, roughness). Off means a single octave.
     #[serde(default)]
     pub fractal: bool,
+    /// Worley only: how the distance is measured (not used by Cell edges).
+    #[serde(default)]
+    pub metric: WorleyMetric,
+    /// Worley only: how far each feature point strays from the middle of its cell, 0 (a perfect
+    /// lattice) to 1 (anywhere in the cell).
+    #[serde(default = "one")]
+    pub jitter: f32,
     /// Cells per tile. A whole number keeps the noise tiling.
     pub scale: f32,
     /// Map the signed [-1, 1] result to [0, 1].
@@ -391,6 +415,8 @@ impl Default for NoiseParams {
             kind: NoiseKind::Perlin,
             feature: WorleyFeature::F1,
             fractal: false,
+            metric: WorleyMetric::Euclidean,
+            jitter: 1.0,
             scale: 4.0,
             normalize: false,
             octaves: 4,

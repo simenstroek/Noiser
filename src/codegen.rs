@@ -10,6 +10,22 @@ use std::fmt::Write;
 
 pub const NOISE_LIB: &str = include_str!("noise.wgsl");
 
+const MESH_MASK_LIB: &str = include_str!("mesh_mask.wgsl");
+
+const PATTERN_LIB: &str = include_str!("patterns.wgsl");
+
+const WORLEY_GENERAL_LIB: &str = include_str!("worley_general.wgsl");
+
+/// `mesh_mask` as the shaders call it: the real one when a mask is in use, otherwise one that
+/// returns 1 and costs nothing to compile.
+pub fn mesh_mask_lib(on: bool) -> &'static str {
+    if on {
+        MESH_MASK_LIB
+    } else {
+        "fn mesh_mask(t: texture_3d<f32>, p: vec3f, origin: vec3f, voxel: f32, blo: vec3f, bhi: vec3f, terms: array<vec4f, 12>, count: u32) -> f32 { return 1.0; }\n"
+    }
+}
+
 /// Minimal bindings the noise lib needs, for standalone evaluators (tests, export).
 /// Binding numbers match common.wgsl.
 #[allow(dead_code)] // used by tests now, texture export in milestone 5
@@ -117,6 +133,8 @@ pub fn compile_with(g: &Graph, caches: &BTreeMap<NodeId, u32>) -> Result<Compile
                 n.distortion,
                 n.seed.map_or(-1.0, |s| s as f32), // shortcut: f32 holds seeds exactly only below 2^24
                 n.feature as u32 as f32,
+                n.metric as u32 as f32,
+                n.jitter,
             ]),
             _ => {}
         }
@@ -148,7 +166,15 @@ pub fn compile_with(g: &Graph, caches: &BTreeMap<NodeId, u32>) -> Result<Compile
     if params.is_empty() {
         params.push(0.0); // storage buffers cannot be empty
     }
-    let mut wgsl: String = cg.kinds.iter().map(|&k| fbm_function(k)).collect();
+    // The pattern kernels are only worth compiling when there is a pattern node.
+    let mut wgsl = if g.nodes.values().any(|n| matches!(n.kind, NodeKind::Pattern(_))) { PATTERN_LIB.to_string() } else { String::new() };
+    // The general Worley (metrics, jitter, cell edges) only when a node uses it.
+    let general_worley = g.nodes.values().any(|n| matches!(&n.kind, NodeKind::Noise(p) if p.kind == NoiseKind::Worley
+        && (p.metric != crate::graph::WorleyMetric::Euclidean || p.jitter != 1.0 || p.feature == crate::graph::WorleyFeature::Edges)));
+    if general_worley {
+        wgsl += WORLEY_GENERAL_LIB;
+    }
+    wgsl += &cg.kinds.iter().map(|&k| fbm_function(k, general_worley)).collect::<String>();
     wgsl += &cg.out;
     Ok(Compiled { wgsl, params })
 }
@@ -165,11 +191,12 @@ fn tetra_body(sample: impl Fn(&str) -> String) -> String {
 const FBM_TEMPLATE: &str = include_str!("noise_fbm.wgsl");
 
 /// The fBm wrapper for one noise kind (see noise_fbm.wgsl).
-fn fbm_function(kind: NoiseKind) -> String {
+fn fbm_function(kind: NoiseKind, general_worley: bool) -> String {
     let base = match kind {
         NoiseKind::Perlin => "clamp(perlin(x, period, seed + o), -1.0, 1.0)",
         NoiseKind::Simplex => "clamp(simplex(x, period, seed + o), -1.0, 1.0)",
-        NoiseKind::Worley => "worley(x, period, seed + o, feature)",
+        NoiseKind::Worley if general_worley => "worley(x, period, seed + o, feature, metric, jitter)",
+        NoiseKind::Worley => "worley_classic(x, period, seed + o, feature)",
         NoiseKind::White => "white(x, period, seed + o)",
         NoiseKind::Blue => "blue(x, period, seed + o)",
     };
@@ -361,7 +388,7 @@ mod tests {
     #[test]
     fn preview_shader_validates() {
         let c = compile(&Graph::default_graph()).unwrap();
-        let src = crate::view::shader_source(&c.wgsl);
+        let src = crate::view::shader_source(&c.wgsl, true);
         let module = naga::front::wgsl::parse_str(&src).unwrap_or_else(|e| panic!("{}", e.emit_to_string(&src)));
         naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all())
             .validate(&module)
@@ -374,7 +401,7 @@ mod tests {
         let c = compile_with(&g, &BTreeMap::from([(1, 3)])).unwrap();
         assert!(c.wgsl.contains("cache_sample(3u, p)"));
         assert!(!c.wgsl.contains("fn noise_k0(")); // the cached noise isn't evaluated
-        let src = crate::view::shader_source(&c.wgsl);
+        let src = crate::view::shader_source(&c.wgsl, false);
         let module = naga::front::wgsl::parse_str(&src).unwrap_or_else(|e| panic!("{}", e.emit_to_string(&src)));
         naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all()).validate(&module).unwrap();
     }

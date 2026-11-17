@@ -1,7 +1,8 @@
 // Template, not WGSL on its own: codegen.rs instantiates it once per noise kind used in a graph,
 // replacing KIND, HAS_OCTAVES and BASE (the kind's noise at x for octave seed `seed + o`).
 // A noise node with Blender's Noise Texture parameters. Params at P[s..s+8]:
-// scale, normalize, octaves, lacunarity, roughness, distortion, seed (-1 = global), worley feature.
+// scale, normalize, octaves, lacunarity, roughness, distortion, seed (-1 = global), worley feature,
+// worley metric, worley jitter (P[s..s+10]).
 // Every BASE stays within [-1, 1]; Graph::density_range relies on it.
 fn noise_kKIND(q: vec3f, s: u32) -> f32 {
     let scale = P[s];
@@ -12,6 +13,8 @@ fn noise_kKIND(q: vec3f, s: u32) -> f32 {
     let distortion = P[s + 5u];
     let seed = select(u.seed, u32(P[s + 6u]), P[s + 6u] >= 0.0);
     let feature = u32(P[s + 7u]);
+    let metric = u32(P[s + 8u]);
+    let jitter = P[s + 9u];
 
     // Whole-number scale and lacunarity tile; anything else samples the unwrapped lattice.
     let tiles = fract(scale) == 0.0 && (octaves <= 1u || fract(lacunarity) == 0.0);

@@ -357,11 +357,13 @@ impl Gpu {
     }
 }
 
-/// Full shader source for a compiled graph.
-pub fn shader_source(graph_wgsl: &str) -> String {
+/// Full shader source for a compiled graph. `mask` compiles the mesh displacement mask; without it the
+/// mask is a stub, which keeps pipeline builds fast for everything that is not a masked mesh.
+pub fn shader_source(graph_wgsl: &str, mask: bool) -> String {
     format!(
-        "{}\n{graph_wgsl}\n{}\n{}\n{}",
+        "{}\n{}\n{graph_wgsl}\n{}\n{}\n{}",
         codegen::NOISE_LIB,
+        codegen::mesh_mask_lib(mask),
         include_str!("common.wgsl"),
         include_str!("raymarch.wgsl"),
         include_str!("slice.wgsl")
@@ -392,11 +394,11 @@ pub fn request_timestamps(mut cfg: egui_wgpu::WgpuConfiguration) -> egui_wgpu::W
     cfg
 }
 
-pub fn build(device: &wgpu::Device, queue: &wgpu::Queue, format: wgpu::TextureFormat, graph_wgsl: &str) -> Gpu {
+pub fn build(device: &wgpu::Device, queue: &wgpu::Queue, format: wgpu::TextureFormat, graph_wgsl: &str, mask: bool) -> Gpu {
     // shortcut: no error scope here; the full shader is naga-validated in tests. Add one if users hit shader panics.
     let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("preview"),
-        source: wgpu::ShaderSource::Wgsl(shader_source(graph_wgsl).into()),
+        source: wgpu::ShaderSource::Wgsl(shader_source(graph_wgsl, mask).into()),
     });
     let stages = wgpu::ShaderStages::FRAGMENT | wgpu::ShaderStages::COMPUTE;
     let entry = |binding, ty| wgpu::BindGroupLayoutEntry {

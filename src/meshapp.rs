@@ -249,7 +249,7 @@ impl App {
         let p = progress.clone();
         let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || {
-            let r = MeshEvaluator::new(&device, &queue, &graph, seed, view, origin, voxel, (lo, hi)).and_then(|ev| {
+            let r = MeshEvaluator::new(&device, &queue, &graph, seed, view, origin, voxel, (lo, hi), displace.mask.count > 0).and_then(|ev| {
                 let job = Job { ev: &ev, d: displace, lo, hi, reach, norm, settings };
                 job.run(&path, &p)
             });

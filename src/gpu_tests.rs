@@ -239,7 +239,7 @@ fn bench_preview() {
         wgsl = wgsl.replace("fn graph_density(p: vec3f) -> f32 { return ", &format!("fn graph_density(p: vec3f) -> f32 {{ return {n}e-30 + "));
     }
     let t0 = std::time::Instant::now();
-    let mut gpu = view::build(&device, &queue, wgpu::TextureFormat::Bgra8Unorm, &wgsl);
+    let mut gpu = view::build(&device, &queue, wgpu::TextureFormat::Bgra8Unorm, &wgsl, false);
     eprintln!("backend {:?}: pipeline build {:.0} ms", adapter.get_info().backend, t0.elapsed().as_secs_f32() * 1e3);
 
     let size = [1000u32, 1000];
@@ -742,7 +742,7 @@ mod mesh_export_tests {
         let bounds = mesh.bounds();
         let sdf = MeshSdf::build(&mesh, 64, 0.6, &AtomicU32::new(0));
         let (texture, view) = sdf.upload(&gpu.device, &gpu.queue);
-        let ev = MeshEvaluator::new(&gpu.device, &gpu.queue, graph, seed, view, sdf.origin, sdf.voxel, bounds).unwrap();
+        let ev = MeshEvaluator::new(&gpu.device, &gpu.queue, graph, seed, view, sdf.origin, sdf.voxel, bounds, true).unwrap();
         (sdf, ev, texture)
     }
 
@@ -952,7 +952,7 @@ fn export_a_real_mesh() {
     let sdf = crate::meshsdf::MeshSdf::build(&mesh, 128, pad, &Default::default());
     eprintln!("distance grid {:?} in {:?}", sdf.dims, t.elapsed());
     let (_tex, view) = sdf.upload(&gpu.device, &gpu.queue);
-    let ev = MeshEvaluator::new(&gpu.device, &gpu.queue, &graph, seed, view, sdf.origin, sdf.voxel, mesh.bounds()).unwrap();
+    let ev = MeshEvaluator::new(&gpu.device, &gpu.queue, &graph, seed, view, sdf.origin, sdf.voxel, mesh.bounds(), false).unwrap();
     let push = crate::view::push_range(graph.density_range(), amount, (1.0, 1.0));
     let reach = push.0.abs().max(push.1.abs()).min(pad - 0.05);
     let (lo, hi) = mesh.bounds();
@@ -1302,6 +1302,159 @@ mod pattern_family_tests {
             let hi = v.iter().cloned().fold(f32::MIN, f32::max);
             let lo = v.iter().cloned().fold(f32::MAX, f32::min);
             assert!(hi > 0.97 && lo < -0.97 && hi <= 1.0001 && lo >= -1.0001, "surface {surface}: {lo}..{hi}");
+        }
+    }
+}
+
+/// Prints the 99.9th percentile and maximum of each Worley feature for every metric and jitter, which
+/// is where `worley_scale` in noise.wgsl comes from: `cargo test measure_worley_ranges -- --ignored --nocapture`.
+#[test]
+#[ignore = "measurement"]
+fn measure_worley_ranges() {
+    let gpu = gpu().expect("needs a GPU");
+    let c = codegen::compile(&noise_graph(NoiseParams { kind: NoiseKind::Worley, jitter: 0.5, ..Default::default() })).unwrap();
+    let pts: Vec<[f32; 4]> = points(200_000, 21).into_iter().map(|p| [p[0], p[1], p[2], 0.0]).collect();
+    let stat = |expr: &str| {
+        let mut v = eval_expr(&gpu, &c, expr, &pts);
+        v.sort_by(|a, b| a.total_cmp(b));
+        (v[v.len() * 999 / 1000], v[v.len() - 1])
+    };
+    for metric in 0..3 {
+        for jitter in [0.0f32, 0.25, 0.5, 0.75, 1.0] {
+            let f1 = stat(&format!("cells(q.xyz * 7.3, 0, 5u, false, {metric}u, {jitter:?}).x"));
+            let f2 = stat(&format!("cells(q.xyz * 7.3, 0, 5u, false, {metric}u, {jitter:?}).y"));
+            let d = stat(&format!("cells(q.xyz * 7.3, 0, 5u, false, {metric}u, {jitter:?}).y - cells(q.xyz * 7.3, 0, 5u, false, {metric}u, {jitter:?}).x"));
+            let w = if metric == 0 { stat(&format!("cell_wall_distance(q.xyz * 7.3, 0, 5u, {jitter:?})")) } else { (0.0, 0.0) };
+            eprintln!("metric {metric} jitter {jitter:4}: F1 {:.3}/{:.3}  F2 {:.3}/{:.3}  F2-F1 {:.3}/{:.3}  wall {:.3}/{:.3}   (99.9th / max)", f1.0, f1.1, f2.0, f2.1, d.0, d.1, w.0, w.1);
+        }
+    }
+}
+
+// ---- Worley variants ----------------------------------------------------------------
+
+mod worley_variant_tests {
+    use super::*;
+    use crate::graph::WorleyMetric;
+
+    fn worley(f: impl FnOnce(&mut NoiseParams)) -> Graph {
+        let mut p = NoiseParams { kind: NoiseKind::Worley, scale: 4.0, octaves: 1, ..Default::default() };
+        f(&mut p);
+        noise_graph(p)
+    }
+
+    #[test]
+    fn every_metric_jitter_and_feature_stays_in_range_and_tiles() {
+        let Some(gpu) = gpu() else { return eprintln!("no GPU adapter; skipping") };
+        let pts = points(20000, 13);
+        for metric in [WorleyMetric::Euclidean, WorleyMetric::Manhattan, WorleyMetric::Chebyshev] {
+            for jitter in [0.0, 0.3, 0.7, 1.0] {
+                for feature in [WorleyFeature::F1, WorleyFeature::F2, WorleyFeature::F2MinusF1, WorleyFeature::Edges] {
+                    if feature == WorleyFeature::Edges && metric != WorleyMetric::Euclidean {
+                        continue; // the cell edge distance is always Euclidean
+                    }
+                    let what = format!("{metric:?} jitter {jitter} {feature:?}");
+                    let g = worley(|p| { p.metric = metric; p.jitter = jitter; p.feature = feature; });
+                    let v = eval(&gpu, &g, &pts);
+                    assert!(v.iter().all(|x| x.is_finite()), "{what}: NaN");
+                    let (lo, hi) = (v.iter().cloned().fold(f32::MAX, f32::min), v.iter().cloned().fold(f32::MIN, f32::max));
+                    assert!(lo >= -1.0001 && hi <= 1.0001, "{what}: range {lo}..{hi}");
+                    assert!(hi - lo > 0.8, "{what}: range {lo}..{hi} is too narrow");
+                    for axis in 0..3 {
+                        let moved: Vec<[f32; 3]> = pts.iter().map(|p| { let mut q = *p; q[axis] += 1.0; q }).collect();
+                        let w = eval(&gpu, &g, &moved);
+                        let off = v.iter().zip(&w).filter(|(a, b)| (*a - *b).abs() > 2e-3).count();
+                        assert!(off <= 4, "{what}, axis {axis}: {off} points differ one tile later");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn distance_measures_and_cell_edges_match_hand_computed_values() {
+        let Some(gpu) = gpu() else { return eprintln!("no GPU adapter; skipping") };
+        let c = codegen::compile(&worley(|p| p.jitter = 0.5)).unwrap(); // a graph that includes the general Worley
+        // With jitter 0 every feature point is the middle of its cell, so the point nearest (0.75, 0.55, 0.62)
+        // is (0.5, 0.5, 0.5): the offset is (0.25, 0.05, 0.12).
+        let at = [[0.75, 0.55, 0.62, 0.0]];
+        let raw = |metric: u32| eval_expr(&gpu, &c, &format!("cells(q.xyz, 0, 1u, false, {metric}u, 0.0).x"), &at)[0];
+        near(raw(0), (0.25f32 * 0.25 + 0.05 * 0.05 + 0.12 * 0.12).sqrt(), "Euclidean");
+        near(raw(1), 0.25 + 0.05 + 0.12, "Manhattan");
+        near(raw(2), 0.25, "Chebyshev");
+        // Cell edges of a perfect lattice: 0 at the wall between two cells, 0.5 (cell units) at a centre.
+        let wall = |p: [f32; 3]| eval_expr(&gpu, &c, "cell_wall_distance(q.xyz, 0, 1u, 0.0)", &[[p[0], p[1], p[2], 0.0]])[0];
+        near(wall([0.5, 0.5, 0.5]), 0.5, "wall distance at a cell centre");
+        near(wall([0.999, 0.5, 0.5]), 0.001, "wall distance next to a wall");
+        near(wall([0.8, 0.5, 0.5]), 0.2, "wall distance 0.2 from a wall");
+        // Through the node: a lattice's F1 is -1 at a feature point, and its edges are -1 on a wall, +1 at a centre.
+        let lattice = |feature: WorleyFeature, metric: WorleyMetric| worley(|p| { p.jitter = 0.0; p.feature = feature; p.metric = metric; });
+        near(eval(&gpu, &lattice(WorleyFeature::F1, WorleyMetric::Euclidean), &[[0.5 / 4.0, 0.5 / 4.0, 0.5 / 4.0]])[0], -1.0, "F1 at a feature point");
+        let edges = lattice(WorleyFeature::Edges, WorleyMetric::Euclidean);
+        let v = eval(&gpu, &edges, &[[0.5 / 4.0, 0.5 / 4.0, 0.5 / 4.0], [1.0 / 4.0, 0.5 / 4.0, 0.5 / 4.0]]);
+        near(v[0], 1.0, "edges at a cell centre");
+        near(v[1], -1.0, "edges on a wall");
+    }
+
+    /// The Worley that shipped before jitter, metrics and edges, kept here under other names: with jitter 1
+    /// and the Euclidean metric the new code must give exactly the same values for every original feature.
+    const LEGACY_WORLEY: &str = "
+fn cells_legacy(x: vec3f, period: i32, seed: u32, want_value: bool) -> vec3f {
+    let i = wrap_cell(vec3i(floor(x)), period);
+    let f = fract(x);
+    var f1 = 1e9;
+    var f2 = 1e9;
+    var nearest = i;
+    for (var z = -1; z <= 1; z++) {
+        for (var y = -1; y <= 1; y++) {
+            for (var xx = -1; xx <= 1; xx++) {
+                let o = vec3i(xx, y, z);
+                let c = wrap_near(i + o, period);
+                let d = vec3f(o) + hash01(c, seed) - f;
+                let d2 = dot(d, d);
+                if (d2 < f1) { f2 = f1; f1 = d2; nearest = c; } else if (d2 < f2) { f2 = d2; }
+            }
+        }
+    }
+    var val = 0.0;
+    if (want_value) { val = hash01(nearest, seed + 0x51ED27u).x * 2.0 - 1.0; }
+    return vec3f(sqrt(f1), sqrt(f2), val);
+}
+fn worley_legacy(x: vec3f, period: i32, seed: u32, feature: u32) -> f32 {
+    let c = cells_legacy(x, period, seed, feature == 3u);
+    switch feature {
+        case 1u: { return clamp(c.y / 1.4 * 2.0 - 1.0, -1.0, 1.0); }
+        case 2u: { return clamp((c.y - c.x) * 2.0 - 1.0, -1.0, 1.0); }
+        case 3u: { return c.z; }
+        default: { return clamp(c.x * 2.0 - 1.0, -1.0, 1.0); }
+    }
+}
+";
+
+    #[test]
+    fn the_general_cells_loop_agrees_with_the_classic_one() {
+        let Some(gpu) = gpu() else { return eprintln!("no GPU adapter; skipping") };
+        let c = codegen::compile(&worley(|p| p.jitter = 0.5)).unwrap();
+        let pts: Vec<[f32; 4]> = points(20000, 19).into_iter().map(|p| [p[0], p[1], p[2], 0.0]).collect();
+        for component in ["x", "y", "z"] {
+            let general = eval_expr(&gpu, &c, &format!("cells(q.xyz * 5.3, 0, 2u, true, 0u, 1.0).{component}"), &pts);
+            let classic = eval_expr(&gpu, &c, &format!("cells_classic(q.xyz * 5.3, 0, 2u, true).{component}"), &pts);
+            assert!(general.iter().zip(&classic).all(|(a, b)| a.to_bits() == b.to_bits()), "component {component} differs");
+        }
+    }
+
+    #[test]
+    fn the_default_worley_is_bit_for_bit_what_it_was() {
+        let Some(gpu) = gpu() else { return eprintln!("no GPU adapter; skipping") };
+        let mut c = codegen::compile(&worley(|p| p.jitter = 0.5)).unwrap();
+        c.wgsl = format!("{LEGACY_WORLEY}
+{}", c.wgsl);
+        let pts: Vec<[f32; 4]> = points(20000, 17).into_iter().map(|p| [p[0], p[1], p[2], 0.0]).collect();
+        for feature in 0..4u32 {
+            for (period, scale) in [(0, 3.7), (4, 4.0), (6, 6.0)] {
+                let new = eval_expr(&gpu, &c, &format!("worley(q.xyz * {scale:?}, {period}, 9u, {feature}u, 0u, 1.0)"), &pts);
+                let old = eval_expr(&gpu, &c, &format!("worley_legacy(q.xyz * {scale:?}, {period}, 9u, {feature}u)"), &pts);
+                assert!(new.iter().zip(&old).all(|(a, b)| a.to_bits() == b.to_bits()), "feature {feature}, period {period}: the default Worley changed");
+            }
         }
     }
 }
