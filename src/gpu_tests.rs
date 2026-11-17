@@ -1289,12 +1289,20 @@ mod pattern_family_tests {
         use PatternKind::*;
         use PatternOutput::{CellValue, Distance, Shape};
         let Some(gpu) = gpu() else { return eprintln!("no GPU adapter; skipping") };
-        for variant in 0..3 {
+        for variant in 0..4 {
             for output in [Distance, Shape, CellValue] {
-                let g = pattern(Honeycomb, |p| { p.variant = variant; p.mode2d = variant == 0; p.output = output; if variant > 0 { p.counts = [4.0; 3]; } });
+                let g = pattern(Honeycomb, |p| { p.variant = variant; p.mode2d = variant == 0 || variant == 3; p.output = output; if variant > 0 { p.counts = [4.0; 3]; } });
                 check(&gpu, &g, &format!("honeycomb {variant} {output:?}"), output != CellValue);
             }
         }
+        // Triangles, 4 x 4 counts: X = 8 q.x, Y = 4 q.y. The up triangle (0,0) (2,0) (1,1) has its
+        // incentre at (1, 1/(1+sqrt 2)) and its walls along Y = 0 and X + Y = 2.
+        let tri = pattern(Honeycomb, |p| { p.variant = 3; p.counts = [4.0; 3]; p.output = Distance; });
+        let inc = 1.0 / (1.0 + 2f32.sqrt());
+        let v = eval(&gpu, &tri, &[[1.0 / 8.0, inc / 4.0, 0.3], [0.2, 0.0, 0.3], [(2.0 - 0.5) / 8.0, 0.5 / 4.0, 0.3]]);
+        near(v[0], 1.0, "triangle incentre");
+        near(v[1], -1.0, "triangle wall Y = 0");
+        near(v[2], -1.0, "triangle wall X + Y = 2");
         // Lattice points are cell centres (depth 1); the midpoint between two neighbouring points is
         // on the wall between their cells (depth 0). counts are cells per tile; the points sit at
         // (cell + b) / counts.

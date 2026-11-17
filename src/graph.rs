@@ -399,6 +399,12 @@ impl PatternParams {
                     return Some(format!("the number of rows ({rows}) must be a multiple of the row-offset steps ({})", self.steps));
                 }
             }
+            PatternKind::Honeycomb if self.variant == 3 => {
+                let rows = self.counts[self.axes().1];
+                if (rows as u32) % 2 != 0 {
+                    return Some(format!("triangles need an even number of rows ({rows} is odd)"));
+                }
+            }
             PatternKind::Checker => {
                 if let Some(a) = self.used_axes().into_iter().find(|a| (self.counts[*a] as u32) % 2 != 0) {
                     return Some(format!("a checker needs an even count on every used axis ({} is odd)", self.counts[a]));

@@ -283,6 +283,37 @@ fn truchet(q: vec3f, s: u32) -> f32 {
     return -1.0 + 2.0 * ramp01(half_width * (1.0 - soft), half_width * (1.0 + soft), d);
 }
 
+// Triangles (honeycomb layout 3): the plane of the two axes left by `axis`, extruded along it.
+// In units where the row axis is 2 per count and the stacking axis 1 per count, the three line
+// families are Y = whole, X + Y = even and X - Y = even, which cut the plane into right isosceles
+// triangles of base 2 and height 1 (inradius 1/(1 + sqrt 2)); with counts rows = 1.155 x columns
+// they are equilateral. Whole counts tile when the number of rows is even.
+fn triangles(q: vec3f, n: vec3f, gap: f32, bevel: f32, mode: u32, axis: u32, seed: u32) -> f32 {
+    var r = 0u;
+    var st = 1u;
+    if (axis == 0u) { r = 1u; st = 2u; }
+    else if (axis == 1u) { r = 0u; st = 2u; }
+    let X = q[r] * n[r] * 2.0;
+    let Y = q[st] * n[st];
+    let a = (X + Y) * 0.5;
+    let b = (X - Y) * 0.5;
+    let dy = abs(Y - round(Y));
+    let da = abs(a - round(a)) * 1.41421356;
+    let db = abs(b - round(b)) * 1.41421356;
+    let depth = clamp(min(dy, min(da, db)) * 2.41421356, 0.0, 1.0); // 0 on a wall, 1 at the incentre
+    if (mode == 2u) {
+        let rows = max(i32(n[st] + 0.5), 1);
+        let cols = max(i32(n[r] + 0.5) * 2, 1);
+        let ia = i32(floor(a));
+        let ib = i32(floor(b));
+        let j = i32(floor(Y));
+        let id = vec3i(((j % rows) + rows) % rows, (((ia + ib) % cols) + cols) % cols, ia - ib - j); // row, column, up or down
+        return hash01(id, seed).x * 2.0 - 1.0;
+    }
+    if (mode == 1u) { return 1.0 - 2.0 * ramp01(gap, gap + bevel, depth); }
+    return depth * 2.0 - 1.0;
+}
+
 // The cells of a lattice. variant 0 hexagons (the plane of the two axes left by `axis`, extruded along
 // it), 1 the cells of a body-centred lattice, 2 of a face-centred one (the points are the ones in
 // `dimples`; in 2D the second point is (1/2, 1/2) in the plane). The wall distance is exact: find the
@@ -298,6 +329,7 @@ fn honeycomb(q: vec3f, s: u32) -> f32 {
     let axis = u32(P[s + 8u]);
     let seed = select(u.seed, u32(P[s + 9u]), P[s + 9u] >= 0.0);
     let lattice = u32(P[s + 10u]);
+    if (lattice == 3u) { return triangles(q, n, gap, bevel, mode, axis, seed); }
     var ly = 2u; // the extruded axis in 2D
     if (flat2d && axis == 0u) { ly = 0u; }
     else if (flat2d && axis == 1u) { ly = 1u; }

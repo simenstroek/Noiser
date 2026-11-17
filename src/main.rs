@@ -1095,11 +1095,12 @@ fn pattern_props(ui: &mut egui::Ui, p: &mut graph::PatternParams) {
                 ui.selectable_value(v, 0, "Hexagons (2D)");
                 ui.selectable_value(v, 1, "Body-centred cells");
                 ui.selectable_value(v, 2, "Face-centred cells");
+                ui.selectable_value(v, 3, "Triangles (2D)");
             });
             if p.variant != before {
-                p.mode2d = p.variant == 0; // hexagons are flat; the lattice cells are 3D
+                p.mode2d = p.variant == 0 || p.variant == 3; // hexagons and triangles are flat; the lattice cells are 3D
             }
-            if p.variant == 0 {
+            if p.variant == 0 || p.variant == 3 {
                 row(ui, &mut p.axis, d.axis, |ui, v| {
                     ui.label("extrude along");
                     for (a, name) in [(0, "X"), (1, "Y"), (2, "Z")] {
@@ -1110,6 +1111,9 @@ fn pattern_props(ui: &mut egui::Ui, p: &mut graph::PatternParams) {
             pattern_counts(ui, p, ["cells", "cells", "cells"]);
             if p.variant == 0 {
                 ui.weak("Hexagons are regular when the cell counts are in the ratio 1 : 0.577: 7 × 4, 12 × 7, 26 × 15.");
+            }
+            if p.variant == 3 {
+                ui.weak("Triangles are equilateral when the second count is 1.155 × the first and even: 6 × 7 is close, 12 × 14, 26 × 30.");
             }
             row(ui, &mut p.output, d.output, |ui, v| {
                 ui.selectable_value(v, Distance, "Distance");
