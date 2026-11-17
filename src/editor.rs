@@ -48,6 +48,8 @@ pub struct Editor {
     pub selected: BTreeSet<NodeId>,
     /// Snap nodes to a 20-unit grid when a drag ends (a preference).
     pub snap: bool,
+    /// A node was dragged since the pointer went down (so releasing may splice it into a wire).
+    node_dragged: bool,
     /// Node shown in the 3D and slice views instead of the Density output.
     pub preview: Option<NodeId>,
     /// How often each node was picked from the wire-drop menu; most used are listed first.
@@ -74,6 +76,7 @@ impl Default for Editor {
             zoom: 1.0,
             selected: BTreeSet::new(),
             snap: false,
+            node_dragged: false,
             preview: None,
             picks: BTreeMap::new(),
             wire: None,
@@ -581,6 +584,7 @@ impl Editor {
             }
         }
         if moved != Vec2::ZERO {
+            self.node_dragged = true;
             for id in &self.selected {
                 if let Some(n) = graph.nodes.get_mut(id) {
                     n.pos[0] += moved.x;
@@ -591,6 +595,26 @@ impl Editor {
 
         // Wire being dragged: connect on release over a matching port, or offer new nodes on empty space.
         let released = ui.input(|i| i.pointer.primary_released());
+        // A lone, unconnected node dropped on a wire is spliced into it.
+        if released && self.node_dragged {
+            if let [id] = self.selected.iter().copied().collect::<Vec<_>>()[..] {
+                if let Some(rect) = layouts.get(&id).map(|l| l.rect) {
+                    let n_in = graph.nodes.get(&id).map_or(0, |n| n.kind.input_count());
+                    let free = !graph.edges.iter().any(|e| e.from == id || e.to == id);
+                    let target = graph.edges.iter().find(|e| {
+                        e.from != id && e.to != id && matches!((layouts.get(&e.from).and_then(|l| l.output), layouts.get(&e.to).and_then(|l| l.inputs.get(e.port))), (Some(a), Some(&b)) if wire_passes_through(a, b, rect.shrink(4.0 * z)))
+                    }).copied();
+                    if let (true, true, Some(edge)) = (free, n_in > 0 && graph.nodes.get(&id).is_some_and(|n| has_output(&n.kind)), target) {
+                        graph.disconnect(edge.to, edge.port);
+                        graph.connect(edge.from, id, 0);
+                        graph.connect(id, edge.to, edge.port);
+                    }
+                }
+            }
+        }
+        if released {
+            self.node_dragged = false;
+        }
         if let (Some(wire), Some(p)) = (self.wire, ui.input(|i| i.pointer.interact_pos())) {
             let drag_stroke = Stroke::new(
                 2.0 * z,
@@ -823,6 +847,18 @@ fn palette_matching(query: &str) -> Vec<(&'static str, NodeKind)> {
     palette().into_iter().filter(|(label, _)| label.to_lowercase().contains(&q)).collect()
 }
 
+/// Whether the wire from `a` to `b` (drawn by `bezier`) passes through `rect`.
+fn wire_passes_through(a: Pos2, b: Pos2, rect: Rect) -> bool {
+    let dx = ((b.x - a.x).abs() * 0.5).max(30.0);
+    let (c1, c2) = (a + Vec2::new(dx, 0.0), b - Vec2::new(dx, 0.0));
+    (0..=32).any(|i| {
+        let t = i as f32 / 32.0;
+        let u = 1.0 - t;
+        let p = a.to_vec2() * (u * u * u) + c1.to_vec2() * (3.0 * u * u * t) + c2.to_vec2() * (3.0 * u * t * t) + b.to_vec2() * (t * t * t);
+        rect.contains(p.to_pos2())
+    })
+}
+
 fn bezier(a: Pos2, b: Pos2, stroke: Stroke) -> CubicBezierShape {
     let dx = ((b.x - a.x).abs() * 0.5).max(30.0);
     CubicBezierShape::from_points_stroke([a, a + Vec2::new(dx, 0.0), b - Vec2::new(dx, 0.0), b], false, Color32::TRANSPARENT, stroke)
@@ -864,6 +900,13 @@ mod tests {
             let q = ed.to_screen(Pos2::ZERO, [n.pos[0] + NODE_W, n.pos[1] + HEADER_H]);
             assert!(p.x >= 0.0 && p.y >= 0.0 && q.x <= size.x && q.y <= size.y, "node at {:?} is outside the canvas", n.pos);
         }
+    }
+
+    #[test]
+    fn wires_are_found_by_a_rect_on_them() {
+        let (a, b) = (Pos2::new(0.0, 0.0), Pos2::new(300.0, 100.0));
+        assert!(wire_passes_through(a, b, Rect::from_center_size(Pos2::new(150.0, 50.0), Vec2::splat(20.0))), "the middle of the wire");
+        assert!(!wire_passes_through(a, b, Rect::from_center_size(Pos2::new(150.0, 400.0), Vec2::splat(20.0))));
     }
 
     #[test]

@@ -95,7 +95,7 @@ quarter) and a march step limit; none of them affect exports.
 |---|---|
 | Node graph | Middle-drag pans, scroll zooms, left-drag on empty space box-selects, right-click adds a node |
 | | Drag from a pin to connect; drag a connected input away to disconnect; drop a wire on empty space to pick a node for it |
-| | Delete removes the selection, Ctrl+D duplicates it at the cursor, Ctrl+C / Ctrl+V copy and paste, M mutes, F / Home frame |
+| | | Delete removes the selection, Ctrl+D duplicates it at the cursor, Ctrl+C / Ctrl+V copy and paste, M mutes, F / Home frame; drop a lone node on a wire to splice it in |
 | 3D view | Drag orbits, scroll zooms |
 | Slice view | Scroll moves the slice |
 
