@@ -8,6 +8,7 @@ mod codegen;
 mod editor;
 mod export;
 mod graph;
+mod history;
 mod mesh;
 mod meshapp;
 mod meshmask;
@@ -119,6 +120,7 @@ struct App {
     batch_job: Option<meshapp::BatchJob>,
     /// How strongly the noise displaces each part of a mesh (see meshmask.rs).
     mesh_mask: meshmask::MaskSettings,
+    history: history::History,
 }
 
 /// An export running on a worker thread.
@@ -178,6 +180,7 @@ impl App {
             }
         });
         let session = root.and_then(|r| backup::Session::start(&r).ok());
+        let saved_for_history = graph.clone();
         let mut app = Self {
             rs: cc.wgpu_render_state.clone().expect("Noiser needs the wgpu renderer"),
             saved: graph.clone(),
@@ -211,6 +214,7 @@ impl App {
             batch_seeds: meshexport::SeedMode::Same,
             batch_job: None,
             mesh_mask: meshmask::MaskSettings::default(),
+            history: history::History::new(&saved_for_history),
         };
         if let Some(p) = mesh_arg {
             app.start_mesh_load(p);
@@ -433,6 +437,14 @@ impl App {
             _pad_mask: 0.0,
             mask: std::array::from_fn(|i| mask.terms[i]),
             look: [[pv.color[0], pv.color[1], pv.color[2], pv.specular], [pv.roughness, pv.shadows as u32 as f32, 0.0, 0.0]],
+        }
+    }
+
+    fn undo(&mut self, redo: bool) {
+        let g = if redo { self.history.redo(&self.graph) } else { self.history.undo(&self.graph) };
+        if let Some(g) = g {
+            self.graph = g;
+            self.editor.selected.retain(|id| self.graph.nodes.contains_key(id));
         }
     }
 
@@ -758,10 +770,27 @@ impl eframe::App for App {
                 ui.ctx().request_repaint_after(backup::INTERVAL); // flush the held-back change
             }
         }
+        // Ctrl+Z / Ctrl+Y (or Ctrl+Shift+Z), unless a text field has the keyboard.
+        if !ui.ctx().egui_wants_keyboard_input() {
+            let (z, y, shift) = ui.input(|i| (i.modifiers.command && i.key_pressed(egui::Key::Z), i.modifiers.command && i.key_pressed(egui::Key::Y), i.modifiers.shift));
+            if y || (z && shift) {
+                self.undo(true);
+            } else if z {
+                self.undo(false);
+            }
+        }
         let tiling = self.graph.tiling();
 
         egui::Panel::top("menu").show(ui, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
+                ui.menu_button("Edit", |ui| {
+                    if ui.add_enabled(self.history.can_undo(), egui::Button::new("Undo").shortcut_text("Ctrl+Z")).clicked() {
+                        self.undo(false);
+                    }
+                    if ui.add_enabled(self.history.can_redo(), egui::Button::new("Redo").shortcut_text("Ctrl+Y")).clicked() {
+                        self.undo(true);
+                    }
+                });
                 ui.menu_button("File", |ui| {
                     if ui.button("New").clicked() {
                         self.graph = Graph::default_graph();
@@ -829,6 +858,9 @@ impl eframe::App for App {
         egui::Panel::bottom("graph").resizable(true).default_size(330.0).show(ui, |ui| {
             self.editor.show(ui, &mut self.graph, &tiling);
         });
+        // One undo step per finished gesture: wait until the pointer is released.
+        let settled = !ui.input(|i| i.pointer.any_down());
+        self.history.commit(&self.graph, settled);
         // The views show the Density output, or the previewed node wired into it.
         let shown = match self.editor.preview {
             Some(id) => std::borrow::Cow::Owned(self.graph.previewing(id)),

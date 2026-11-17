@@ -203,3 +203,6 @@ Differences from the sketch in 3a, and known limits:
 
 ### Viewport material (2026-11-17)
 Built: Material section in the Preview panel (colour, specular, roughness, soft shadows). Uniform-only (`look` in `Uniforms`), viewport only, never exported; defaults reproduce the old shading exactly. Soft shadows are a 40-step distance-field march toward the sun, only run when enabled. Not built: environment map, lighting setups, half-res rendering, mesh vertex-colour masks.
+
+### Undo / redo (2026-11-17)
+Built: `history.rs`, whole-graph snapshots committed once the pointer is released (one drag = one step, 200 deep), Edit menu plus Ctrl+Z / Ctrl+Y / Ctrl+Shift+Z (not while a text field has focus). Opening a file or New is undoable. Not covered: viewport settings and mesh settings are not part of history. Next: node search in the add menu, frame/comment nodes, preferences window, recent files.
