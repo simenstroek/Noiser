@@ -240,6 +240,7 @@ impl App {
         let prefs = prefs.sane();
         cc.egui_ctx.set_zoom_factor(prefs.ui_scale);
         let mut editor = editor::Editor::default();
+        editor.frame_next = true;
         // Wire-drop menu pick counts survive restarts.
         if let Some(picks) = cc.storage.and_then(|s| s.get_string(PICKS_KEY)).and_then(|s| serde_json::from_str(&s).ok()) {
             editor.picks = picks;
@@ -472,6 +473,7 @@ impl App {
             self.graph = b.graph;
             self.path = b.path;
             self.editor.selected.clear();
+                self.editor.frame_next = true;
             self.editor.preview = None;
             self.status = "Restored from backup (not saved yet)".into();
         }
@@ -556,6 +558,7 @@ impl App {
                 self.saved = g.clone();
                 self.graph = g;
                 self.editor.selected.clear();
+                self.editor.frame_next = true;
                 self.editor.preview = None;
                 self.status = format!("Opened {}", path.display());
                 push_recent(&mut self.recent, path.clone());
@@ -1071,6 +1074,7 @@ impl eframe::App for App {
                         self.graph = Graph::default_graph();
                         self.saved = self.graph.clone();
                         self.editor.selected.clear();
+                self.editor.frame_next = true;
                         self.editor.preview = None;
                         self.path = None;
                     }
@@ -1080,6 +1084,7 @@ impl eframe::App for App {
                                 self.graph = Graph::template(name);
                                 self.saved = self.graph.clone();
                                 self.editor.selected.clear();
+                self.editor.frame_next = true;
                                 self.editor.preview = None;
                                 self.path = None;
                                 ui.close();

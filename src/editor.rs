@@ -48,6 +48,8 @@ pub struct Editor {
     pub selected: BTreeSet<NodeId>,
     /// Snap nodes to a 20-unit grid when a drag ends (a preference).
     pub snap: bool,
+    /// Frame all nodes on the next draw (set when a graph is opened, so it is in view).
+    pub frame_next: bool,
     /// A node was dragged since the pointer went down (so releasing may splice it into a wire).
     node_dragged: bool,
     /// Node shown in the 3D and slice views instead of the Density output.
@@ -76,6 +78,7 @@ impl Default for Editor {
             zoom: 1.0,
             selected: BTreeSet::new(),
             snap: false,
+            frame_next: false,
             node_dragged: false,
             preview: None,
             picks: BTreeMap::new(),
@@ -309,6 +312,9 @@ impl Editor {
 
     fn show_inner(&mut self, ui: &mut egui::Ui, graph: &mut Graph, tiling: &BTreeMap<NodeId, Tiling>) {
         let (canvas, bg) = ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
+        if std::mem::take(&mut self.frame_next) {
+            self.frame(canvas.size(), graph, &BTreeSet::new());
+        }
         let painter = ui.painter_at(canvas);
         painter.rect_filled(canvas, 0.0, Color32::from_gray(24));
         let origin = canvas.min;
