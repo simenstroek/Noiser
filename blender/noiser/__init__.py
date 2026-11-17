@@ -1,7 +1,8 @@
 """Noiser sampler for Blender: File > Import > Noiser Function (.noiser).
 
-Builds a Geometry Nodes group and a shader group, "Noiser <name>", each with a Position input and
-a Density output, so the noise evaluates live at any resolution like a stock texture node.
+Builds a Geometry Nodes group "Noiser <name>" with a Position input and a Density output, so the noise
+evaluates live at any resolution like a stock texture node. Shader node trees can't host it (the hash
+needs Bit Math); bake to a texture for shaders.
 """
 
 import json
@@ -25,12 +26,11 @@ class NOISER_OT_import(bpy.types.Operator, ImportHelper):
         try:
             data = json.load(open(self.filepath, encoding="utf-8"))
             name = "Noiser " + os.path.splitext(os.path.basename(self.filepath))[0]
-            build.build(data, name, "GeometryNodeTree")
-            build.build(data, name, "ShaderNodeTree")
+            build.build(data, name)
         except (build.Unsupported, ValueError, KeyError) as e:
             self.report({"ERROR"}, f"Can't build this function: {e}")
             return {"CANCELLED"}
-        self.report({"INFO"}, f"Added node groups \"{name}\"")
+        self.report({"INFO"}, f"Added Geometry Nodes group \"{name}\"")
         return {"FINISHED"}
 
 

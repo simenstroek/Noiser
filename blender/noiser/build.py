@@ -1,8 +1,8 @@
 """Builds a node group from a `.noiser` file (docs/noiser-format.md) out of stock Blender nodes.
 
-The same builder makes Geometry Nodes and shader groups: every node used exists in both trees.
-Version 1 supports position, value, math and Perlin noise; other ops raise Unsupported, and the
-fallback for those is Noiser's VDB export.
+Geometry Nodes only: the pcg3d hash needs Integer Math and Bit Math, and Blender has no Bit Math
+node in shader trees. Version 1 supports position, value, math and Perlin noise; other ops raise
+Unsupported, and the fallback for those (and for shaders) is Noiser's VDB or slice-grid export.
 """
 
 import struct
@@ -10,6 +10,7 @@ import struct
 import bpy
 
 PERLIN_GROUP = "Noiser Perlin"
+GN = "GeometryNodeTree"
 
 
 class Unsupported(Exception):
@@ -19,6 +20,12 @@ class Unsupported(Exception):
 def f32(x):
     """Rounds to float32, so constants accumulate like Noiser's GPU code."""
     return struct.unpack("f", struct.pack("f", x))[0]
+
+
+def s32(v):
+    """A u32 constant as the signed int32 with the same bits (Blender ints are signed)."""
+    v &= 0xFFFFFFFF
+    return v - (1 << 32) if v >= 1 << 31 else v
 
 
 class Builder:
@@ -75,6 +82,61 @@ class Builder:
         self.feed(n.inputs[0], v)
         return n.outputs
 
+    # ---- integer ops (Blender ints are int32; add and multiply wrap, matching u32 bit for bit) ----
+
+    def imath(self, op, a, b):
+        n = self.node("FunctionNodeIntegerMath", operation=op)
+        self.feed(n.inputs[0], s32(a) if isinstance(a, int) else a)
+        self.feed(n.inputs[1], s32(b) if isinstance(b, int) else b)
+        return n.outputs[0]
+
+    def shr16(self, v):
+        """Logical right shift by 16 (a negative Shift is a right shift that fills with zeros)."""
+        n = self.node("FunctionNodeBitMath", operation="SHIFT")
+        self.feed(n.inputs["A"], v)
+        n.inputs["Shift"].default_value = -16
+        return n.outputs[0]
+
+    def bit(self, op, a, b):
+        n = self.node("FunctionNodeBitMath", operation=op)
+        self.feed(n.inputs["A"], a)
+        self.feed(n.inputs["B"], s32(b) if isinstance(b, int) else b)
+        return n.outputs[0]
+
+    def float_to_int(self, f):
+        n = self.node("FunctionNodeFloatToInt", rounding_mode="ROUND")
+        self.feed(n.inputs[0], f)
+        return n.outputs[0]
+
+    def u32_to_float(self, v):
+        """f32(u32 v) exactly: both 16-bit halves are exact in float, so one multiply-add rounds once.
+        Links convert int to float implicitly."""
+        n = self.node("ShaderNodeMath", operation="MULTIPLY_ADD")
+        self.feed(n.inputs[0], self.shr16(v))
+        n.inputs[1].default_value = 65536.0
+        self.feed(n.inputs[2], self.bit("AND", v, 0xFFFF))
+        return n.outputs[0]
+
+
+def pcg_hash3(b, cell, seed_mul):
+    """Noiser's hash01: three floats in [0, 1] for an integer cell (3 float sockets) and
+    `seed_mul` = seed * 0x9E3779B9 (an int socket). pcg3d, Jarzynski and Olano 2020."""
+    x, y, z = (b.float_to_int(c) for c in cell)
+    x = b.imath("ADD", x, seed_mul)
+    lcg = lambda v: b.imath("ADD", b.imath("MULTIPLY", v, 1664525), 1013904223)
+    x, y, z = lcg(x), lcg(y), lcg(z)
+
+    def step(x, y, z):
+        x = b.imath("ADD", x, b.imath("MULTIPLY", y, z))
+        y = b.imath("ADD", y, b.imath("MULTIPLY", z, x))
+        z = b.imath("ADD", z, b.imath("MULTIPLY", x, y))
+        return x, y, z
+
+    x, y, z = step(x, y, z)
+    x, y, z = (b.bit("XOR", v, b.shr16(v)) for v in (x, y, z))
+    x, y, z = step(x, y, z)
+    return [b.math("DIVIDE", b.u32_to_float(v), 4294967295.0) for v in (x, y, z)]
+
 
 def new_group(name, tree_type, inputs, outputs):
     g = bpy.data.node_groups.new(name, tree_type)
@@ -88,39 +150,37 @@ def new_group(name, tree_type, inputs, outputs):
     return g, gin, gout
 
 
-def perlin_group(tree_type):
-    """perlin(x, period, seed) from the spec, as a reusable group (one per tree type)."""
-    name = f"{PERLIN_GROUP} ({'GN' if tree_type == 'GeometryNodeTree' else 'Shader'})"
-    if name in bpy.data.node_groups:
-        return bpy.data.node_groups[name]
+def perlin_group():
+    """perlin(x, period, seed) from the spec, as a reusable group."""
+    if PERLIN_GROUP in bpy.data.node_groups:
+        return bpy.data.node_groups[PERLIN_GROUP]
     g, gin, gout = new_group(
-        name,
-        tree_type,
-        [("X", "NodeSocketVector"), ("Period", "NodeSocketFloat"), ("Seed", "NodeSocketFloat")],
+        PERLIN_GROUP,
+        GN,
+        [("X", "NodeSocketVector"), ("Period", "NodeSocketFloat"), ("Seed", "NodeSocketInt")],
         [("Value", "NodeSocketFloat")],
     )
     b = Builder(g)
     x, period, seed = gin.outputs["X"], gin.outputs["Period"], gin.outputs["Seed"]
+    seed_mul = b.imath("MULTIPLY", seed, 0x9E3779B9)
     i = b.vmath("FLOOR", x)
     f = b.vmath("SUBTRACT", x, i)
     # w = f³ (f (6f − 15) + 10)
     inner = b.vmath("MULTIPLY_ADD", f, (6.0, 6.0, 6.0))
-    b.feed(inner.node.inputs[2], (-15.0, -15.0, -15.0))
+    inner.node.inputs[2].default_value = (-15.0, -15.0, -15.0)
     poly = b.vmath("MULTIPLY_ADD", f, inner)
-    b.feed(poly.node.inputs[2], (10.0, 10.0, 10.0))
+    poly.node.inputs[2].default_value = (10.0, 10.0, 10.0)
     f3 = b.vmath("MULTIPLY", b.vmath("MULTIPLY", f, f), f)
     w = b.separate(b.vmath("MULTIPLY", f3, poly))
     # wrap(c) = c − period·floor(c / period); Vector Math divide is safe, so period 0 leaves c.
     pv = b.combine(period, period, period)
 
     def corner(o):
-        c = b.vmath("ADD", i, o)  # always add, so a floor of −0.0 becomes +0.0
+        c = b.vmath("ADD", i, o)
         c = b.vmath("SUBTRACT", c, b.vmath("MULTIPLY", pv, b.vmath("FLOOR", b.vmath("DIVIDE", c, pv))))
-        white = b.node("ShaderNodeTexWhiteNoise", noise_dimensions="4D")
-        b.feed(white.inputs["Vector"], c)
-        b.feed(white.inputs["W"], seed)
-        grad = b.vmath("MULTIPLY_ADD", white.outputs["Color"], (2.0, 2.0, 2.0))
-        b.feed(grad.node.inputs[2], (-1.0, -1.0, -1.0))
+        h = pcg_hash3(b, b.separate(c), seed_mul)
+        grad = b.vmath("MULTIPLY_ADD", b.combine(*h), (2.0, 2.0, 2.0))
+        grad.node.inputs[2].default_value = (-1.0, -1.0, -1.0)
         grad = b.vmath("NORMALIZE", grad)
         return b.vmath("DOT_PRODUCT", grad, b.vmath("SUBTRACT", f, o), out="Value")
 
@@ -135,16 +195,16 @@ def perlin_group(tree_type):
     return g
 
 
-def perlin_call(b, tree_type, x, period, seed):
-    n = b.node("GeometryNodeGroup" if tree_type == "GeometryNodeTree" else "ShaderNodeGroup")
-    n.node_tree = perlin_group(tree_type)
+def perlin_call(b, x, period, seed):
+    n = b.node("GeometryNodeGroup")
+    n.node_tree = perlin_group()
     b.feed(n.inputs["X"], x)
     n.inputs["Period"].default_value = float(period)
-    n.inputs["Seed"].default_value = float(seed)
+    n.inputs["Seed"].default_value = s32(seed)
     return n.outputs[0]
 
 
-def noise(b, tree_type, op, q):
+def noise(b, op, q):
     if op["kind"] != "perlin":
         raise Unsupported(f"{op['kind']} noise (use Noiser's VDB export for now)")
     scale, octaves, lac = op["scale"], max(op["octaves"], 1), op["lacunarity"]
@@ -153,11 +213,11 @@ def noise(b, tree_type, op, q):
     period = int(scale) if tiles else 0
     x = b.vmath("SCALE", q, scale)
     if op["distortion"] != 0.0:
-        d = b.combine(*(perlin_call(b, tree_type, x, period, seed + 1 + c) for c in range(3)))
+        d = b.combine(*(perlin_call(b, x, period, seed + 1 + c) for c in range(3)))
         x = b.vmath("ADD", x, b.vmath("SCALE", d, op["distortion"]))
     total, amp, acc = 0.0, 1.0, None
     for o in range(octaves):
-        term = b.math("MULTIPLY", perlin_call(b, tree_type, x, period, seed + o), amp)
+        term = b.math("MULTIPLY", perlin_call(b, x, period, seed + o), amp)
         acc = term if acc is None else b.math("ADD", acc, term)
         total = f32(total + amp)
         amp = f32(amp * op["roughness"])
@@ -166,22 +226,23 @@ def noise(b, tree_type, op, q):
     v = b.math("DIVIDE", acc, max(total, 1e-6))
     if op["normalize"]:
         v = b.math("MULTIPLY_ADD", v, 0.5)
-        b.feed(v.node.inputs[2], 0.5)
+        v.node.inputs[2].default_value = 0.5
     return v
 
 
 MATH_OPS = {"add": "ADD", "subtract": "SUBTRACT", "multiply": "MULTIPLY", "divide": "DIVIDE", "min": "MINIMUM", "max": "MAXIMUM"}
 
 
-def build(data, name, tree_type="GeometryNodeTree"):
+def build(data, name, tree_type=GN):
     """Returns a node group with a Position (vector) input and a Density (float) output."""
     if data.get("format") != "noiser" or data.get("version") != 1:
         raise Unsupported("not a version 1 .noiser file")
+    if tree_type != GN:
+        raise Unsupported("shader node trees have no Bit Math node, which the hash needs; bake to a texture instead")
     g, gin, gout = new_group(name, tree_type, [("Position", "NodeSocketVector")], [("Density", "NodeSocketFloat")])
-    if tree_type == "GeometryNodeTree":
-        sock = g.interface.items_tree["Position"]
-        sock.default_input = "POSITION"  # behaves like a texture node: unconnected means the point's position
-        sock.hide_value = True
+    sock = g.interface.items_tree["Position"]
+    sock.default_input = "POSITION"  # behaves like a texture node: unconnected means the point's position
+    sock.hide_value = True
     b = Builder(g)
     out = {}
     for op in data["ops"]:
@@ -202,7 +263,7 @@ def build(data, name, tree_type="GeometryNodeTree"):
             v = (b.vmath if op["type"] == "vector" else b.math)(fn, operand(op["a"]), operand(op["b"]))
         elif kind == "noise":
             q = gin.outputs["Position"] if op["position"] is None else out[op["position"]]
-            v = noise(b, tree_type, op, q)
+            v = noise(b, op, q)
         else:
             raise Unsupported(f"{kind} op")
         out[op["id"]] = v

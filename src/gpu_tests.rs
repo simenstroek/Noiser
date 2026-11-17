@@ -421,7 +421,7 @@ fn noiser_files_for_blender() {
     ];
     for (name, g) in cases {
         let ev = crate::export::Evaluator::new(&gpu.device, &gpu.queue, &g, 4).unwrap();
-        let s = crate::noiser_file::file(&g, 4, |n| ev.eval(n, [0; 3], [n; 3], false, None)).unwrap();
+        let s = crate::noiser_file::file(&g, 4, |pts| ev.eval_points(pts)).unwrap();
         std::fs::write(dir.join(format!("{name}.noiser")), s).unwrap();
     }
 }

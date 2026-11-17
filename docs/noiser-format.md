@@ -61,8 +61,7 @@ then both operands are converted to vectors and the op applies per component.
 
 ### `noise`
 Fields: `kind`, `position` (op id or `null` for `p`), `scale`, `normalize`, `octaves`,
-`lacunarity`, `roughness`, `distortion`, `seed` (already resolved; a non-negative integer below
-2^24), and `feature` for Worley (`f1`, `f2`, `f2_minus_f1`). Type float.
+`lacunarity`, `roughness`, `distortion`, `seed` (already resolved; a non-negative integer), and `feature` for Worley (`f1`, `f2`, `f2_minus_f1`). Type float.
 
 `kind` is one of `perlin`, `simplex`, `voronoi`, `voronoi_fractal`, `worley`, `white`, `blue`.
 Version 1 specifies `perlin` exactly below. The others follow the same lattice, hash and fBm
@@ -76,48 +75,38 @@ central differences with `e = 1e-3`:
 
 ## The hash
 
-All randomness comes from one hash, **Blender's `hash_float_to_float(float4)`**: Bob Jenkins'
-lookup3 over the IEEE-754 bit patterns of four floats. Blender exposes it as the White Noise
-Texture node (4D), so Blender reproduces it with a stock node. Elsewhere it is about 30 lines
-of u32 code:
+All randomness comes from **pcg3d** (Jarzynski & Olano, "Hash Functions for GPU Rendering", JCGT
+2020): plain 32-bit unsigned integer arithmetic, so any host with u32 add, multiply, xor and shift
+can reproduce it bit for bit.
 
 ```c
-uint32 rotl(uint32 x, uint32 k) { return (x << k) | (x >> (32 - k)); }
-
-uint32 jenkins4(uint32 kx, uint32 ky, uint32 kz, uint32 kw) {
-  uint32 a, b, c;
-  a = b = c = 0xdeadbeef + (4 << 2) + 13;
-  a += kx; b += ky; c += kz;
-  /* mix */
-  a -= c; a ^= rotl(c, 4);  c += b;
-  b -= a; b ^= rotl(a, 6);  a += c;
-  c -= b; c ^= rotl(b, 8);  b += a;
-  a -= c; a ^= rotl(c, 16); c += b;
-  b -= a; b ^= rotl(a, 19); a += c;
-  c -= b; c ^= rotl(b, 4);  b += a;
-  a += kw;
-  /* final */
-  c ^= b; c -= rotl(b, 14);
-  a ^= c; a -= rotl(c, 11);
-  b ^= a; b -= rotl(a, 25);
-  c ^= b; c -= rotl(b, 16);
-  a ^= c; a -= rotl(c, 4);
-  b ^= a; b -= rotl(a, 14);
-  c ^= b; c -= rotl(b, 24);
-  return c;
+uint3 pcg3d(uint3 v) {                 /* every operation wraps mod 2^32 */
+  v = v * 1664525u + 1013904223u;
+  v.x += v.y * v.z;  v.y += v.z * v.x;  v.z += v.x * v.y;
+  v ^= v >> 16;                        /* logical shift */
+  v.x += v.y * v.z;  v.y += v.z * v.x;  v.z += v.x * v.y;
+  return v;
 }
-
-/* All arithmetic wraps mod 2^32. bits(f) is the float's bit pattern. */
-float h(float4 k) { return float(jenkins4(bits(k.x), bits(k.y), bits(k.z), bits(k.w))) / 4294967296.0; }
 ```
 
-The per-cell random vector for integer cell `c` and seed `s` is
-`hash3(c, s) = (h(k), h(k.zxwy), h(k.wzyx))` with `k = (c.x, c.y, c.z, s)` as floats. This is
-the White Noise node's 4D Color output with Vector = `c` and W = `s`.
+The per-cell random vector for integer cell `c` (int32, reinterpreted as u32) and seed `s` (u32) is
 
-- Cells and seeds must be exact integers in float (|value| < 2^24).
-- **Never feed `-0.0`**: its bit pattern differs from `+0.0`. Cells computed as `floor(x) + offset`
-  (adding the offset even when it is 0) or by the wrap below are always `+0.0`.
+```c
+float3 hash3(int3 c, uint s) {
+  uint3 h = pcg3d(uint3(c.x + s * 0x9E3779B9u, c.y, c.z));   /* wraps */
+  return float3(h) / 4294967295.0;     /* float(u32) rounds to nearest f32; divide in f32 */
+}
+```
+
+Results are in [0, 1]. Cells are always exact integers (the lattice is wrapped and stepped as
+integers), so there are no float-to-bit cast concerns.
+
+Host notes:
+- **Blender (Geometry Nodes, 5.3)**: Integer Math add/multiply wrap like u32, and Bit Math `SHIFT`
+  with a negative `Shift` is a logical right shift. Blender ints are int32, which carry the same bits.
+  `float(u32)` is built from the two 16-bit halves (`hi * 65536 + lo`, one rounding). Shader node
+  trees have no Bit Math node, so shaders need the texture-bake fallback.
+- Hosts without integer ops in their graph language (some shader editors) use the bake fallback.
 
 ## Lattice and tiling
 
@@ -170,7 +159,9 @@ noise(q):
 
 ## Test vectors
 
-`tests.points` are the centres of a 6×6×6 grid over one tile, `((i + 0.5) / 6)` per axis with
-x varying fastest. `tests.density` is Noiser's GPU result at each point. A sampler passes when
+`tests.points` is an explicit list of points and `tests.density` is Noiser's GPU result at each. The
+list covers one tile's 6×6×6 grid centres, exact seam and lattice coordinates (combinations of
+−1, 0, 0.5 and 1, so the tile edges and their neighbours are hit), and scattered points over
+[−2, 3]³ (negative and above-one coordinates, as object-space samplers produce). A sampler passes when
 every value is within **1e-4** of the vector. Float rounding differs between hosts; the hash
 itself is exact, so larger differences mean a real mismatch.

@@ -6,7 +6,7 @@ use serde_json::{Value, json};
 use std::collections::BTreeSet;
 
 pub const VERSION: u32 = 1;
-/// Test vectors are the density at the centres of a TEST_RES³ grid over one tile.
+/// The first TEST_RES³ test points are one tile's grid centres.
 pub const TEST_RES: u32 = 6;
 
 fn kind_name(k: NoiseKind) -> &'static str {
@@ -97,14 +97,36 @@ fn topo(g: &Graph, id: NodeId, seen: &mut BTreeSet<NodeId>, visiting: &mut BTree
     Ok(())
 }
 
-/// The full file: ops plus test vectors (`density` at `points`, from the GPU evaluator).
-pub fn file(g: &Graph, seed: u32, eval_grid: impl FnOnce(u32) -> Vec<f32>) -> Result<String, String> {
-    let mut v = ops(g, seed)?;
+/// Test points: one tile's grid centres, then points outside the unit tile and on its seams and
+/// lattice lines, where wrapping and sign bugs live. Samplers run in object space, so coordinates
+/// below 0 and above 1 matter as much as the tile itself.
+pub fn test_points() -> Vec<[f32; 3]> {
     let n = TEST_RES;
-    let points: Vec<[f32; 3]> = (0..n * n * n)
-        .map(|i| [i % n, i / n % n, i / (n * n)].map(|c| (c as f32 + 0.5) / n as f32))
-        .collect();
-    v["tests"] = json!({"points": points, "density": eval_grid(n)});
+    let mut pts: Vec<[f32; 3]> = (0..n * n * n).map(|i| [i % n, i / n % n, i / (n * n)].map(|c| (c as f32 + 0.5) / n as f32)).collect();
+    // Every combination of seam and lattice coordinates, including exact zero and one.
+    let edge = [-1.0, 0.0, 0.5, 1.0];
+    for &z in &edge {
+        for &y in &edge {
+            for &x in &edge {
+                pts.push([x, y, z]);
+            }
+        }
+    }
+    // Scattered points over [-2, 3]³ from a fixed generator.
+    let mut s = 0x2545F491u32;
+    let mut next = || {
+        s = s.wrapping_mul(1664525).wrapping_add(1013904223);
+        (s >> 8) as f32 / (1u32 << 24) as f32 * 5.0 - 2.0
+    };
+    pts.extend((0..64).map(|_| [next(), next(), next()]));
+    pts
+}
+
+/// The full file: ops plus test vectors (`density` at `test_points()`, from the GPU evaluator).
+pub fn file(g: &Graph, seed: u32, eval_points: impl FnOnce(&[[f32; 3]]) -> Vec<f32>) -> Result<String, String> {
+    let mut v = ops(g, seed)?;
+    let points = test_points();
+    v["tests"] = json!({"points": points, "density": eval_points(&points)});
     serde_json::to_string_pretty(&v).map_err(|e| e.to_string())
 }
 

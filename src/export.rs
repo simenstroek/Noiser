@@ -185,7 +185,11 @@ struct X { n: u32, ox: u32, oy: u32, oz: u32, sx: u32, sy: u32, sz: u32, normal:
 fn main(@builtin(global_invocation_id) id: vec3u) {
     if (id.x >= x.sx || id.y >= x.sy || id.z >= x.sz) { return; }
     var p = (vec3f(vec3u(x.ox, x.oy, x.oz) + id) + 0.5) / f32(x.n);
-    if (x.two_d == 1u) {
+    if (x.two_d == 2u) {
+        // Point list: sx points were uploaded after the sx results, as packed xyz triples.
+        let q = x.sx + 3u * id.x;
+        p = vec3f(out[q], out[q + 1u], out[q + 2u]);
+    } else if (x.two_d == 1u) {
         switch x.axis {
             case 0u: { p = vec3f(x.pos, p.x, p.y); }
             case 1u: { p = vec3f(p.x, x.pos, p.y); }
@@ -261,14 +265,35 @@ impl Evaluator {
     /// Values for the box `origin..origin+size` of the N³ grid, x fastest. 1 or 3 floats per voxel.
     /// With `two_d`, z is ignored and samples come from the slice `(axis, pos)`.
     pub fn eval(&self, n: u32, origin: [u32; 3], size: [u32; 3], normal: bool, two_d: Option<(u32, f32)>) -> Vec<f32> {
-        use wgpu::util::DeviceExt;
-        let d = &self.device;
         let (axis, pos) = two_d.unwrap_or((2, 0.0));
         let block = Block { n, origin, size, normal: normal as u32, two_d: two_d.is_some() as u32, axis, pos, _pad: 0 };
-        let block = d.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: None, contents: bytemuck::bytes_of(&block), usage: wgpu::BufferUsages::UNIFORM });
         let count = size.iter().map(|&s| s as u64).product::<u64>() * if normal { 3 } else { 1 };
+        self.dispatch(block, count, None)
+    }
+
+    /// Density at arbitrary points (any coordinates, not just one tile's grid).
+    pub fn eval_points(&self, pts: &[[f32; 3]]) -> Vec<f32> {
+        let n = pts.len() as u32;
+        // Results go in out[..n]; the points sit after them, where the shader reads them.
+        let mut init = vec![0.0f32; pts.len()];
+        init.extend(pts.iter().flatten());
+        let block = Block { n: 1, origin: [0; 3], size: [n, 1, 1], normal: 0, two_d: 2, axis: 0, pos: 0.0, _pad: 0 };
+        self.dispatch(block, n as u64, Some(&init))
+    }
+
+    /// Runs the shader for `block` and reads back the first `count` floats of the output buffer,
+    /// which starts as `init` when given.
+    fn dispatch(&self, block: Block, count: u64, init: Option<&[f32]>) -> Vec<f32> {
+        use wgpu::util::DeviceExt;
+        let d = &self.device;
+        let size = block.size;
+        let block = d.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: None, contents: bytemuck::bytes_of(&block), usage: wgpu::BufferUsages::UNIFORM });
         let bytes = count * 4;
-        let out = d.create_buffer(&wgpu::BufferDescriptor { label: None, size: bytes, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC, mapped_at_creation: false });
+        let usage = wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC;
+        let out = match init {
+            Some(init) => d.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: None, contents: bytemuck::cast_slice(init), usage }),
+            None => d.create_buffer(&wgpu::BufferDescriptor { label: None, size: bytes, usage, mapped_at_creation: false }),
+        };
         let read = d.create_buffer(&wgpu::BufferDescriptor { label: None, size: bytes, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
         fn entry(binding: u32, b: &wgpu::Buffer) -> wgpu::BindGroupEntry<'_> {
             wgpu::BindGroupEntry { binding, resource: b.as_entire_binding() }

@@ -251,7 +251,7 @@ impl App {
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let r = export::Evaluator::new(&device, &queue, &graph, seed)
-                .and_then(|ev| noiser_file::file(&graph, seed, |n| ev.eval(n, [0; 3], [n; 3], false, None)))
+                .and_then(|ev| noiser_file::file(&graph, seed, |pts| ev.eval_points(pts)))
                 .and_then(|s| std::fs::write(&path, s).map_err(|e| e.to_string()))
                 .map(|()| format!("Exported {}", path.display()));
             let _ = tx.send(r);
@@ -551,8 +551,7 @@ fn node_props(ui: &mut egui::Ui, kind: &mut NodeKind) {
                 let mut locked = seed.is_some();
                 ui.checkbox(&mut locked, "seed override");
                 if locked {
-                    // Seeds are hashed as f32 (Blender's White Noise W), exact below 2^24.
-                    ui.add(egui::DragValue::new(seed.get_or_insert(0)).range(0..=1_000_000));
+                    ui.add(egui::DragValue::new(seed.get_or_insert(0)));
                 } else {
                     *seed = None;
                 }

@@ -1,10 +1,9 @@
-"""Checks the Noiser add-on against a .noiser file's own test vectors, in both tree types.
+"""Checks the Noiser add-on against a .noiser file's own test vectors (Geometry Nodes).
 
 Run headless (Blender 5.2+):
     blender --background --factory-startup --python-exit-code 1 --python blender/check_file.py -- a.noiser [b.noiser ...]
 
-Geometry Nodes: the group is evaluated at a vertex per test point. The shader group is built from
-the same code with the same nodes, but only built here (to catch missing nodes), not evaluated.
+The group is evaluated at a vertex per test point.
 """
 
 import json
@@ -21,8 +20,7 @@ failed = False
 for path in sys.argv[sys.argv.index("--") + 1 :]:
     data = json.load(open(path, encoding="utf-8"))
     name = os.path.basename(path)
-    group = build.build(data, name, "GeometryNodeTree")
-    build.build(data, name, "ShaderNodeTree")
+    group = build.build(data, name)
 
     pts, want = data["tests"]["points"], data["tests"]["density"]
     mesh = bpy.data.meshes.new(name)
@@ -45,7 +43,7 @@ for path in sys.argv[sys.argv.index("--") + 1 :]:
     ev.attributes["d"].data.foreach_get("value", got)
     errs = [abs(g - w) for g, w in zip(got, want)]
     worst = max(errs)
-    nodes = sum(len(g.nodes) for g in bpy.data.node_groups if g.name in (name,) or g.name.startswith(build.PERLIN_GROUP))
+    nodes = sum(len(g.nodes) for g in bpy.data.node_groups if g.name in (name, build.PERLIN_GROUP))
     print(f"check_file: {name}: {len(pts)} points, max |diff| = {worst:.3g}, {nodes} nodes")
     if worst > TOLERANCE:
         failed = True
