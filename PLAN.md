@@ -126,6 +126,8 @@ Node graph (centre) · 3D view (primitive picker, solid/cloud, displacement amou
 - **Absolute and Ridge** (done): the unary Math operators.
 - **Curve** (built, without handles): up to 16 (x, y) points edited in the details panel, with Linear, Smooth (smoothstep) and Step interpolation, evaluated per sample from the parameter buffer. **Cubic mode (done):** a monotone cubic Hermite through the points (Fritsch-Butland slopes, never overshoots; specified in `docs/noiser-format.md`). Draggable Bézier handles and a drawn curve widget are not built; the Blender importer does not know the op yet.
 
+- **Max march steps (done, viewport only):** a log slider (32-600, default 300) in the preview settings; the limit goes through a spare uniform slot (0 means 300 so older callers are unchanged). Other low-priority rendering settings (half-res, shadows, normals, environment map, lighting setups, material settings) are still not built.
+
 ## 3a. Mesh pipeline sketch (milestone 7)
 1. **Import**: OBJ (`tobj`) and glTF (`gltf`). FBX is out of scope.
 2. **Mesh → SDF**: a narrow-band grid, with resolution and band width set in the app. Distance comes from a BVH closest-point query. The sign comes from the **generalized winding number**, which tolerates small holes and is more forgiving than "must be closed". Candidate crate: `mesh_to_sdf` (check sign quality first). It can move to a GPU compute shader if it's too slow.

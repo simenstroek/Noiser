@@ -39,6 +39,7 @@ pub struct Uniforms {
     pub slice_res: u32,
     pub push_min: f32,
     pub push_max: f32,
+    /// [march step limit (0 = 300), unused]
     pub _pad: [f32; 2],
     /// Min corner and texel size of the mesh distance grid.
     pub mesh_origin: [f32; 3],

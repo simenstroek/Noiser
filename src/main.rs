@@ -34,6 +34,7 @@ struct Preview {
     tile_size: f32,
     seed: u32,
     step_scale: f32,
+    max_steps: u32,
     prim: u32,
     prim_size: f32,
     cloud: bool,
@@ -52,6 +53,7 @@ impl Default for Preview {
             seed: 0,
             // Overshoot is caught and refined, so this only needs to avoid stepping through thin features.
             step_scale: 0.9,
+            max_steps: 300,
             prim: 0,
             prim_size: 1.0,
             cloud: false,
@@ -413,7 +415,7 @@ impl App {
             slice_res: view::SLICE_RES,
             push_min: push.0,
             push_max: push.1,
-            _pad: [0.0; 2],
+            _pad: [pv.max_steps as f32, 0.0],
             mesh_origin,
             mesh_voxel,
             mesh_lo,
@@ -516,6 +518,7 @@ fn preview_props(ui: &mut egui::Ui, pv: &mut Preview, mesh_loaded: bool) {
         row(ui, &mut pv.cloud_density, d.cloud_density, |ui, v| _ = ui.add(egui::Slider::new(v, 0.5..=64.0).logarithmic(true).text("cloud density")));
     } else {
         row(ui, &mut pv.step_scale, d.step_scale, |ui, v| _ = ui.add(egui::Slider::new(v, 0.1..=1.0).text("step safety")));
+        row(ui, &mut pv.max_steps, d.max_steps, |ui, v| _ = ui.add(egui::Slider::new(v, 32..=600).logarithmic(true).text("max march steps")));
     }
     ui.separator();
     ui.heading("Slice view");

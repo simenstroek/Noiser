@@ -103,7 +103,8 @@ fn solid(ro: vec3f, rd: vec3f, bg: vec3f) -> vec3f {
     var t_out = t; // last t known to be outside, and the field there
     var d_out = 0.0;
     var hit = false;
-    for (var i = 0; i < 300; i++) {
+    let max_steps = select(300, i32(u.max_steps), u.max_steps >= 1.0);
+    for (var i = 0; i < max_steps; i++) {
         let d = field(ro + rd * t);
         if (d < 0.0 && i > 0) {
             // Overshot into the surface (displacement breaks the distance bound). The field is

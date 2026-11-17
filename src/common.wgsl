@@ -10,7 +10,7 @@ struct Uniforms {
     mode: u32, prim: u32, slice_axis: u32, slice_mode: u32,
     slice_pos: f32, slice_aspect: f32, slice_tiles: f32, slice_res: u32,
     // Range of amount × density (Graph::density_range): how far the surface can move in / out.
-    push_min: f32, push_max: f32, _pad0: f32, _pad1: f32,
+    push_min: f32, push_max: f32, max_steps: f32, _pad1: f32, // max_steps: ray march limit, 0 = default
     // The baked mesh distance grid (see meshsdf.rs): its min corner and texel size.
     mesh_origin: vec3f, mesh_voxel: f32,
     // The mesh's bounds, and the displacement mask (meshmask.rs): its term count and two vec4 per term.
