@@ -212,3 +212,8 @@ Right-click menu on the canvas has a focused Search box; typing filters the node
 
 ### Recent files (2026-11-17)
 File > Open recent (last 10 opened or saved graphs, stored in eframe storage). Next: preferences window, frame/comment nodes, keyboard shortcut list, headless batch.
+
+### HANDOVER (2026-11-17 ~22:50, interrupted by the user)
+Committed and pushed this session: viewport material (colour/specular/roughness/soft shadows), undo/redo (`history.rs`), add-menu search, File > Open recent. Last pushed commit: c45648f.
+**Uncommitted, in progress** (`src/main.rs`, working tree): Help > Keyboard shortcuts window (`SHORTCUTS` table, `shortcuts_open` field). The code was written and the 10-entry table fixed up, but `cargo test` was NOT confirmed to pass after the last edit. First step for the next agent: run `cargo test`, fix anything, then commit and push (or `git checkout src/main.rs` to drop it).
+Next backlog: preferences window (saved settings), frame/comment nodes, copy/paste between files, graph templates, performance overlay, autosave settings, headless batch mode, half-res rendering, mesh vertex-colour masks. No release is due until about 00:15 (v0.2.0 was 22:23 local); v0.3.0 would be the next.
