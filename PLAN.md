@@ -58,6 +58,24 @@ Node graph (centre) · 3D view (primitive picker, solid/cloud, displacement amou
 | 4 | All noise nodes | all 7 tiling (or flagged), seam test: field(p) == field(p + period) on GPU readback |
 | 5 | Texture export | 2D PNG/EXR, 3D as slice-grid PNG, DDS volume, raw f32; 8/16/32-bit |
 | 6 | Math export + Blender | `.noiser` spec, test vectors, Blender add-on (see §4) passing the vectors |
+| 7 | Mesh displacement (later) | import closed mesh → narrow-band SDF grid → apply noise → export VDB or a high-poly mesh (see §3a) |
+| 8 | Subgraphs + prefab library (later) | select nodes → collapse to subgraph; edges crossing the selection become subgraph inputs/outputs (like Unreal's "Collapse to Function"); save subgraphs to a library of prefab noises |
+
+### Design rules that keep milestone 7 cheap
+- **The base shape is a swappable slot, outside the graph.** The shader calls `base_sdf(p)`, which is a primitive today and a sampled 3D texture of the mesh SDF later. The graph only defines the noise. The math-function export stays noise-only, and each sampler applies it to its own geometry.
+- **Noise lives in object space, with its own tile size.** The base shape's transform also moves the noise, so it sticks to the object. A separate **tile size** scales the tiling space relative to the object/mesh: `noise(p_object / tile_size)`. One tile is still 1 unit of *noise* space, so exports are unaffected.
+- **Subgraphs (milestone 8) are inlined at compile time.** Ports are addressed as (node, input index), and codegen compiles whatever graph it's given. A subgraph node then only needs a flatten pass before codegen, so the shader and the `.noiser` format don't change.
+- **One "sample the field on a grid" path.** The z-slab GPU compute that texture export uses also feeds the VDB writer and the mesher. The VDB writer is shared by texture export and mesh export.
+
+---
+
+## 3a. Mesh pipeline sketch (milestone 7)
+1. **Import**: OBJ (`tobj`) and glTF (`gltf`). FBX is out of scope.
+2. **Mesh → SDF**: a narrow-band grid, with resolution and band width set in the app. Distance comes from a BVH closest-point query. The sign comes from the **generalized winding number**, which tolerates small holes and is more forgiving than "must be closed". Candidate crate: `mesh_to_sdf` (check sign quality first). It can move to a GPU compute shader if it's too slow.
+3. **Band width must cover the displacement.** Values outside the band are clamped, so the noise can't push the surface further than band − margin. The UI sets the minimum band from the displacement amount, or warns.
+4. **Apply noise**: `d = base_sdf(p) − amount·noise(p)`, sampled through the shared grid path. The preview uses a downsampled dense 3D texture (for example 256³). Export works brick by brick, over the band only.
+5. **Export**: VDB (the shared writer), or a mesh via **Dual Contouring** (decided 2026-11-17). It places one vertex per cell by minimizing the QEF from the field's gradients, which keeps sharp features. Clamp each vertex to its cell to avoid spikes. Output as PLY/OBJ/glTF.
+6. **Memory**: dense grids above about 1024³ get too big, so the high-res path uses sparse bricks (only cells inside the band). The resolution warning from texture export applies here too.
 
 ---
 

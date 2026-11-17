@@ -1,13 +1,15 @@
-// Milestone 0: fullscreen raymarch of a sphere displaced by tiling Perlin fBm.
+// 3D preview: raymarches the base shape displaced by the graph's density.
+// Concatenated after noise.wgsl and the generated graph code.
 
 struct Uniforms {
     cam_pos: vec3f, aspect: f32,
     cam_fwd: vec3f, amount: f32,
     cam_right: vec3f, step_scale: f32,
-    cam_up: vec3f, gain: f32,
-    period: u32, octaves: u32, lacunarity: u32, seed: u32,
+    cam_up: vec3f, seed: u32,
+    tile_size: f32, _pad0: f32, _pad1: f32, _pad2: f32,
 };
 @group(0) @binding(0) var<uniform> u: Uniforms;
+@group(0) @binding(1) var<storage, read> P: array<f32>;
 
 struct VsOut { @builtin(position) pos: vec4f, @location(0) uv: vec2f };
 
@@ -21,62 +23,11 @@ fn vs(@builtin(vertex_index) i: u32) -> VsOut {
     return o;
 }
 
-// ---- noise -------------------------------------------------------------
-
-// pcg3d (Jarzynski & Olano 2020): integer-only, so every sampler can reproduce it exactly.
-fn pcg3d(v_in: vec3u) -> vec3u {
-    var v = v_in * 1664525u + 1013904223u;
-    v.x += v.y * v.z; v.y += v.z * v.x; v.z += v.x * v.y;
-    v ^= v >> vec3u(16u);
-    v.x += v.y * v.z; v.y += v.z * v.x; v.z += v.x * v.y;
-    return v;
-}
-
-fn grad(cell: vec3i, period: i32) -> vec3f {
-    // Wrap the lattice so the noise repeats every `period` cells (= once per unit tile).
-    let c = vec3u(((cell % period) + period) % period);
-    let h = pcg3d(c + vec3u(u.seed * 0x9E3779B9u, 0u, 0u));
-    let g = vec3f(h) / 4294967295.0 * 2.0 - 1.0;
-    return normalize(g + 1e-6);
-}
-
-fn fade(t: vec3f) -> vec3f { return t * t * t * (t * (t * 6.0 - 15.0) + 10.0); }
-
-// Gradient noise in roughly [-1, 1]; tiles with `period` cells.
-fn perlin(p: vec3f, period: i32) -> f32 {
-    let i = vec3i(floor(p));
-    let f = fract(p);
-    let w = fade(f);
-    var n: array<f32, 8>;
-    for (var k = 0; k < 8; k++) {
-        let o = vec3i(k & 1, (k >> 1) & 1, (k >> 2) & 1);
-        n[k] = dot(grad(i + o, period), f - vec3f(o));
-    }
-    let x0 = mix(mix(n[0], n[1], w.x), mix(n[2], n[3], w.x), w.y);
-    let x1 = mix(mix(n[4], n[5], w.x), mix(n[6], n[7], w.x), w.y);
-    return mix(x0, x1, w.z) * 1.5;
-}
-
-fn fbm(p: vec3f) -> f32 {
-    var sum = 0.0;
-    var amp = 1.0;
-    var norm = 0.0;
-    var period = i32(u.period);
-    for (var o = 0u; o < u.octaves; o++) {
-        sum += amp * perlin(p * f32(period), period);
-        norm += amp;
-        amp *= u.gain;
-        period *= i32(u.lacunarity); // integer lacunarity keeps every octave tiling
-    }
-    return sum / norm;
-}
-
-// ---- scene -------------------------------------------------------------
-
-fn sd_sphere(p: vec3f, r: f32) -> f32 { return length(p) - r; }
+// The base shape slot: a primitive now, a sampled mesh SDF later.
+fn base_sdf(p: vec3f) -> f32 { return length(p) - 1.0; }
 
 fn field(p: vec3f) -> f32 {
-    return sd_sphere(p, 1.0) - u.amount * fbm(p);
+    return base_sdf(p) - u.amount * graph_density(p / u.tile_size);
 }
 
 fn normal_at(p: vec3f) -> vec3f {
