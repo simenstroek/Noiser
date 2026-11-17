@@ -67,6 +67,21 @@ pub fn ops(g: &Graph, seed: u32) -> Result<Value, String> {
                 NodeKind::Grid { counts, corners } => {
                     json!({"op": "grid", "position": input(id, 0), "counts": counts, "reference": if *corners { "corner" } else { "center" }})
                 }
+                NodeKind::Pattern(p) => {
+                    let (kind, output) = (
+                        match p.kind {
+                            crate::graph::PatternKind::Bricks => "bricks",
+                        },
+                        match p.output {
+                            crate::graph::PatternOutput::Distance => "distance",
+                            crate::graph::PatternOutput::Shape => "shape",
+                            crate::graph::PatternOutput::CellValue => "cell_value",
+                        },
+                    );
+                    json!({"op": "pattern", "kind": kind, "position": input(id, 0), "counts": p.counts, "mode2d": p.mode2d,
+                           "axis": p.axis, "steps": p.steps, "gap": p.gap, "bevel": p.bevel, "output": output,
+                           "seed": p.seed.unwrap_or(seed)})
+                }
                 NodeKind::Normal { flip } => json!({"op": "normal", "field": input(id, 0), "flip": flip}),
                 NodeKind::Noise(n) => {
                     let mut o = json!({

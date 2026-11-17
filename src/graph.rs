@@ -137,6 +137,77 @@ pub struct NoiseParams {
     pub seed: Option<u32>,
 }
 
+/// Which regular pattern a `Pattern` node makes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PatternKind {
+    /// A brick wall: rows of bricks, each row shifted along the row by a fraction of a brick.
+    #[default]
+    Bricks,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PatternOutput {
+    /// Distance to the centre of the brick the point is in, scaled to [-1, 1]: -1 at the centre, +1
+    /// at the brick corners. (With no row offset this is the Grid node's centre distance.)
+    #[default]
+    Distance = 0,
+    /// -1 on the brick face and +1 in the mortar between bricks (`gap`, `bevel`).
+    Shape = 1,
+    /// A flat random value in [-1, 1] per brick.
+    CellValue = 2,
+}
+
+/// Settings of a `Pattern` node. Every field has a default so files and code stay valid when
+/// more pattern kinds add fields.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PatternParams {
+    pub kind: PatternKind,
+    /// Bricks per tile per axis: along a row, rows, layers (see `axes`). Whole numbers tile.
+    pub counts: [f32; 3],
+    /// Extrude a 2D brick wall along `axis` instead of stacking 3D layers.
+    pub mode2d: bool,
+    /// The extrusion axis in 2D mode: 0 = X, 1 = Y, 2 = Z.
+    pub axis: u32,
+    /// Row k is shifted along the row by (k mod steps) / steps of a brick: 1 stacks bricks in a grid,
+    /// 2 is a running bond, 3 shifts by thirds.
+    pub steps: u32,
+    /// Mortar width and edge softness, as fractions of half a brick (Shape output).
+    pub gap: f32,
+    pub bevel: f32,
+    pub output: PatternOutput,
+    /// Overrides the global seed (Cell value output).
+    pub seed: Option<u32>,
+}
+
+impl Default for PatternParams {
+    fn default() -> Self {
+        // 8 bricks per row and 16 rows: bricks twice as wide as tall, as in a wall.
+        Self { kind: PatternKind::Bricks, counts: [8.0, 16.0, 8.0], mode2d: true, axis: 2, steps: 2, gap: 0.1, bevel: 0.1, output: PatternOutput::Distance, seed: None }
+    }
+}
+
+impl PatternParams {
+    /// (axis along a row, axis rows stack along, axis of layers in 3D). In 2D mode the pattern is
+    /// extruded along `axis` and the other two axes, in order, are the row and the stacking axis.
+    pub fn axes(&self) -> (usize, usize, Option<usize>) {
+        if !self.mode2d {
+            return (0, 1, Some(2));
+        }
+        match self.axis {
+            0 => (1, 2, None),
+            1 => (0, 2, None),
+            _ => (0, 1, None),
+        }
+    }
+
+    /// The axes whose counts matter.
+    pub fn used_axes(&self) -> Vec<usize> {
+        let (r, s, l) = self.axes();
+        [Some(r), Some(s), l].into_iter().flatten().collect()
+    }
+}
+
 impl NoiseParams {
     /// Octaves actually evaluated: Perlin and Simplex always use `octaves`, Worley only when fractal.
     pub fn octaves_used(&self) -> u32 {
@@ -212,6 +283,8 @@ pub enum NodeKind {
         #[serde(default)]
         corners: bool,
     },
+    /// A regular pattern (see `PatternParams`). Input: position (defaults to world position).
+    Pattern(PatternParams),
     Position,
     /// Input: the field to differentiate. Output: unit gradient (points low → high unless flipped).
     Normal { flip: bool },
@@ -227,7 +300,7 @@ impl NodeKind {
             NodeKind::Float(_) | NodeKind::Vec3(_) | NodeKind::Position => 0,
             NodeKind::Math { op, .. } => if op.is_smooth() { 3 } else { 2 },
             NodeKind::Remap { .. } => 5,
-            NodeKind::Normal { .. } | NodeKind::Noise(_) | NodeKind::Grid { .. } | NodeKind::OutDensity | NodeKind::OutNormal => 1,
+            NodeKind::Normal { .. } | NodeKind::Noise(_) | NodeKind::Grid { .. } | NodeKind::Pattern(_) | NodeKind::OutDensity | NodeKind::OutNormal => 1,
         }
     }
 
@@ -370,8 +443,8 @@ impl Graph {
     /// node's output must be a float that repeats every tile.
     pub fn cache_eligibility(&self, id: NodeId, tiling: &BTreeMap<NodeId, Tiling>) -> Result<(), String> {
         match &self.nodes.get(&id).ok_or("no such node")?.kind {
-            NodeKind::Noise(_) | NodeKind::Math { .. } | NodeKind::Remap { .. } | NodeKind::Grid { .. } => {}
-            _ => return Err("only Noise, Math, Remap and Grid nodes can be cached".into()),
+            NodeKind::Noise(_) | NodeKind::Math { .. } | NodeKind::Remap { .. } | NodeKind::Grid { .. } | NodeKind::Pattern(_) => {}
+            _ => return Err("only Noise, Math, Remap, Grid and pattern nodes can be cached".into()),
         }
         // Math on a vector input yields a vector (except dot); caches hold floats.
         if matches!(self.nodes[&id].kind, NodeKind::Math { .. }) && self.yields_vector(id) {
@@ -429,6 +502,7 @@ impl Graph {
                             finest = finest.max(p.scale * p.lacunarity.max(1.0).powi(oct as i32 - 1));
                         }
                         NodeKind::Grid { counts, .. } => finest = finest.max(counts.iter().cloned().fold(0.0, f32::max)),
+                        NodeKind::Pattern(p) => finest = finest.max(p.used_axes().iter().map(|a| p.counts[*a]).fold(0.0, f32::max)),
                         _ => {}
                     }
                     stack.extend(self.edges.iter().filter(|e| e.to == n).map(|e| e.from));
@@ -539,6 +613,21 @@ impl Graph {
                     None => Periodic,
                 }
             }
+            NodeKind::Pattern(p) => {
+                let used = p.used_axes();
+                let rows = p.counts[p.axes().1];
+                if used.iter().any(|a| !is_whole(p.counts[*a])) {
+                    Broken("brick counts are not whole numbers".into())
+                } else if p.steps > 1 && (rows as u32) % p.steps != 0 {
+                    Broken(format!("the number of rows ({rows}) must be a multiple of the row-offset steps ({})", p.steps))
+                } else {
+                    match input(0, memo, stack) {
+                        None | Some(Coord | Periodic) => Periodic,
+                        Some(Const) => Const,
+                        Some(Broken(r)) => Broken(r),
+                    }
+                }
+            }
             NodeKind::Grid { counts, .. } => {
                 if counts.iter().any(|c| !is_whole(*c)) {
                     Broken("grid counts are not whole numbers".into())
@@ -601,7 +690,7 @@ impl Graph {
     /// The type an input expects; for Math it follows what is connected.
     pub fn input_type(&self, id: NodeId, port: usize) -> PortType {
         match &self.nodes[&id].kind {
-            NodeKind::Noise(_) | NodeKind::Grid { .. } | NodeKind::OutNormal => PortType::Vector,
+            NodeKind::Noise(_) | NodeKind::Grid { .. } | NodeKind::Pattern(_) | NodeKind::OutNormal => PortType::Vector,
             NodeKind::Math { op, .. } if port < 2 => {
                 let vector = *op == MathOp::Dot || (0..2).any(|p| self.input(id, p).is_some_and(|s| self.yields_vector(s)));
                 if vector { PortType::Vector } else { PortType::Float }
@@ -665,7 +754,7 @@ impl Graph {
                     if x0.is_finite() && x1.is_finite() { (f(x0).min(f(x1)), f(x0).max(f(x1))) } else { UNBOUNDED }
                 }
             }
-            NodeKind::Grid { .. } => (-1.0, 1.0),
+            NodeKind::Grid { .. } | NodeKind::Pattern(_) => (-1.0, 1.0),
             NodeKind::OutDensity | NodeKind::OutNormal => UNBOUNDED,
         };
         stack.pop();
@@ -889,6 +978,43 @@ mod tests {
         // A Math node saved before the blend width existed still loads.
         let old = r#"{"op":"Add","a":1.0,"b":2.0}"#;
         assert!(matches!(serde_json::from_str::<NodeKind>(&format!("{{\"Math\":{old}}}")), Ok(NodeKind::Math { c, .. }) if c == 0.5));
+    }
+
+    #[test]
+    fn bricks_tiling_rules_and_axes() {
+        let mut g = Graph::default_graph(); // 0 Position → 1 Noise → 2 OutDensity
+        let p = |f: &dyn Fn(&mut PatternParams)| {
+            let mut p = PatternParams::default();
+            f(&mut p);
+            p
+        };
+        let tiling = |g: &mut Graph, p: PatternParams| {
+            let id = g.add(NodeKind::Pattern(p), [0.0; 2]);
+            let t = g.tiling()[&id].clone();
+            g.remove(id);
+            t
+        };
+        assert_eq!(tiling(&mut g, PatternParams::default()), Tiling::Periodic);
+        // Rows must divide into the offset steps, or the pattern jumps at the tile edge.
+        assert!(matches!(tiling(&mut g, p(&|p| p.counts[1] = 15.0)), Tiling::Broken(r) if r.contains("multiple of the row-offset")));
+        assert_eq!(tiling(&mut g, p(&|p| { p.counts[1] = 15.0; p.steps = 1; })), Tiling::Periodic);
+        assert_eq!(tiling(&mut g, p(&|p| { p.counts[1] = 15.0; p.steps = 3; })), Tiling::Periodic);
+        assert!(matches!(tiling(&mut g, p(&|p| p.counts[0] = 7.5)), Tiling::Broken(_)));
+        // The layer axis only counts in 3D.
+        assert_eq!(tiling(&mut g, p(&|p| p.counts[2] = 7.5)), Tiling::Periodic);
+        assert!(matches!(tiling(&mut g, p(&|p| { p.counts[2] = 7.5; p.mode2d = false; })), Tiling::Broken(_)));
+        // Which axes are the row, the stack and the extrusion.
+        assert_eq!(p(&|p| p.axis = 2).axes(), (0, 1, None));
+        assert_eq!(p(&|p| p.axis = 1).axes(), (0, 2, None));
+        assert_eq!(p(&|p| p.axis = 0).axes(), (1, 2, None));
+        assert_eq!(p(&|p| p.mode2d = false).axes(), (0, 1, Some(2)));
+        // Range, input pin, and a file written without the newer fields still loads.
+        let id = g.add(NodeKind::Pattern(PatternParams::default()), [0.0; 2]);
+        assert_eq!((g.nodes[&id].kind.input_count(), g.input_type(id, 0)), (1, PortType::Vector));
+        g.connect(id, 2, 0);
+        assert_eq!(g.density_range(), (-1.0, 1.0));
+        let min: NodeKind = serde_json::from_str(r#"{"Pattern":{"steps":3}}"#).unwrap();
+        assert!(matches!(min, NodeKind::Pattern(q) if q.steps == 3 && q.counts == [8.0, 16.0, 8.0] && q.mode2d));
     }
 
     #[test]

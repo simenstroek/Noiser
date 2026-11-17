@@ -546,3 +546,159 @@ fn grid_spans_minus_one_to_one_and_tiles() {
         }
     }
 }
+
+fn bricks_graph(f: impl FnOnce(&mut crate::graph::PatternParams)) -> Graph {
+    let mut p = crate::graph::PatternParams::default();
+    f(&mut p);
+    single_node_graph(NodeKind::Pattern(p))
+}
+
+#[test]
+fn bricks_distance_without_offset_is_the_grid_distance() {
+    let Some(gpu) = gpu() else { return eprintln!("no GPU adapter; skipping") };
+    let pts = points(5000, 9);
+    let bricks = bricks_graph(|p| {
+        p.mode2d = false;
+        p.steps = 1;
+        p.counts = [8.0, 4.0, 2.0];
+    });
+    let grid = single_node_graph(NodeKind::Grid { counts: [8.0, 4.0, 2.0], corners: false });
+    let (a, b) = (eval(&gpu, &bricks, &pts), eval(&gpu, &grid, &pts));
+    let worst = a.iter().zip(&b).map(|(x, y)| (x - y).abs()).fold(0.0, f32::max);
+    assert!(worst < 1e-4, "bricks (no row offset) differ from the grid by {worst}");
+}
+
+#[test]
+fn bricks_rows_are_offset_so_joints_do_not_line_up() {
+    use crate::graph::PatternOutput::Shape;
+    let Some(gpu) = gpu() else { return eprintln!("no GPU adapter; skipping") };
+    // 8 bricks per row and 16 rows: a brick is 1/8 wide and 1/16 tall. z does not matter in 2D.
+    let (x, z) = (0.5 / 8.0, 0.3);
+    let row = |k: f32| [x, (k + 0.5) / 16.0, z];
+    let at_centre_of_row0 = [row(0.0), row(1.0), row(2.0), row(3.0)];
+    let v = eval(&gpu, &bricks_graph(|p| p.output = Shape), &at_centre_of_row0);
+    near(v[0], -1.0, "centre of a brick in row 0");
+    near(v[1], 1.0, "the same x one row up is a vertical joint (mortar)");
+    near(v[2], -1.0, "two rows up repeats row 0");
+    near(v[3], 1.0, "three rows up is a joint again");
+    // Without the offset every row lines up.
+    let v = eval(&gpu, &bricks_graph(|p| { p.output = Shape; p.steps = 1; }), &at_centre_of_row0);
+    assert!(v.iter().all(|x| (x + 1.0).abs() < 1e-4), "steps 1 should stack the bricks: {v:?}");
+    // Thirds: row 1 is shifted by a third of a brick, so its centre sits a third along.
+    // (Distance, since Shape is -1 across the whole brick face.)
+    let thirds = bricks_graph(|p| { p.steps = 3; p.counts[1] = 12.0; });
+    let v = eval(&gpu, &thirds, &[[x + 1.0 / 3.0 / 8.0, 1.5 / 12.0, z], [x, 1.5 / 12.0, z]]);
+    near(v[0], -1.0, "centre of a brick in a row shifted by a third");
+    assert!(v[1] > -0.9, "the unshifted x is off-centre in that row, got {}", v[1]);
+}
+
+#[test]
+fn bricks_stay_in_range_fill_it_and_tile() {
+    use crate::graph::PatternOutput::{CellValue, Distance, Shape};
+    let Some(gpu) = gpu() else { return eprintln!("no GPU adapter; skipping") };
+    let pts = points(20000, 5);
+    for (steps, counts) in [(2, [8.0, 16.0, 8.0]), (3, [6.0, 12.0, 4.0]), (1, [5.0, 7.0, 3.0])] {
+        for output in [Distance, Shape, CellValue] {
+            for mode2d in [true, false] {
+                let g = bricks_graph(|p| { p.steps = steps; p.counts = counts; p.output = output; p.mode2d = mode2d; });
+                let what = format!("steps {steps} {output:?} 2d={mode2d}");
+                let v = eval(&gpu, &g, &pts);
+                assert!(v.iter().all(|x| x.is_finite()), "{what}: NaN or infinity");
+                let (lo, hi) = (v.iter().cloned().fold(f32::MAX, f32::min), v.iter().cloned().fold(f32::MIN, f32::max));
+                assert!(lo >= -1.0001 && hi <= 1.0001, "{what}: range {lo}..{hi}");
+                if output == CellValue {
+                    // One random value per brick: a small wall only has a few dozen of them.
+                    assert!(hi - lo > 1.2, "{what}: values only span {lo}..{hi}");
+                } else {
+                    assert!(lo < -0.9 && hi > 0.9, "{what}: range {lo}..{hi} does not fill -1..1");
+                }
+                for axis in 0..3 {
+                    let moved: Vec<[f32; 3]> = pts.iter().map(|p| { let mut q = *p; q[axis] += 1.0; q }).collect();
+                    let w = eval(&gpu, &g, &moved);
+                    // A point within float error of a brick edge may fall either side, so allow a few.
+                    let off = v.iter().zip(&w).filter(|(a, b)| (*a - *b).abs() > 2e-3).count();
+                    assert!(off <= 3, "{what}, axis {axis}: {off} of {} points differ one tile later", pts.len());
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn bricks_with_no_bevel_or_no_gap_are_finite() {
+    use crate::graph::PatternOutput::Shape;
+    let Some(gpu) = gpu() else { return eprintln!("no GPU adapter; skipping") };
+    let pts = points(20000, 6);
+    // Bevel 0 makes the ramp's low and high ends equal, which would be a NaN in smoothstep.
+    let v = eval(&gpu, &bricks_graph(|p| { p.output = Shape; p.bevel = 0.0; }), &pts);
+    assert!(v.iter().all(|x| x.is_finite() && x.abs() <= 1.0001), "bevel 0 gave a bad value");
+    let hard = v.iter().filter(|x| x.abs() > 0.999).count();
+    assert!(hard as f32 > 0.99 * v.len() as f32, "a hard edge should give only -1 or +1, got {hard} of {}", v.len());
+    assert!(v.iter().any(|x| *x > 0.999) && v.iter().any(|x| *x < -0.999));
+    // No gap and no bevel: the mortar has no width, so +1 is only reached on the border itself.
+    let v = eval(&gpu, &bricks_graph(|p| { p.output = Shape; p.bevel = 0.0; p.gap = 0.0; }), &pts);
+    assert!(v.iter().all(|x| x.is_finite() && x.abs() <= 1.0001), "gap 0 gave a bad value");
+}
+
+#[test]
+fn bricks_cell_value_is_flat_per_brick_and_agrees_across_the_tile_edge() {
+    use crate::graph::PatternOutput::CellValue;
+    let Some(gpu) = gpu() else { return eprintln!("no GPU adapter; skipping") };
+    let g = bricks_graph(|p| p.output = CellValue); // 8 per row, 16 rows, running bond
+    let row0 = |x: f32, y: f32| [x, y, 0.3];
+    // Two points in one row-0 brick (x in [0, 1/8), y in [0, 1/16)), and one in the next brick.
+    let v = eval(&gpu, &g, &[row0(0.02, 0.01), row0(0.11, 0.05), row0(0.15, 0.01)]);
+    near(v[0], v[1], "one brick has one value");
+    assert!((v[0] - v[2]).abs() > 1e-3, "neighbouring bricks should differ: {v:?}");
+    // In row 1 the bricks are shifted half a brick, so one straddles the tile edge: x = 0.99 and
+    // x = 0.01 are in the same brick and must hash the same id.
+    let y1 = 1.5 / 16.0;
+    let v = eval(&gpu, &g, &[[0.99, y1, 0.3], [0.01, y1, 0.3], [0.5, y1, 0.3]]);
+    near(v[0], v[1], "the brick across the tile edge has one value on both sides");
+    assert!((v[0] - v[2]).abs() > 1e-3, "a brick across the tile has another value: {v:?}");
+    // The brick above (row 2) is a different brick from the one in row 0 at the same x.
+    let v = eval(&gpu, &g, &[row0(0.02, 0.01), row0(0.02, 2.5 / 16.0)]);
+    assert!((v[0] - v[1]).abs() > 1e-3, "bricks in different rows should differ: {v:?}");
+}
+
+#[test]
+fn bricks_2d_extrudes_along_the_chosen_axis() {
+    let Some(gpu) = gpu() else { return eprintln!("no GPU adapter; skipping") };
+    let pts = points(4000, 8);
+    for axis in 0..3u32 {
+        let g = bricks_graph(|p| p.axis = axis);
+        let v = eval(&gpu, &g, &pts);
+        let shift = |a: usize| -> f32 {
+            let moved: Vec<[f32; 3]> = pts.iter().map(|p| { let mut q = *p; q[a] += 0.37; q }).collect();
+            let w = eval(&gpu, &g, &moved);
+            v.iter().zip(&w).map(|(x, y)| (x - y).abs()).fold(0.0, f32::max)
+        };
+        assert!(shift(axis as usize) < 1e-4, "axis {axis}: the pattern should be constant along the extrusion axis");
+        for other in (0..3).filter(|a| *a != axis as usize) {
+            assert!(shift(other) > 0.1, "axis {axis}: the pattern should change along axis {other}");
+        }
+    }
+}
+
+/// Writes target/pattern_*.png (a slice through each pattern) for looking at.
+#[test]
+#[ignore = "visual check; writes target/pattern_*.png"]
+fn render_pattern_images() {
+    use crate::export::{self, Format, Kind, Settings};
+    use crate::graph::PatternOutput::{CellValue, Distance, Shape};
+    let gpu = gpu().expect("needs a GPU");
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target");
+    let s = Settings { kind: Kind::Image2d, res: 384, format: Format::Png8, ..Default::default() };
+    let graphs = [
+        ("bricks_shape", bricks_graph(|p| p.output = Shape)),
+        ("bricks_distance", bricks_graph(|p| p.output = Distance)),
+        ("bricks_cells", bricks_graph(|p| p.output = CellValue)),
+        ("bricks_thirds", bricks_graph(|p| { p.output = Shape; p.steps = 3; p.counts = [6.0, 24.0, 8.0]; })),
+        ("grid_centres", single_node_graph(NodeKind::Grid { counts: [8.0; 3], corners: false })),
+        ("grid_corners", single_node_graph(NodeKind::Grid { counts: [8.0; 3], corners: true })),
+    ];
+    for (name, g) in graphs {
+        let ev = export::Evaluator::new(&gpu.device, &gpu.queue, &g, 0).unwrap();
+        export::run(&ev, &s, g.density_range(), &dir.join(format!("pattern_{name}.png")), &Default::default()).unwrap();
+    }
+}

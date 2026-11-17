@@ -4,7 +4,7 @@
 //! are read from the storage array `P` (filled from `Compiled::params`), so editing a value never
 //! changes the WGSL text. Only topology changes do, and the app rebuilds the pipeline when it differs.
 
-use crate::graph::{Graph, MathOp, NodeId, NodeKind, NoiseKind};
+use crate::graph::{Graph, MathOp, NodeId, NodeKind, NoiseKind, PatternKind};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write;
 
@@ -85,6 +85,18 @@ pub fn compile_with(g: &Graph, caches: &BTreeMap<NodeId, u32>) -> Result<Compile
                 params.extend(counts);
                 params.push(if *corners { 1.0 } else { 0.0 });
             }
+            NodeKind::Pattern(p) => params.extend([
+                p.counts[0],
+                p.counts[1],
+                p.counts[2],
+                p.steps as f32,
+                p.gap,
+                p.bevel,
+                p.output as u32 as f32,
+                if p.mode2d { 1.0 } else { 0.0 },
+                p.axis as f32,
+                p.seed.map_or(-1.0, |s| s as f32),
+            ]),
             NodeKind::Noise(n) => params.extend([
                 n.scale,
                 if n.normalize { 1.0 } else { 0.0 },
@@ -265,6 +277,12 @@ impl Gen<'_> {
                 let q = self.operand(id, 0, Ty::V, "p");
                 (Ty::F, format!("grid_dist({q}, vec3f(P[{s}], P[{}], P[{}]), P[{}] > 0.5)", s + 1, s + 2, s + 3))
             }
+            NodeKind::Pattern(p) => {
+                let q = self.operand(id, 0, Ty::V, "p");
+                match p.kind {
+                    PatternKind::Bricks => (Ty::F, format!("bricks({q}, {s}u)")),
+                }
+            }
             NodeKind::Normal { flip } => {
                 let sign = if *flip { "-" } else { "" };
                 match self.g.input(id, 0) {
@@ -359,7 +377,7 @@ mod tests {
         let v = g.add(NodeKind::Vec3([0.5, 1.0, 2.0]), [0.0; 2]);
         let f = g.add(NodeKind::Float(3.0), [0.0; 2]);
         let mut ops = Vec::new();
-        for op in [MathOp::Add, MathOp::Subtract, MathOp::Multiply, MathOp::Divide, MathOp::Min, MathOp::Max] {
+        for op in MathOp::ALL {
             let m = g.add(NodeKind::Math { op, a: 1.0, b: 2.0, c: 0.5 }, [0.0; 2]);
             g.connect(p, m, 0);
             g.connect(v, m, 1);
@@ -380,7 +398,31 @@ mod tests {
                 }
             });
         }
-        let noise = noise.unwrap();
+        let mut noise = noise.unwrap();
+        // The newer Math operators and the other float nodes, each summed in so the shader has
+        // to compile and validate all of them (Pattern in every output mode).
+        let mut extra: Vec<NodeId> = ops[6..].to_vec();
+        for kind in [
+            NodeKind::Remap { vals: [0.0, 0.0, 1.0, -2.0, 2.0], clamp: true },
+            NodeKind::Grid { counts: [4.0; 3], corners: false },
+            NodeKind::Grid { counts: [4.0; 3], corners: true },
+        ]
+        .into_iter()
+        .chain([crate::graph::PatternOutput::Distance, crate::graph::PatternOutput::Shape, crate::graph::PatternOutput::CellValue].map(|output| {
+            NodeKind::Pattern(crate::graph::PatternParams { output, seed: Some(3), ..Default::default() })
+        }))
+        .chain([NodeKind::Pattern(crate::graph::PatternParams { mode2d: false, axis: 0, ..Default::default() })])
+        {
+            let n = g.add(kind, [0.0; 2]);
+            g.connect(ops[5], n, 0);
+            extra.push(n);
+        }
+        for n in extra {
+            let sum = g.add(NodeKind::Math { op: MathOp::Add, a: 0.0, b: 0.0, c: 0.5 }, [0.0; 2]);
+            g.connect(noise, sum, 0);
+            g.connect(n, sum, 1);
+            noise = sum;
+        }
         // float * noise, then the normal of that, flipped.
         let scaled = g.add(NodeKind::Math { op: MathOp::Multiply, a: 0.0, b: 0.0, c: 0.5 }, [0.0; 2]);
         g.connect(f, scaled, 0);

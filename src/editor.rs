@@ -87,6 +87,9 @@ pub fn title(kind: &NodeKind) -> String {
         NodeKind::Math { .. } => "Math".into(), // the operator is the dropdown on the node
         NodeKind::Remap { .. } => "Remap".into(),
         NodeKind::Grid { .. } => "Grid".into(),
+        NodeKind::Pattern(p) => match p.kind {
+            crate::graph::PatternKind::Bricks => "Bricks".into(),
+        },
         NodeKind::Position => "Position".into(),
         NodeKind::Normal { .. } => "Normal".into(),
         NodeKind::Noise(n) => n.kind.name().into(),
@@ -105,7 +108,7 @@ fn input_label(kind: &NodeKind, port: usize) -> &'static str {
         (NodeKind::Remap { .. }, 2) => "From max",
         (NodeKind::Remap { .. }, 3) => "To min",
         (NodeKind::Remap { .. }, _) => "To max",
-        (NodeKind::Grid { .. }, _) => "Position",
+        (NodeKind::Grid { .. } | NodeKind::Pattern(_), _) => "Position",
         (NodeKind::Noise(_), _) => "Position",
         (NodeKind::Normal { .. }, _) => "Field",
         (NodeKind::OutDensity, _) => "Density",
@@ -138,6 +141,7 @@ fn palette() -> Vec<(&'static str, NodeKind)> {
             ("Math", NodeKind::Math { op: MathOp::Add, a: 0.0, b: 0.0, c: 0.5 }),
             ("Remap", NodeKind::Remap { vals: [0.0, 0.0, 1.0, 0.0, 1.0], clamp: false }),
             ("Grid", NodeKind::Grid { counts: [8.0; 3], corners: false }),
+            ("Bricks", NodeKind::Pattern(crate::graph::PatternParams::default())),
             ("Position", NodeKind::Position),
             ("Normal", NodeKind::Normal { flip: false }),
             ("Density Output", NodeKind::OutDensity),
@@ -311,7 +315,7 @@ impl Editor {
             let header = Rect::from_min_size(l.rect.min, Vec2::new(l.rect.width(), HEADER_H * z));
             let header_color = if has_output(&node.kind) { Color32::from_rgb(55, 70, 95) } else { Color32::from_rgb(80, 60, 95) };
             painter.rect_filled(header, CornerRadius { nw: r.nw, ne: r.ne, sw: 0, se: 0 }, header_color);
-            let cacheable = matches!(node.kind, NodeKind::Noise(_) | NodeKind::Math { .. } | NodeKind::Remap { .. } | NodeKind::Grid { .. });
+            let cacheable = matches!(node.kind, NodeKind::Noise(_) | NodeKind::Math { .. } | NodeKind::Remap { .. } | NodeKind::Grid { .. } | NodeKind::Pattern(_));
             // Keep the title clear of the header buttons.
             let title_clip = header.with_max_x(header.right() - (if cacheable { 48.0 } else { 28.0 }) * z);
             painter.with_clip_rect(title_clip).text(header.left_center() + Vec2::new(8.0 * z, 0.0), egui::Align2::LEFT_CENTER, title(&node.kind), font.clone(), Color32::WHITE);

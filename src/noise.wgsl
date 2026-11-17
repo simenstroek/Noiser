@@ -214,3 +214,56 @@ fn grid_dist(q: vec3f, n_in: vec3f, corners: bool) -> f32 {
     let d = select(f - 0.5, min(f, 1.0 - f), corners) / n;
     return length(d) / (0.5 * length(1.0 / n)) * 2.0 - 1.0;
 }
+
+// ---- Patterns ------------------------------------------------------------------------
+
+// Smooth ramp from 0 at lo to 1 at hi. The width has a floor so lo == hi (no bevel) is a hard
+// step instead of a NaN from dividing by zero.
+fn ramp01(lo: f32, hi: f32, x: f32) -> f32 {
+    let t = clamp((x - lo) / max(hi - lo, 1e-4), 0.0, 1.0);
+    return t * t * (3.0 - 2.0 * t);
+}
+
+// A brick wall. Params at P[s..s+10]: counts (3), steps, gap, bevel, output (0 distance, 1 shape,
+// 2 cell value), mode2d, axis, seed (-1 = global). In 2D mode the wall is extruded along `axis`;
+// the other two axes, in order, are the row axis and the stacking axis (see PatternParams::axes).
+fn bricks(q: vec3f, s: u32) -> f32 {
+    let counts = max(vec3f(P[s], P[s + 1u], P[s + 2u]), vec3f(1e-3));
+    let steps = max(i32(P[s + 3u]), 1);
+    let gap = P[s + 4u];
+    let bevel = P[s + 5u];
+    let mode = u32(P[s + 6u]);
+    let flat2d = P[s + 7u] > 0.5;
+    let axis = u32(P[s + 8u]);
+    let seed = select(u.seed, u32(P[s + 9u]), P[s + 9u] >= 0.0);
+
+    var r = 0u;  // along a row
+    var st = 1u; // rows stack along this axis
+    var ly = 2u; // layers (3D), or the extrusion axis (2D)
+    if (flat2d && axis == 0u) { r = 1u; st = 2u; ly = 0u; }
+    else if (flat2d && axis == 1u) { r = 0u; st = 2u; ly = 1u; }
+
+    // Brick units: one brick is 1 wide in every axis. Row k is shifted along the row by
+    // (k mod steps) / steps of a brick.
+    var x = q * counts;
+    let row = i32(floor(x[st]));
+    x[r] = x[r] - f32(((row % steps) + steps) % steps) / f32(steps);
+    let cell = floor(x);
+    var from_c = fract(x) - 0.5; // offset from the brick centre, in brick units
+    var inv = 1.0 / counts;
+    if (flat2d) { from_c[ly] = 0.0; inv[ly] = 0.0; }
+
+    if (mode == 2u) {
+        // Every brick has one id; wrapping it by the counts makes bricks across the tile edge agree.
+        let n = vec3i(max(counts, vec3f(1.0)) + 0.5);
+        var id = vec3i(cell);
+        if (flat2d) { id[ly] = 0; }
+        return hash01(((id % n) + n) % n, seed).x * 2.0 - 1.0;
+    }
+    if (mode == 1u) {
+        let e = 2.0 * max(abs(from_c.x), max(abs(from_c.y), abs(from_c.z))); // 0 at the centre, 1 at the border
+        return mix(-1.0, 1.0, ramp01(1.0 - gap - bevel, 1.0 - gap, e));
+    }
+    // Same scaling as grid_dist: tile-space distance over the covering radius, as -1..1.
+    return length(from_c * inv) / (0.5 * length(inv)) * 2.0 - 1.0;
+}

@@ -79,6 +79,34 @@ when `clamp` is true. Type float.
 `|d| / (0.5·|1/n|)·2 − 1`: −1 at the reference point and +1 as far from it as the grid gets (the cell
 corners for `center`, the cell centres for `corner`). Tiles when every count is a whole number. Type float.
 
+### `pattern`
+`kind` selects the pattern; version 1 has `bricks`. Common fields: `position` (op id or `null` for
+`p`) and `seed` (resolved, as for `noise`). Output is a float in [-1, 1].
+
+**`bricks`**: a brick wall. Fields `counts` `[nx, ny, nz]`, `mode2d`, `axis`, `steps`, `gap`,
+`bevel`, `output` (`distance`, `shape` or `cell_value`).
+
+Axes. With `mode2d` false: along a row is X (r = 0), rows stack along Y (s = 1), layers along Z
+(l = 2). With `mode2d` true the wall is extruded along `axis` (l) and the other two axes in
+increasing order are r then s: `axis` 0 gives r = Y, s = Z; `axis` 1 gives r = X, s = Z; `axis` 2 gives
+r = X, s = Y. `counts[a]` is the number of bricks per tile along axis `a`.
+
+Per point `q` (the noise-space position): `x = q·counts` (per component), `row = floor(x[s])`,
+`x[r] −= (row mod steps) / steps` (mod always non-negative, `steps` at least 1), `cell = floor(x)`,
+`c = fract(x) − 0.5` (the offset from the brick centre, in brick units) and, in 2D mode, `c[l] = 0`.
+- `distance`: `d = c / counts` per component (0 on an unused axis), result `|d| / (0.5·|inv|)·2 − 1`
+  with `inv = 1 / counts` (0 on an unused axis): −1 at the centre, +1 at the corners. With `steps` 1 and
+  `mode2d` false this equals the `grid` op's centre distance.
+- `shape`: `e = 2·max(|c.x|, |c.y|, |c.z|)` (0 at the centre, 1 at the border). With `lo = 1 − gap − bevel`
+  and `hi = 1 − gap`, `t = clamp((e − lo) / max(hi − lo, 1e-4), 0, 1)` smoothed as `t²(3 − 2t)`, and
+  the result is `−1 + 2t`: −1 on the face, +1 in the mortar.
+- `cell_value`: `id = cell` (with `id[l] = 0` in 2D mode) wrapped per axis by `counts` (rounded to a
+  whole number, at least 1, non-negative modulo), then `hash3(id, seed).x · 2 − 1`. Bricks that straddle
+  the tile edge therefore get the same id on both sides.
+
+Tiles when the counts of the used axes are whole and, if `steps > 1`, `counts[s]` is a multiple of
+`steps`.
+
 ### `noise`
 Fields: `kind`, `position` (op id or `null` for `p`), `scale`, `normalize`, `octaves`,
 `lacunarity`, `roughness`, `distortion`, `seed` (already resolved; a non-negative integer), and `feature` for Worley (`f1`, `f2`, `f2_minus_f1`, `cell_value`; Worley is fractal when `octaves` > 1). Type float.
