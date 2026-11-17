@@ -864,3 +864,70 @@ fn export_a_real_mesh() {
     let summary = job.run(&out, &Default::default()).unwrap();
     eprintln!("{summary}\nexport took {:?}", t.elapsed());
 }
+
+// ---- batch pipeline ---------------------------------------------------------------
+
+mod batch_tests {
+    use super::*;
+    use crate::mesh::shapes;
+    use crate::meshexport::{Displace, FileJob, Format, SeedMode, Settings};
+    use crate::surface::RawMesh;
+
+    fn write_sphere_obj(path: &std::path::Path, radius: f32) {
+        let m = shapes::icosphere(radius, 2);
+        let raw = RawMesh { normals: vec![[0.0, 0.0, 1.0]; m.positions.len()], positions: m.positions, triangles: m.triangles };
+        raw.write_obj(path).unwrap();
+    }
+
+    #[test]
+    fn seed_modes_are_distinct_repeatable_and_exact() {
+        assert_eq!((0..4).map(|i| SeedMode::Same.seed_for(7, i)).collect::<Vec<_>>(), [7, 7, 7, 7]);
+        assert_eq!((0..4).map(|i| SeedMode::Increment.seed_for(7, i)).collect::<Vec<_>>(), [7, 8, 9, 10]);
+        let random: Vec<u32> = (0..50).map(|i| SeedMode::Random.seed_for(7, i)).collect();
+        assert_eq!(random, (0..50).map(|i| SeedMode::Random.seed_for(7, i)).collect::<Vec<_>>());
+        let unique: std::collections::HashSet<_> = random.iter().collect();
+        assert_eq!(unique.len(), 50, "random seeds should differ");
+        assert!(random.iter().all(|s| *s < (1 << 24)));
+        assert_ne!(SeedMode::Random.seed_for(8, 0), random[0], "another global seed gives other seeds");
+    }
+
+    #[test]
+    fn a_batch_gives_each_mesh_its_own_seed_and_repeats() {
+        let Some(gpu) = gpu() else { return eprintln!("no GPU adapter; skipping") };
+        let dir = std::env::temp_dir().join("noiser-batch-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        // Two different meshes (sizes and positions differ; normalization makes the noise match).
+        write_sphere_obj(&dir.join("small.obj"), 1.0);
+        write_sphere_obj(&dir.join("big.obj"), 3.0);
+        let noise = noise_graph(NoiseParams { scale: 3.0, octaves: 2, ..Default::default() });
+        let run = |input: &str, seed: u32, out: &str| {
+            let job = FileJob {
+                device: &gpu.device,
+                queue: &gpu.queue,
+                graph: &noise,
+                seed,
+                d: Displace { amount: 0.1, tile_size: 1.0, prim_size: 1.0 },
+                settings: Settings { res: 48, format: Format::Obj, cull: 0.0 },
+                grid_res: 48,
+                grid_pad: 0.5,
+            };
+            let out = dir.join(out);
+            job.run(&dir.join(input), &out, &Default::default()).unwrap();
+            crate::mesh::Mesh::load_obj(&out).unwrap()
+        };
+        let a = run("small.obj", 0, "a.obj");
+        let a2 = run("small.obj", 0, "a2.obj");
+        let b = run("small.obj", 1, "b.obj");
+        assert_eq!(a.positions, a2.positions, "the same seed repeats");
+        assert!(a.positions.len() != b.positions.len() || a.positions != b.positions, "another seed differs");
+        // The big mesh is the same shape scaled up: same noise relative to the mesh, so the same
+        // topology, and every vertex at three times the position.
+        let big = run("big.obj", 0, "c.obj");
+        assert_eq!(big.positions.len(), a.positions.len(), "scaled copies should displace identically");
+        let worst = a.positions.iter().zip(&big.positions).map(|(p, q)| (0..3).map(|k| (p[k] * 3.0 - q[k]).abs()).fold(0.0, f32::max)).fold(0.0, f32::max);
+        assert!(worst < 0.02, "scaled mesh differs by {worst}");
+        // A missing file is an error, not a panic.
+        let job = FileJob { device: &gpu.device, queue: &gpu.queue, graph: &noise, seed: 0, d: Displace { amount: 0.1, tile_size: 1.0, prim_size: 1.0 }, settings: Settings::default(), grid_res: 32, grid_pad: 0.5 };
+        assert!(job.run(&dir.join("nope.obj"), &dir.join("x.obj"), &Default::default()).is_err());
+    }
+}

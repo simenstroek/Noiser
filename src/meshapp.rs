@@ -3,7 +3,7 @@
 //! mesh is in meshexport.rs.)
 
 use crate::mesh::{Mesh, Normalization};
-use crate::meshexport::{self, Displace, Format, Job, MeshEvaluator};
+use crate::meshexport::{self, Displace, FileJob, Format, Job, MeshEvaluator, SeedMode};
 use crate::meshsdf::MeshSdf;
 use crate::{App, view};
 use eframe::{egui, wgpu};
@@ -110,11 +110,16 @@ impl App {
     pub fn mesh_props(&mut self, ui: &mut egui::Ui) {
         ui.separator();
         ui.heading("Mesh");
-        if ui.button("Import mesh (OBJ)…").clicked() {
-            if let Some(p) = rfd::FileDialog::new().add_filter("OBJ mesh", &["obj"]).pick_file() {
-                self.start_mesh_load(p);
+        ui.horizontal(|ui| {
+            if ui.button("Import mesh (OBJ)…").clicked() {
+                if let Some(p) = rfd::FileDialog::new().add_filter("OBJ mesh", &["obj"]).pick_file() {
+                    self.start_mesh_load(p);
+                }
             }
-        }
+            if ui.button("Batch…").on_hover_text("Shape many meshes with this graph").clicked() {
+                self.batch_open = true;
+            }
+        });
         if let Some(job) = &self.mesh_job {
             ui.horizontal(|ui| {
                 ui.spinner();
@@ -155,8 +160,7 @@ pub struct MeshExportJob {
 impl App {
     /// How far the current displacement can move the surface, limited to what the distance grid covers.
     fn displacement_reach(&self, grid_pad: f32) -> f32 {
-        let push = view::push_range(self.graph.density_range(), self.pv.amount);
-        push.0.abs().max(push.1.abs()).min((grid_pad - 0.05).max(0.0))
+        meshexport::reach(&self.graph, self.pv.amount, grid_pad)
     }
 
     /// The Export displaced mesh window.
@@ -248,5 +252,170 @@ impl App {
             let _ = tx.send(r);
         });
         self.mesh_export_job = Some(MeshExportJob { progress, done: rx });
+    }
+}
+
+/// A batch running on a worker thread.
+pub struct BatchJob {
+    /// How many files are finished, how many there are, and how far the current one is (thousandths).
+    index: Arc<std::sync::atomic::AtomicU32>,
+    total: usize,
+    file_progress: meshexport::Progress,
+    name: Arc<std::sync::Mutex<String>>,
+    done: mpsc::Receiver<String>,
+}
+
+/// `dir/stem.ext`, or `dir/stem_2.ext` and so on if that exists, so a batch never overwrites anything.
+fn unique_path(dir: &std::path::Path, stem: &str, ext: &str) -> PathBuf {
+    let mut path = dir.join(format!("{stem}.{ext}"));
+    let mut n = 2;
+    while path.exists() {
+        path = dir.join(format!("{stem}_{n}.{ext}"));
+        n += 1;
+    }
+    path
+}
+
+impl App {
+    /// The Batch window: one graph, many meshes.
+    pub fn batch_window(&mut self, ctx: &egui::Context) {
+        use std::sync::atomic::Ordering;
+        if let Some(job) = &self.batch_job {
+            match job.done.try_recv() {
+                Ok(summary) => {
+                    self.status = summary;
+                    self.batch_job = None;
+                }
+                Err(mpsc::TryRecvError::Empty) => ctx.request_repaint_after(std::time::Duration::from_millis(100)),
+                Err(mpsc::TryRecvError::Disconnected) => self.batch_job = None,
+            }
+        }
+        if !self.batch_open {
+            return;
+        }
+        let mut open = true;
+        let mut start = false;
+        egui::Window::new("Batch displace meshes").open(&mut open).resizable(false).show(ctx, |ui| {
+            ui.label("Shapes every mesh with the same graph and writes a high-resolution mesh for each.");
+            ui.horizontal(|ui| {
+                if ui.button("Add meshes (OBJ)…").clicked() {
+                    if let Some(files) = rfd::FileDialog::new().add_filter("OBJ mesh", &["obj"]).pick_files() {
+                        for f in files {
+                            if !self.batch_files.contains(&f) {
+                                self.batch_files.push(f);
+                            }
+                        }
+                    }
+                }
+                if ui.add_enabled(!self.batch_files.is_empty(), egui::Button::new("Clear")).clicked() {
+                    self.batch_files.clear();
+                }
+            });
+            egui::ScrollArea::vertical().max_height(140.0).show(ui, |ui| {
+                let mut remove = None;
+                for (i, f) in self.batch_files.iter().enumerate() {
+                    ui.horizontal(|ui| {
+                        if ui.small_button("×").on_hover_text("Remove from the batch").clicked() {
+                            remove = Some(i);
+                        }
+                        ui.label(f.file_name().map_or(String::new(), |n| n.to_string_lossy().into_owned())).on_hover_text(f.display().to_string());
+                    });
+                }
+                if let Some(i) = remove {
+                    self.batch_files.remove(i);
+                }
+                if self.batch_files.is_empty() {
+                    ui.weak("No meshes yet.");
+                }
+            });
+            ui.horizontal(|ui| {
+                if ui.button("Output folder…").clicked() {
+                    if let Some(dir) = rfd::FileDialog::new().pick_folder() {
+                        self.batch_dir = Some(dir);
+                    }
+                }
+                match &self.batch_dir {
+                    Some(d) => ui.label(d.display().to_string()),
+                    None => ui.weak("none chosen"),
+                };
+            });
+            ui.separator();
+            crate::row(ui, &mut self.batch_seeds, SeedMode::Same, |ui, v| {
+                ui.selectable_value(v, SeedMode::Same, "Same seed");
+                ui.selectable_value(v, SeedMode::Increment, "Seed + 1 each");
+                ui.selectable_value(v, SeedMode::Random, "Random each");
+            });
+            let base = self.pv.seed;
+            ui.weak(match self.batch_seeds {
+                SeedMode::Same => format!("Every mesh uses the global seed ({base})."),
+                SeedMode::Increment => format!("The first mesh uses the global seed ({base}), the next {}, and so on.", base + 1),
+                SeedMode::Random => format!("Each mesh gets a different seed, repeatable from the global seed ({base}). Seeds are in the file names."),
+            });
+            ui.weak("Displacement, tile size, shape size and the graph come from the current 3D view; samples, format and small-part removal from Export displaced mesh; the distance grid from the Mesh section. Existing files are never overwritten.");
+            ui.separator();
+            match &self.batch_job {
+                Some(job) => {
+                    let done = job.index.load(Ordering::Relaxed) as f32;
+                    let p = (done + job.file_progress.load(Ordering::Relaxed) as f32 / 1000.0) / job.total.max(1) as f32;
+                    ui.label(job.name.lock().map(|n| n.clone()).unwrap_or_default());
+                    ui.add(egui::ProgressBar::new(p.min(1.0)).show_percentage());
+                }
+                None => {
+                    let ready = !self.batch_files.is_empty() && self.batch_dir.is_some();
+                    start = ui.add_enabled(ready, egui::Button::new(format!("Start ({} meshes)", self.batch_files.len()))).clicked();
+                }
+            }
+        });
+        self.batch_open = open;
+        if start {
+            self.start_batch();
+        }
+    }
+
+    pub fn start_batch(&mut self) {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        let Some(dir) = self.batch_dir.clone() else { return };
+        let files = self.batch_files.clone();
+        let total = files.len();
+        let (graph, base, mode) = (self.graph.clone(), self.pv.seed, self.batch_seeds);
+        let d = Displace { amount: self.pv.amount, tile_size: self.pv.tile_size, prim_size: self.pv.prim_size };
+        let settings = self.mesh_export.clone();
+        let (grid_res, grid_pad) = (self.mesh_res, self.mesh_pad);
+        let (device, queue) = (self.rs.device.clone(), self.rs.queue.clone());
+        let index = Arc::new(AtomicU32::new(0));
+        let file_progress = meshexport::Progress::default();
+        let name = Arc::new(std::sync::Mutex::new(String::new()));
+        let (tx, rx) = mpsc::channel();
+        let (idx, fp, nm) = (index.clone(), file_progress.clone(), name.clone());
+        std::thread::spawn(move || {
+            let mut written = 0;
+            let mut failed: Vec<String> = Vec::new();
+            for (i, input) in files.iter().enumerate() {
+                idx.store(i as u32, Ordering::Relaxed);
+                fp.store(0, Ordering::Relaxed);
+                let stem = input.file_stem().map_or("mesh".into(), |s| s.to_string_lossy().into_owned());
+                if let Ok(mut n) = nm.lock() {
+                    *n = format!("{stem} ({} of {total})", i + 1);
+                }
+                let seed = mode.seed_for(base, i);
+                let label = if mode == SeedMode::Same { stem.clone() } else { format!("{stem}_seed{seed}") };
+                let output = unique_path(&dir, &format!("{label}_displaced"), settings.format.extension());
+                let job = FileJob { device: &device, queue: &queue, graph: &graph, seed, d, settings: settings.clone(), grid_res, grid_pad };
+                // One bad file (or a GPU error inside it) must not stop the rest.
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| job.run(input, &output, &fp)));
+                match result {
+                    Ok(Ok(_)) => written += 1,
+                    Ok(Err(e)) => failed.push(format!("{stem}: {e}")),
+                    Err(_) => failed.push(format!("{stem}: the export crashed")),
+                }
+            }
+            idx.store(total as u32, Ordering::Relaxed);
+            let mut summary = format!("Batch finished: {written} of {total} meshes written to {}", dir.display());
+            if !failed.is_empty() {
+                summary += &format!(". Failed: {}", failed.join("; "));
+            }
+            let _ = tx.send(summary);
+        });
+        self.batch_job = Some(BatchJob { index, total, file_progress, name, done: rx });
     }
 }

@@ -100,6 +100,11 @@ struct App {
     mesh_export_open: bool,
     mesh_export: meshexport::Settings,
     mesh_export_job: Option<meshapp::MeshExportJob>,
+    batch_open: bool,
+    batch_files: Vec<std::path::PathBuf>,
+    batch_dir: Option<std::path::PathBuf>,
+    batch_seeds: meshexport::SeedMode,
+    batch_job: Option<meshapp::BatchJob>,
 }
 
 /// An export running on a worker thread.
@@ -112,14 +117,19 @@ impl App {
     fn new(cc: &eframe::CreationContext) -> Self {
         egui_extras::install_image_loaders(&cc.egui_ctx);
         // `noiser path.noisegraph` opens that graph.
-        // `noiser [graph.noisegraph] [--mesh file.obj] [--open-mesh-export]`
+        // `noiser [graph.noisegraph] [--mesh file.obj] [--open-mesh-export] [--batch-out DIR --batch-file FILE ...]`
         let mut args = std::env::args().skip(1);
         let (mut graph_arg, mut mesh_arg, mut open_mesh_export) = (None, None, false);
+        let (mut batch_dir, mut batch_files): (Option<std::path::PathBuf>, Vec<std::path::PathBuf>) = (None, Vec::new());
         while let Some(a) = args.next() {
             if a == "--mesh" {
                 mesh_arg = args.next().map(std::path::PathBuf::from);
             } else if a == "--open-mesh-export" {
                 open_mesh_export = true;
+            } else if a == "--batch-out" {
+                batch_dir = args.next().map(std::path::PathBuf::from);
+            } else if a == "--batch-file" {
+                batch_files.extend(args.next().map(std::path::PathBuf::from));
             } else if graph_arg.is_none() {
                 graph_arg = Some(std::path::PathBuf::from(a));
             }
@@ -176,11 +186,23 @@ impl App {
             mesh_export_open: false,
             mesh_export: meshexport::Settings::default(),
             mesh_export_job: None,
+            batch_open: false,
+            batch_files: Vec::new(),
+            batch_dir: None,
+            batch_seeds: meshexport::SeedMode::Same,
+            batch_job: None,
         };
         if let Some(p) = mesh_arg {
             app.start_mesh_load(p);
         }
         app.mesh_export_open = open_mesh_export; // for looking at the dialog without clicking
+        // `--batch-out DIR --batch-file A.obj --batch-file B.obj` starts a batch right away.
+        if batch_dir.is_some() && !batch_files.is_empty() {
+            app.batch_dir = batch_dir;
+            app.batch_files = batch_files;
+            app.batch_open = true;
+            app.start_batch();
+        }
         app
     }
 
@@ -705,6 +727,7 @@ impl eframe::App for App {
         self.recovery_prompt(&ui.ctx().clone());
         self.poll_mesh_job(&ui.ctx().clone());
         self.mesh_export_window(&ui.ctx().clone());
+        self.batch_window(&ui.ctx().clone());
         self.export_window(&ui.ctx().clone());
         if let Some(s) = self.session.as_mut().filter(|_| self.graph != self.saved) {
             if s.backup(&self.graph, self.path.as_deref()) {
@@ -740,6 +763,9 @@ impl eframe::App for App {
                     }
                     if ui.add_enabled(self.mesh.is_some(), egui::Button::new("Export displaced mesh…")).clicked() {
                         self.mesh_export_open = true;
+                    }
+                    if ui.button("Batch displace meshes…").clicked() {
+                        self.batch_open = true;
                     }
                     ui.separator();
                     if ui.button("Export…").clicked() {

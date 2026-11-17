@@ -298,3 +298,65 @@ impl Job<'_> {
         Ok(format!("Exported {} vertices, {} triangles{parts} to {}", mesh.positions.len(), mesh.triangles.len(), path.display()))
     }
 }
+
+/// How a batch picks the seed for each mesh.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SeedMode {
+    /// Every mesh gets the global seed.
+    #[default]
+    Same,
+    /// The global seed plus the mesh's position in the batch.
+    Increment,
+    /// A different pseudo-random seed per mesh, repeatable from the global seed.
+    Random,
+}
+
+impl SeedMode {
+    /// The seed for the `index`-th mesh of a batch started with global seed `base`.
+    pub fn seed_for(self, base: u32, index: usize) -> u32 {
+        match self {
+            SeedMode::Same => base,
+            SeedMode::Increment => base.wrapping_add(index as u32),
+            SeedMode::Random => {
+                // splitmix64 of (base, index); kept below 2^24 so it is exact as a float.
+                let mut z = ((base as u64) << 32 | index as u64).wrapping_add(0x9E37_79B9_7F4A_7C15);
+                z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+                z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+                ((z ^ (z >> 31)) & 0x00FF_FFFF) as u32
+            }
+        }
+    }
+}
+
+/// How far the surface can move: the displacement's reach, limited to what a distance grid padded
+/// by `grid_pad` covers (it keeps 0.05 of margin).
+pub fn reach(graph: &Graph, amount: f32, grid_pad: f32) -> f32 {
+    let push = crate::view::push_range(graph.density_range(), amount);
+    push.0.abs().max(push.1.abs()).min((grid_pad - 0.05).max(0.0))
+}
+
+/// Everything but the mesh itself for taking an OBJ file through the whole pipeline.
+pub struct FileJob<'a> {
+    pub device: &'a wgpu::Device,
+    pub queue: &'a wgpu::Queue,
+    pub graph: &'a Graph,
+    pub seed: u32,
+    pub d: Displace,
+    pub settings: Settings,
+    /// The distance grid: samples along the longest side, and padding in normalized units.
+    pub grid_res: u32,
+    pub grid_pad: f32,
+}
+
+impl FileJob<'_> {
+    /// Loads `input`, displaces it like the preview would and writes the result to `output`.
+    pub fn run(&self, input: &Path, output: &Path, progress: &Progress) -> Result<String, String> {
+        let (mesh, norm) = crate::mesh::Mesh::load_obj(input)?.normalized();
+        let sdf = crate::meshsdf::MeshSdf::build(&mesh, self.grid_res, self.grid_pad, &Default::default());
+        let (_texture, view) = sdf.upload(self.device, self.queue); // keep the texture alive for the whole job
+        let ev = MeshEvaluator::new(self.device, self.queue, self.graph, self.seed, view, sdf.origin, sdf.voxel)?;
+        let (lo, hi) = mesh.bounds();
+        let job = Job { ev: &ev, d: self.d, lo, hi, reach: reach(self.graph, self.d.amount, self.grid_pad), norm, settings: self.settings.clone() };
+        job.run(output, progress)
+    }
+}

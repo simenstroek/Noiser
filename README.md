@@ -65,6 +65,13 @@ OBJ or PLY of the same surface (as many samples along the longest side as you as
 bits removed and the mesh's own size and position restored. The mesh can be made of overlapping parts. See
 `PLAN.md` for how it works and its limits.
 
+**Batch.** Once a graph and settings look right on one mesh, *Batch displace meshes* applies them to many OBJ
+files at once: pick the files and an output folder, choose the same seed for all, the global seed plus one per
+mesh, or a repeatable random seed per mesh (the seed is in the file name), and start. Because every mesh is
+scaled to a unit sphere first, the noise is the same size relative to each mesh. A file that fails is
+reported and the rest continue; nothing is ever overwritten. From a script:
+`noiser.exe graph.noisegraph --batch-out DIR --batch-file a.obj --batch-file b.obj`.
+
 ## Controls
 
 | | |
@@ -83,6 +90,6 @@ bits removed and the mesh's own size and position restored. The mesh can be made
 
 ## Roadmap
 
-Next: batch-processing many meshes with one graph (optionally a different seed for each), displacement
+Next: displacement
 masks for meshes (by position, normal, occlusion, curvature), more pattern nodes (dimples, honeycomb, Truchet, stripes, checker, gyroid, fractals), then rendering and
 material settings for the viewport. See `PLAN.md` for the details.
