@@ -83,3 +83,9 @@ What was learned:
 - The p95 neighbour-normal angle is a poor metric on hard-edged inputs (a true 90 degree crease is correct); fold edges and the distance to the true surface are the useful numbers.
 - xatlas on a bumpy surface cuts hundreds of tiny charts; charting a smoothed copy of the surface (same triangles, Taubin smoothing) removes most of them. A pure Rust unwrapper (uvunwrap) gave the same island counts and was dropped. Tiny islands that remain are mostly in hidden crevices and on undersides.
 - The baker was checked by rendering the 4k-triangle monkey with its baked normal map against a 100k-triangle reference: the detail matches, so the tangent frame and green channel convention (green down, Unreal) are right.
+
+## Mesh graph status (2026-11-18, night)
+
+Built: the Mesh graph tab, a second `Graph` with extra node kinds (Load Mesh, Noise Graph, Remesh, Auto UVs, Bake with custom inputs, Mesh and Image outputs, Split and Combine channels, Image levels), typed mesh and image wires, `meshgraph::lowered_mesh` (a Noise Graph node becomes a copy of its graph: unconnected generators and Position nodes read the position times the frequency, the output is multiplied by the amplitude; checked on the GPU against the standalone graphs), `MeshEvaluator::new_graph` (up to four loaded meshes as distance grids in one shader), the executor `meshgraph::Runner` (memoized per node, remesh, UVs and bake on a worker thread, outputs written without overwriting) and headless `--mesh-graph`. A test runs the design's example graph end to end on the GPU.
+
+Not built: a live 3D preview of the field in the tab, batch runs (Load Mesh reading a batch's file), transfer of existing UVs, version history for noise graph files on save (the embedded copy is refreshed, but no `.history` folder yet), and clicking through the new tab on screen has not been done (no way to drive the window from here).
