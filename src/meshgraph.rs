@@ -163,6 +163,8 @@ enum Value {
     Mesh(RawMesh),
     Uv(crate::uvgen::UvMesh),
     Images(Vec<crate::bake::Image>),
+    /// A loaded mesh file as it is (a Load Mesh's mesh output).
+    Source(crate::mesh::Mesh),
 }
 
 /// A loaded mesh baked into a distance grid, kept between runs (the grid takes seconds to build).
@@ -175,6 +177,8 @@ pub struct LoadedMesh {
     /// Bounds in the mesh file's units.
     lo: [f32; 3],
     hi: [f32; 3],
+    /// The mesh as the file has it, in its units, with its UVs (for Transfer UVs).
+    raw: crate::mesh::Mesh,
 }
 
 #[derive(Default)]
@@ -215,11 +219,12 @@ impl Runner<'_> {
             return Ok(m.clone());
         }
         (self.log)(&format!("loading {}", path.display()));
-        let (mesh, norm) = crate::meshformats::load(&path)?.normalized();
+        let raw = crate::meshformats::load(&path)?;
+        let (mesh, norm) = raw.normalized();
         let sdf = crate::meshsdf::MeshSdf::build_with(&mesh, p.resolution, p.padding, &Default::default(), p.combine);
         let (texture, view) = sdf.upload(self.device, self.queue);
         let (nlo, nhi) = mesh.bounds();
-        let loaded = std::sync::Arc::new(LoadedMesh { texture, view, origin: sdf.origin, voxel: sdf.voxel, norm, lo: norm.to_object(nlo), hi: norm.to_object(nhi) });
+        let loaded = std::sync::Arc::new(LoadedMesh { texture, view, origin: sdf.origin, voxel: sdf.voxel, norm, lo: norm.to_object(nlo), hi: norm.to_object(nhi), raw });
         self.cache.meshes.insert(key, loaded.clone());
         Ok(loaded)
     }
@@ -350,6 +355,17 @@ impl Runner<'_> {
                 let mut mesh = job.remeshed_with(*triangles as usize, *adaptivity, &self.progress);
                 mesh.recompute_normals();
                 Value::Mesh(mesh)
+            }
+            NodeKind::LoadMesh(p) => Value::Source(self.mesh(p)?.raw.clone()),
+            NodeKind::TransferUv => {
+                let (target_src, _) = input(0)?;
+                let (source_src, _) = input(1)?;
+                let Value::Mesh(target) = self.value(original, lowered, target_src, memo, fields)? else { return Err(format!("node {id} (Transfer UVs): the target needs a mesh without UVs, such as Remesh")) };
+                let Value::Source(source) = self.value(original, lowered, source_src, memo, fields)? else { return Err(format!("node {id} (Transfer UVs): the UV source must be a Load Mesh's mesh output")) };
+                (self.log)("transferring UVs");
+                let (uv, stats) = crate::uvtransfer::transfer(&target, &source)?;
+                (self.log)(&format!("  {} island(s) used; {} corner(s) farther than 2% of the mesh size from the source surface", stats.islands, stats.far_corners));
+                Value::Uv(uv)
             }
             NodeKind::AutoUv(params) => {
                 let (src, _) = input(0)?;

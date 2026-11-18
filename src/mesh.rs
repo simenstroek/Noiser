@@ -12,6 +12,9 @@ pub struct Mesh {
     pub triangles: Vec<[u32; 3]>,
     /// Per-vertex colours (0 to 1), parallel to `positions`; empty when the file has none.
     pub colors: Vec<V3>,
+    /// Texture coordinates of each triangle's corners (V up, as files store them), parallel to `triangles`; empty
+    /// when the file has none.
+    pub uvs: Vec<[[f32; 2]; 3]>,
 }
 
 /// Maps object space to the normalized space: `normalized = (object - center) / scale`.
@@ -48,7 +51,13 @@ impl Mesh {
                 mesh.colors.resize(mesh.positions.len() + count, [0.0; 3]);
             }
             mesh.positions.extend(model.mesh.positions.chunks_exact(3).map(|p| [p[0], p[1], p[2]]));
+            let before = mesh.triangles.len();
             mesh.triangles.extend(model.mesh.indices.chunks_exact(3).map(|t| [base + t[0], base + t[1], base + t[2]]));
+            // `vt` coordinates, per corner (a vertex on a seam has several). Kept only if every object has them.
+            if model.mesh.texcoord_indices.len() == model.mesh.indices.len() && !model.mesh.texcoords.is_empty() && mesh.uvs.len() == before {
+                let uv = |i: u32| [model.mesh.texcoords[2 * i as usize], model.mesh.texcoords[2 * i as usize + 1]];
+                mesh.uvs.extend(model.mesh.texcoord_indices.chunks_exact(3).map(|t| [uv(t[0]), uv(t[1]), uv(t[2])]));
+            }
         }
         if mesh.triangles.is_empty() {
             return Err(format!("{} has no triangles", path.display()));
@@ -93,15 +102,19 @@ impl Mesh {
                 })
             })
             .collect();
-        let triangles = self
-            .triangles
-            .iter()
-            .map(|t| [remap[t[0] as usize], remap[t[1] as usize], remap[t[2] as usize]])
-            .filter(|t| t[0] != t[1] && t[1] != t[2] && t[0] != t[2])
+        let mut triangles = Vec::new();
+        let mut uvs = Vec::new();
+        for (k, t) in self.triangles.iter().enumerate() {
+            let t = [remap[t[0] as usize], remap[t[1] as usize], remap[t[2] as usize]];
             // A vertex with NaN or infinite coordinates would poison the bounds and the distance grid.
-            .filter(|t| t.iter().all(|&i| positions[i as usize].iter().all(|x| x.is_finite())))
-            .collect();
-        Mesh { positions, triangles, colors }
+            if t[0] != t[1] && t[1] != t[2] && t[0] != t[2] && t.iter().all(|&i| positions[i as usize].iter().all(|x| x.is_finite())) {
+                triangles.push(t);
+                if let Some(uv) = self.uvs.get(k) {
+                    uvs.push(*uv);
+                }
+            }
+        }
+        Mesh { positions, triangles, colors, uvs }
     }
 
     /// The mesh moved and scaled so its bounding box is centred on the origin and its bounding
@@ -118,7 +131,7 @@ impl Mesh {
         }
         let norm = Normalization { center, scale: if radius > 0.0 { radius } else { 1.0 } };
         let positions = self.positions.iter().map(|p| [(p[0] - center[0]) / norm.scale, (p[1] - center[1]) / norm.scale, (p[2] - center[2]) / norm.scale]).collect();
-        (Mesh { positions, triangles: self.triangles.clone(), colors: self.colors.clone() }, norm)
+        (Mesh { positions, triangles: self.triangles.clone(), colors: self.colors.clone(), uvs: self.uvs.clone() }, norm)
     }
 }
 
@@ -192,7 +205,7 @@ pub mod shapes {
         for p in &mut positions {
             *p = [p[0] * radius, p[1] * radius, p[2] * radius];
         }
-        Mesh { positions, triangles, colors: Vec::new() }
+        Mesh { positions, triangles, colors: Vec::new(), uvs: Vec::new() }
     }
 }
 

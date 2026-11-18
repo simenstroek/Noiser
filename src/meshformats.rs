@@ -37,6 +37,7 @@ fn load_gltf(path: &Path) -> Result<Mesh, String> {
     let scene = doc.default_scene().or_else(|| doc.scenes().next()).ok_or("the glTF file has no scene")?;
     let mut mesh = Mesh::default();
     let mut all_colored = true;
+    let (mut all_uv, mut vertex_uv) = (true, Vec::<[f32; 2]>::new());
     let mut stack: Vec<(gltf::Node, [[f32; 4]; 4])> = scene.nodes().map(|n| (n, IDENTITY)).collect();
     while let Some((node, parent)) = stack.pop() {
         let world = mul(parent, node.transform().matrix());
@@ -56,6 +57,11 @@ fn load_gltf(path: &Path) -> Result<Mesh, String> {
                 Some(c) => mesh.colors.extend(c.into_rgb_f32()),
                 None => all_colored = false,
             }
+            // glTF's texture origin is the top left; meshes keep V up, as OBJ does.
+            match reader.read_tex_coords(0) {
+                Some(t) => vertex_uv.extend(t.into_f32().map(|uv| [uv[0], 1.0 - uv[1]])),
+                None => all_uv = false,
+            }
             let index: Vec<u32> = match reader.read_indices() {
                 Some(i) => i.into_u32().collect(),
                 None => (0..n).collect(),
@@ -74,6 +80,9 @@ fn load_gltf(path: &Path) -> Result<Mesh, String> {
     }
     if !all_colored || mesh.colors.len() != mesh.positions.len() {
         mesh.colors.clear();
+    }
+    if all_uv && vertex_uv.len() == mesh.positions.len() {
+        mesh.uvs = mesh.triangles.iter().map(|t| t.map(|i| vertex_uv[i as usize])).collect();
     }
     finish(mesh, path)
 }

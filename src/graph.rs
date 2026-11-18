@@ -642,6 +642,8 @@ pub enum NodeKind {
     OutMesh(crate::meshgraph::OutParams),
     /// Mesh graph: writes an image.
     OutImage(crate::meshgraph::OutParams),
+    /// Mesh graph: the UVs of a mesh (input 2, a Load Mesh's mesh output) carried onto another (input 1).
+    TransferUv,
     /// Mesh graph: an image split into its red, green, blue and alpha channels (four grey images).
     ImageSplit,
     /// Mesh graph: four grey images (red, green, blue, alpha) combined into one. Unconnected channels are 0, alpha 1.
@@ -656,6 +658,7 @@ impl NodeKind {
         match self {
             NodeKind::Separate => 3,
             NodeKind::ImageSplit => 4,
+            NodeKind::LoadMesh(_) => 2,
             NodeKind::Bake(s) => (s.channels.len() + s.custom.len()).max(1),
             NodeKind::OutDensity | NodeKind::OutNormal | NodeKind::OutMesh(_) | NodeKind::OutImage(_) => 0,
             _ => 1,
@@ -676,6 +679,7 @@ impl NodeKind {
             NodeKind::LoadMesh(_) | NodeKind::NoiseGraph(_) | NodeKind::Remesh { .. } | NodeKind::AutoUv(_) | NodeKind::OutMesh(_) | NodeKind::OutImage(_) | NodeKind::ImageSplit | NodeKind::ImageLevels { .. } => 1,
             NodeKind::Bake(s) => 2 + s.custom.len(),
             NodeKind::ImageCombine => 4,
+            NodeKind::TransferUv => 2,
         }
     }
 
@@ -836,21 +840,22 @@ impl Graph {
 
     /// Connects `from` into input `port` of `to`, replacing any existing link on that input.
     pub fn connect(&mut self, from: NodeId, to: NodeId, port: usize) {
+        self.connect_typed(from, 0, to, port);
+    }
+
+    fn connect_typed(&mut self, from: NodeId, from_port: usize, to: NodeId, port: usize) {
         // Meshes and images only go to inputs of their own kind.
-        let special = |id: &NodeId| matches!(self.nodes.get(id).map(|n| &n.kind), Some(NodeKind::Remesh { .. } | NodeKind::AutoUv(_) | NodeKind::Bake(_) | NodeKind::OutMesh(_) | NodeKind::OutImage(_) | NodeKind::ImageSplit | NodeKind::ImageCombine | NodeKind::ImageLevels { .. }));
-        if (special(&from) || special(&to)) && self.nodes.contains_key(&from) && self.nodes.contains_key(&to) && !self.output_type(from).connects_to(self.input_type(to, port)) {
+        let special = |id: &NodeId| matches!(self.nodes.get(id).map(|n| &n.kind), Some(NodeKind::LoadMesh(_) | NodeKind::Remesh { .. } | NodeKind::AutoUv(_) | NodeKind::Bake(_) | NodeKind::OutMesh(_) | NodeKind::OutImage(_) | NodeKind::ImageSplit | NodeKind::ImageCombine | NodeKind::ImageLevels { .. } | NodeKind::TransferUv));
+        if (special(&from) || special(&to)) && self.nodes.contains_key(&from) && self.nodes.contains_key(&to) && !self.output_type_at(from, from_port).connects_to(self.input_type(to, port)) {
             return;
         }
         self.edges.retain(|e| !(e.to == to && e.port == port));
-        self.edges.push(Edge { from, from_port: 0, to, port });
+        self.edges.push(Edge { from, from_port, to, port });
     }
 
     /// Like `connect`, from output `from_port` of `from`.
     pub fn connect_from(&mut self, from: NodeId, from_port: usize, to: NodeId, port: usize) {
-        self.connect(from, to, port);
-        if let Some(e) = self.edges.last_mut() {
-            e.from_port = from_port;
-        }
+        self.connect_typed(from, from_port, to, port);
     }
 
     /// The node feeding `port` of `to` and which of its outputs, looking through muted nodes and reroutes.
@@ -1145,7 +1150,7 @@ impl Graph {
         let t = match &self.nodes[&id].kind {
             NodeKind::Float(_) | NodeKind::Vec3(_) => Const,
             NodeKind::LoadMesh(_) => Broken("a loaded mesh does not tile".into()),
-            NodeKind::NoiseGraph(_) | NodeKind::Remesh { .. } | NodeKind::AutoUv(_) | NodeKind::Bake(_) | NodeKind::OutMesh(_) | NodeKind::OutImage(_) | NodeKind::ImageSplit | NodeKind::ImageCombine | NodeKind::ImageLevels { .. } => Const,
+            NodeKind::NoiseGraph(_) | NodeKind::Remesh { .. } | NodeKind::AutoUv(_) | NodeKind::Bake(_) | NodeKind::OutMesh(_) | NodeKind::OutImage(_) | NodeKind::ImageSplit | NodeKind::ImageCombine | NodeKind::ImageLevels { .. } | NodeKind::TransferUv => Const,
             NodeKind::Position => Coord,
             NodeKind::Reroute | NodeKind::NamedReroute { .. } => input(0, memo, stack).unwrap_or(Const),
             NodeKind::NamedRerouteUse { name } => match self.named_declaration(name).and_then(|d| self.input(d, 0)) {
@@ -1312,10 +1317,18 @@ impl PortType {
 impl Graph {
     /// The type of a node's output. A Math node favors vectors: it outputs one when either input is
     /// a vector (the other is repeated), and only a float when it has to (dot product).
+    /// The type of one output pin: a Load Mesh node's second output is its mesh, the rest follow `output_type`.
+    pub fn output_type_at(&self, id: NodeId, port: usize) -> PortType {
+        if port == 1 && matches!(self.nodes.get(&id).map(|n| &n.kind), Some(NodeKind::LoadMesh(_))) {
+            return PortType::Mesh;
+        }
+        self.output_type(id)
+    }
+
     pub fn output_type(&self, id: NodeId) -> PortType {
         match &self.nodes[&id].kind {
-            NodeKind::Remesh { .. } | NodeKind::AutoUv(_) => return PortType::Mesh,
-            NodeKind::Bake(_) | NodeKind::ImageSplit | NodeKind::ImageCombine | NodeKind::ImageLevels { .. } => return PortType::Image,
+            NodeKind::Remesh { .. } | NodeKind::AutoUv(_) | NodeKind::TransferUv => return PortType::Mesh,
+            NodeKind::Bake(_) | NodeKind::ImageSplit | NodeKind::ImageCombine | NodeKind::ImageLevels { .. } | NodeKind::TransferUv => return PortType::Image,
             _ => {}
         }
         if self.yields_vector(id) { PortType::Vector } else { PortType::Float }
@@ -1324,9 +1337,9 @@ impl Graph {
     /// The type an input expects; for Math it follows what is connected.
     pub fn input_type(&self, id: NodeId, port: usize) -> PortType {
         match &self.nodes[&id].kind {
-            NodeKind::AutoUv(_) | NodeKind::OutMesh(_) => PortType::Mesh,
+            NodeKind::AutoUv(_) | NodeKind::OutMesh(_) | NodeKind::TransferUv => PortType::Mesh,
             NodeKind::Bake(_) if port == 0 => PortType::Mesh,
-            NodeKind::OutImage(_) | NodeKind::ImageSplit | NodeKind::ImageCombine | NodeKind::ImageLevels { .. } => PortType::Image,
+            NodeKind::OutImage(_) | NodeKind::ImageSplit | NodeKind::ImageCombine | NodeKind::ImageLevels { .. } | NodeKind::TransferUv => PortType::Image,
             NodeKind::Noise(_) | NodeKind::Grid { .. } | NodeKind::Pattern(_) | NodeKind::OutNormal | NodeKind::Separate => PortType::Vector,
             NodeKind::Math { op, .. } if port < 2 => {
                 let vector = *op == MathOp::Dot || (0..2).any(|p| self.input(id, p).is_some_and(|s| self.yields_vector(s)));
@@ -1384,7 +1397,7 @@ impl Graph {
         let r = match &self.nodes[&id].kind {
             NodeKind::Float(v) => (*v, *v),
             NodeKind::Vec3(v) => (v.iter().cloned().fold(f32::MAX, f32::min), v.iter().cloned().fold(f32::MIN, f32::max)),
-            NodeKind::Position | NodeKind::LoadMesh(_) | NodeKind::NoiseGraph(_) | NodeKind::Remesh { .. } | NodeKind::AutoUv(_) | NodeKind::Bake(_) | NodeKind::OutMesh(_) | NodeKind::OutImage(_) | NodeKind::ImageSplit | NodeKind::ImageCombine | NodeKind::ImageLevels { .. } => UNBOUNDED,
+            NodeKind::Position | NodeKind::LoadMesh(_) | NodeKind::NoiseGraph(_) | NodeKind::Remesh { .. } | NodeKind::AutoUv(_) | NodeKind::Bake(_) | NodeKind::OutMesh(_) | NodeKind::OutImage(_) | NodeKind::ImageSplit | NodeKind::ImageCombine | NodeKind::ImageLevels { .. } | NodeKind::TransferUv => UNBOUNDED,
             NodeKind::Separate => match self.input(id, 0) {
                 Some(src) => self.range_of(src, stack),
                 None => (0.0, 0.0),

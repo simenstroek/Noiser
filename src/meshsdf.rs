@@ -822,7 +822,7 @@ mod tests {
                 triangles.push([b, c, d]);
             }
         }
-        Mesh { positions, triangles, colors: Vec::new() }
+        Mesh { positions, triangles, colors: Vec::new(), uvs: Vec::new() }
     }
 
     #[test]

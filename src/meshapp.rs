@@ -644,7 +644,7 @@ mod tests {
 
     #[test]
     fn a_flat_open_mesh_gets_more_voxels_along_its_length_than_a_cube() {
-        let flat = Mesh { positions: vec![[-1.0, -0.02, -1.0], [1.0, 0.02, -1.0], [1.0, 0.0, 1.0], [-1.0, 0.0, 1.0]], triangles: vec![[0, 1, 2], [0, 2, 3]], colors: Vec::new() };
+        let flat = Mesh { positions: vec![[-1.0, -0.02, -1.0], [1.0, 0.02, -1.0], [1.0, 0.0, 1.0], [-1.0, 0.0, 1.0]], triangles: vec![[0, 1, 2], [0, 2, 3]], colors: Vec::new(), uvs: Vec::new() };
         let cube = crate::mesh::shapes::icosphere(1.0, 1);
         assert!(open_mesh_res(&flat, 0.5) > open_mesh_res(&cube, 0.5));
         assert!(open_mesh_res(&flat, 0.5) <= 768);

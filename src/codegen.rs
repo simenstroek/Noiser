@@ -336,7 +336,7 @@ impl Gen<'_> {
                 (Ty::F, format!("mesh_dist_{slot}({})", self.operand(id, 0, Ty::V, "p")))
             }
             NodeKind::NoiseGraph(_) => return Err("a Noise Graph node must be lowered first (meshgraph::lowered_mesh)".into()),
-            NodeKind::Remesh { .. } | NodeKind::AutoUv(_) | NodeKind::Bake(_) | NodeKind::OutMesh(_) | NodeKind::OutImage(_) | NodeKind::ImageSplit | NodeKind::ImageCombine | NodeKind::ImageLevels { .. } => return Err("this node does not produce a field".into()),
+            NodeKind::Remesh { .. } | NodeKind::AutoUv(_) | NodeKind::Bake(_) | NodeKind::OutMesh(_) | NodeKind::OutImage(_) | NodeKind::ImageSplit | NodeKind::ImageCombine | NodeKind::ImageLevels { .. } | NodeKind::TransferUv => return Err("this node does not produce a field".into()),
             // Never reached (readers look through them), but the match must be complete.
             NodeKind::NamedReroute { .. } | NodeKind::NamedRerouteUse { .. } => (Ty::F, "0.0".into()),
             NodeKind::Reroute => {

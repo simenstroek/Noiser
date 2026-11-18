@@ -1800,6 +1800,49 @@ format binary_little_endian") && ply.len() > 10_000);
     assert_eq!((packed.width(), packed.height(), packed.color()), (128, 128, image::ColorType::Rgba16));
 }
 
+/// A mesh with UVs, remeshed after a noise displacement, takes its own UVs back through Transfer UVs.
+#[test]
+fn a_mesh_graph_transfers_the_uvs_of_its_mesh_to_the_remeshed_result() {
+    use crate::graph::MathOp;
+    let Some(gpu) = gpu() else { return eprintln!("no GPU adapter; skipping") };
+    let dir = std::env::temp_dir().join("noiser-transfer-test");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let sphere = crate::mesh::shapes::icosphere(1.0, 3);
+    let raw = crate::surface::RawMesh { normals: sphere.positions.clone(), positions: sphere.positions, triangles: sphere.triangles };
+    crate::uvgen::generate(&raw, &crate::uvgen::UvParams { resolution: 512, ..Default::default() }).unwrap().write_obj(&dir.join("ball_uv.obj")).unwrap();
+    // The file has UVs and the loader reads them.
+    let loaded = crate::meshformats::load(&dir.join("ball_uv.obj")).unwrap();
+    assert_eq!(loaded.uvs.len(), loaded.triangles.len());
+    let noise = noise_graph(NoiseParams { kind: NoiseKind::Perlin, scale: 3.0, octaves: 2, seed: Some(4), ..Default::default() });
+    let mut g = Graph::default();
+    let mesh = g.add(NodeKind::LoadMesh(crate::meshgraph::LoadMeshParams { path: "ball_uv.obj".into(), resolution: 64, ..Default::default() }), [0.0; 2]);
+    let n = g.add(NodeKind::NoiseGraph(crate::meshgraph::NoiseGraphParams { embedded: noise.to_json(), amplitude: 0.05, ..Default::default() }), [0.0; 2]);
+    let sum = g.add(NodeKind::Math { op: MathOp::Add, a: 0.0, b: 0.0, c: 0.5 }, [0.0; 2]);
+    let remesh = g.add(NodeKind::Remesh { triangles: 2000, adaptivity: 1.0 }, [0.0; 2]);
+    let transfer = g.add(NodeKind::TransferUv, [0.0; 2]);
+    let out = g.add(NodeKind::OutMesh(crate::meshgraph::OutParams { folder: "out".into(), name: "moved".into(), ..Default::default() }), [0.0; 2]);
+    g.connect(mesh, sum, 0);
+    g.connect(n, sum, 1);
+    g.connect(sum, remesh, 0);
+    g.connect(remesh, transfer, 0);
+    g.connect_from(mesh, 1, transfer, 1);
+    g.connect(transfer, out, 0);
+    assert_eq!(g.edges.len(), 6, "the typed connections were accepted");
+    // A mesh output cannot be wired into a field input.
+    g.connect_from(mesh, 1, sum, 0);
+    assert_eq!(g.edges.len(), 6, "a mesh does not feed a field");
+    let mut cache = crate::meshgraph::MeshCache::default();
+    let mut log = Vec::new();
+    let mut note = |s: &str| log.push(s.to_string());
+    let written = crate::meshgraph::Runner { device: &gpu.device, queue: &gpu.queue, cache: &mut cache, base: dir.clone(), seed: 0, progress: Default::default(), log: &mut note, batch_file: None }.run(&g).unwrap();
+    assert_eq!(written.len(), 1);
+    let obj = std::fs::read_to_string(&written[0]).unwrap();
+    let (vt, f) = (obj.lines().filter(|l| l.starts_with("vt ")).count(), obj.lines().filter(|l| l.starts_with("f ")).count());
+    assert!(vt > 0 && (1500..2600).contains(&f), "{vt} UVs, {f} triangles");
+    assert!(log.iter().any(|l| l.contains("island")), "{log:?}");
+}
+
 /// Writes a demo mesh graph for a real mesh: `NOISER_TEST_MESH=mesh.obj NOISER_TEST_OUT=dir cargo test write_demo_mesh_graph -- --ignored`.
 /// The graph blends two of the repository's noise graphs by how much the surface faces up.
 #[test]

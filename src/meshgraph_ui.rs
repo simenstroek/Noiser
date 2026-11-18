@@ -146,6 +146,10 @@ pub fn props(ui: &mut egui::Ui, kind: &mut NodeKind) -> bool {
             }
             true
         }
+        NodeKind::TransferUv => {
+            ui.weak("Carries the UVs of a mesh file (the Mesh output of a Load Mesh whose file has UVs) onto another mesh that lies on the same surface, such as the Remesh output. Corners look for the closest point on the island under their triangle, so triangles are not stretched across seams; the new mesh's seams follow the source's.");
+            true
+        }
         NodeKind::ImageSplit => {
             ui.weak("Splits an image into four grey images: red, green, blue and alpha (1 when the image has none).");
             true
