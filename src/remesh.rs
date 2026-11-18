@@ -483,6 +483,33 @@ impl Mesh {
         n
     }
 
+    /// Removes slivers: for each triangle of poor shape (4 sqrt(3) A / (a² + b² + c²) under `min_quality`) the shortest
+    /// edge is collapsed, or when that is not allowed the longest edge is flipped.
+    fn sliver_pass(&mut self, min_quality: f32) -> usize {
+        let mut n = 0;
+        for t in 0..self.tris.len() as u32 {
+            if !self.alive[t as usize] {
+                continue;
+            }
+            let tri = self.tris[t as usize];
+            let l: [f32; 3] = std::array::from_fn(|i| self.edge_len(tri[i], tri[(i + 1) % 3]));
+            let area2 = len(self.tri_cross(tri, &[]));
+            let q = 2.0 * 3f32.sqrt() * area2 / (l[0] * l[0] + l[1] * l[1] + l[2] * l[2]).max(1e-30);
+            if q >= min_quality {
+                continue;
+            }
+            let short = (0..3).min_by(|&i, &j| l[i].total_cmp(&l[j])).unwrap();
+            let long = (0..3).max_by(|&i, &j| l[i].total_cmp(&l[j])).unwrap();
+            let (a, b) = (tri[short], tri[(short + 1) % 3]);
+            // Either end may be the one to go; try both, since one of them can be blocked by the link condition.
+            let reach = 3.0 * self.target_len(a, b).max(l[long]);
+            if self.collapse(a, b, reach) || self.collapse(b, a, reach) || self.flip(tri[long], tri[(long + 1) % 3]) {
+                n += 1;
+            }
+        }
+        n
+    }
+
     fn flip_pass(&mut self) -> usize {
         let mut n = 0;
         for (a, b) in self.edges() {
@@ -570,6 +597,15 @@ pub fn remesh(start: RawMesh, field: Field, params: &Params, progress: &dyn Fn(u
         if round == rounds + extra && extra < 6 && (m.live as f32 - p.target as f32).abs() > 0.06 * p.target as f32 {
             extra += 2;
         }
+    }
+    // Clean up slivers, then settle.
+    for _ in 0..3 {
+        if m.sliver_pass(0.25) == 0 {
+            break;
+        }
+        m.flip_pass();
+        m.smooth_pass();
+        m.project(field, 1, p.blur);
     }
     m.project(field, 2, p.blur);
     progress(rounds + extra, rounds + extra);

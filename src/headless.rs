@@ -12,7 +12,7 @@ use std::path::PathBuf;
 pub const USAGE: &str = "usage: noiser --headless GRAPH.noisegraph --batch-out DIR (--batch-file F.obj ... | --batch-dir SRC)
   [--export-noiser OUT.noiser] [--export-shader OUT.hlsl|glsl|wgsl] [--manifest meshes.json] [--param name=value ...] [--set 3.scale=8 ...] [--amount 0.25] [--amount-var 0.2] [--tile 1.0] [--size 1.0] [--seed 0] [--seed-mode same|increment|random]
   [--res 256] [--grid-res 128] [--format obj|ply] [--cull 0.01] [--mask KIND ...]
-  [--combine union|intersect|smooth-union|smooth-intersect] [--combine-smooth 0.1] [--object-units] [--report] [--remesh TRIANGLES]";
+  [--combine union|intersect|smooth-union|smooth-intersect] [--combine-smooth 0.1] [--object-units] [--report] [--remesh TRIANGLES] [--uv] [--uv-res 2048] [--uv-cost 4] [--uv-smooth 20] [--uv-merge 3]";
 
 /// One mesh of a `--manifest`: the file and any settings that differ from the command line for that mesh.
 #[derive(Debug, Clone, Default, serde::Deserialize)]
@@ -152,6 +152,11 @@ fn parse(args: &[String]) -> Result<Options, String> {
             }
             "--object-units" => o.object_units = true,
             "--report" => o.report = true,
+            "--uv" => o.settings.uv = Some(crate::uvgen::UvParams::default()),
+            "--uv-res" => o.settings.uv.get_or_insert_with(Default::default).resolution = whole(value("a texture size like 2048")?)?,
+            "--uv-smooth" => o.settings.uv.get_or_insert_with(Default::default).smoothing = whole(value("a number of rounds")?)?,
+            "--uv-merge" => o.settings.uv.get_or_insert_with(Default::default).merge_rounds = whole(value("a number of rounds")?)?,
+            "--uv-cost" => o.settings.uv.get_or_insert_with(Default::default).max_cost = float(value("a number like 4")?)?,
             "--remesh" => o.settings.remesh = Some(whole(value("a triangle count")?)?.max(100) as usize),
             "--combine-smooth" => o.combine.smooth = float(value("a width like 0.1")?)?.max(0.0),
             "--seed-mode" => {

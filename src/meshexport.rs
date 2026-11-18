@@ -38,11 +38,13 @@ pub struct Settings {
     pub cull: f32,
     /// Remesh to about this many triangles (adaptive, see remesh.rs) instead of writing the uniform grid mesh.
     pub remesh: Option<usize>,
+    /// Also generate UVs (OBJ only).
+    pub uv: Option<crate::uvgen::UvParams>,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { res: 256, format: Format::Obj, cull: 0.01, remesh: None }
+        Self { res: 256, format: Format::Obj, cull: 0.01, remesh: None, uv: None }
     }
 }
 
@@ -483,9 +485,17 @@ impl Job<'_> {
         for p in &mut mesh.positions {
             *p = self.norm.to_object(p.map(|v| v / self.d.prim_size));
         }
-        let written = match self.settings.format {
-            Format::Obj => mesh.write_obj(path),
-            Format::Ply => mesh.write_ply(path),
+        let written = match (&self.settings.uv, self.settings.format) {
+            (Some(params), Format::Obj) => {
+                let uv = crate::uvgen::generate(&mesh, params)?;
+                if std::env::var_os("NOISER_REMESH_DEBUG").is_some() {
+                    eprintln!("{}", crate::meshquality::uv_report(&uv, 1024));
+                }
+                uv.write_obj(path)
+            }
+            (Some(_), Format::Ply) => return Err("UVs are written to OBJ only; choose the OBJ format".into()),
+            (None, Format::Obj) => mesh.write_obj(path),
+            (None, Format::Ply) => mesh.write_ply(path),
         };
         written.map_err(|e| format!("could not write {}: {e}", path.display()))?;
         progress.store(1000, Ordering::Relaxed);
