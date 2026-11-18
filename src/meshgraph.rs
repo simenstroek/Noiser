@@ -379,6 +379,12 @@ impl Runner<'_> {
                 let job = Job { ev: &field.ev, d, lo: field.lo, hi: field.hi, reach: field.reach, norm, settings };
                 let mut mesh = job.remeshed_with(*triangles as usize, *adaptivity, &self.progress);
                 mesh.recompute_normals();
+                // The numbers that say whether the remesh is any good: triangle shape, folds, distance from the field's surface.
+                let diagonal = (0..3).map(|a| (field.hi[a] - field.lo[a]).powi(2)).sum::<f32>().sqrt();
+                let report = crate::meshquality::report(&mesh).with_surface_error(&mesh, &mut |pts| field.ev.points(d, pts, 0.0005 * diagonal));
+                for line in report.to_string().lines() {
+                    (self.log)(&format!("  {line}"));
+                }
                 Value::Mesh(mesh)
             }
             NodeKind::LoadMesh(p) => Value::Source(self.mesh(p)?.raw.clone()),
