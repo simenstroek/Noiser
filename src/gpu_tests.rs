@@ -914,6 +914,20 @@ fn write_random_noiser_files() {
     eprintln!("wrote {written} files to {}", dir.display());
 }
 
+/// On the main diagonals of a lattice cube all three simplex fractions are equal; the value there must be the
+/// limit from nearby points, not a double count of two corners.
+#[test]
+fn simplex_is_continuous_on_the_cube_diagonals() {
+    let Some(gpu) = gpu() else { return eprintln!("no GPU adapter; skipping") };
+    let g = noise_graph(NoiseParams { kind: NoiseKind::Simplex, scale: 4.0, octaves: 1, ..Default::default() });
+    // u = (y + z, x + z, x + y) x scale has equal fractions where x = y = z.
+    let on: Vec<[f32; 3]> = (0..40).map(|i| { let t = 0.0625 + i as f32 * 0.0231; [t; 3] }).collect();
+    let near: Vec<[f32; 3]> = on.iter().map(|p| [p[0] + 3e-5, p[1] - 2e-5, p[2] + 1e-5]).collect();
+    let (a, b) = (eval(&gpu, &g, &on), eval(&gpu, &g, &near));
+    let worst = a.iter().zip(&b).map(|(x, y)| (x - y).abs()).fold(0.0, f32::max);
+    assert!(worst < 5e-3, "the value on the diagonal differs from its neighbourhood by {worst}");
+}
+
 #[test]
 fn separate_and_combine_move_components_around() {
     let Some(gpu) = gpu() else { return eprintln!("no GPU adapter; skipping") };

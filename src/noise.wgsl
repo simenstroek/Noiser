@@ -74,7 +74,11 @@ fn simplex(x: vec3f, period: i32, seed: u32) -> f32 {
     let i0 = floor(uvw);
     let f0 = uvw - i0;
     // Which of the six tetrahedra in this cube (sort the fractional parts).
-    let g = step(f0.yzx, f0.xyz);
+    var g = step(f0.yzx, f0.xyz);
+    // With all three fractions equal (points on the cube's main diagonals, which regular grids hit) every
+    // comparison is true and two corners would be counted twice; the last one is made strict so that exactly
+    // one of the six orderings is chosen.
+    g.z = 1.0 - step(f0.z, f0.x);
     let l = 1.0 - g;
     let o1 = min(g, l.zxy);
     let o2 = max(g, l.zxy);

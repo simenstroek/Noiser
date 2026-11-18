@@ -195,8 +195,8 @@ Fields: `kind`, `position` (op id or `null` for `p`), `scale`, `normalize`, `oct
 `lacunarity`, `roughness`, `distortion`, `seed` (already resolved; a non-negative integer), and `feature` for Worley (`f1`, `f2`, `f2_minus_f1`, `cell_value`; Worley is fractal when `octaves` > 1). Type float.
 
 `kind` is one of `perlin`, `simplex`, `worley`, `white`, `blue`.
-Version 1 specifies `perlin` exactly below. The others follow the same lattice, hash and fBm
-rules; until each gets its own section, `src/noise.wgsl` is their definition.
+Version 1 specifies `perlin`, `white`, `worley` (default settings) and `simplex` exactly below; `blue` reads
+a table of tileable blue noise and `src/noise.wgsl` (with `src/bluenoise.rs`) is its definition.
 
 ### `normal`
 The normalized gradient of the float field `field`, negated if `flip`. Type vector. Tetrahedral
@@ -264,6 +264,63 @@ perlin(x, period, seed):
   trilinear blend of n_o with weights w, where mix(a, b, t) = a·(1 − t) + b·t,
   x first (pairs differing in o.x), then y, then z
   return clamp(1.5 · result, −1, 1)
+```
+
+## White
+
+```
+white(x, period, seed) = hash3(wrap(floor(x)), seed).x · 2 − 1
+```
+
+No octaves (the file stores `octaves` as 1); `normalize` and `distortion` apply as for every kind.
+
+## Worley (Euclidean, jitter 1, default features)
+
+The classic settings. (Other metrics, jitter values and the `edges` feature are written to the file only when
+they are used, and `src/noise.wgsl`, functions `cells` and `worley`, defines them.)
+
+```
+worley(x, period, seed, feature):
+  i = wrap(floor(x));  f = x − floor(x)
+  for each offset o in {−1, 0, 1}³:
+    c = wrap_near(i + o)                         (wrap a cell at most one period outside [0, period))
+    d = o + hash3(c, seed) − f                   (vector from x to that cell's feature point)
+    keep the smallest squared distance f1 (and which cell c1 gave it) and the second smallest f2
+  F1 = sqrt(f1);  F2 = sqrt(f2)
+  value of the nearest cell = hash3(c1, seed + 0x51ED27).x · 2 − 1
+  result by feature:
+    f1:           clamp(F1 · 2 − 1, −1, 1)
+    f2:           clamp(F2 / 1.4 · 2 − 1, −1, 1)
+    f2_minus_f1:  clamp((F2 − F1) · 2 − 1, −1, 1)
+    cell_value:   the value of the nearest cell
+```
+
+`worley` is fractal (the fBm wrapper below) only when `octaves` > 1.
+
+## Simplex
+
+Gustavson and McEwan's tiling simplex noise (psrdnoise, JCGT 2022) with Noiser's own hash for the gradients.
+The simplices live on the lattice `u = M x`, `M = [[0,1,1],[1,0,1],[1,1,0]]`, so whole-number periods along x, y
+and z are lattice vectors.
+
+```
+simplex(x, period, seed):
+  u  = (x.y + x.z,  x.x + x.z,  x.x + x.y)
+  i0 = floor(u);  f0 = u − i0
+  g  = step(f0.yzx, f0.xyz)          (1 where f0.yzx <= f0.xyz, per component), except g.z = 1 where f0.z > f0.x
+                                     (strict, so equal fractions still pick one of the six orderings)
+  l  = 1 − g
+  o1 = min(g, l.zxy);  o2 = max(g, l.zxy)
+  sum the four corner contributions  corner(i0), corner(i0 + o1), corner(i0 + o2), corner(i0 + 1)
+  result = clamp(90 · sum, −1, 1)
+
+corner(c):                           (c in lattice space)
+  v = 0.5 · (−c.x + c.y + c.z,  c.x − c.y + c.z,  c.x + c.y − c.z)     (M⁻¹ c, the corner in x space)
+  d = x − v
+  w = max(0.5 − d·d, 0);  if w == 0 the contribution is 0
+  vw = v − floor(v / period) · period      when period > 0, else v
+  cell = round((vw.y + vw.z,  vw.x + vw.z,  vw.x + vw.y))             (an integer vector)
+  contribution = w⁴ · dot(normalize(hash3(cell, seed) · 2 − 1), d)
 ```
 
 ## fBm wrapper (every noise kind)
