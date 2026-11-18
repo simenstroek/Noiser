@@ -9,7 +9,8 @@ use crate::meshmask::{MaskKind, MaskSettings, MaskTerm};
 use std::io::Write;
 use std::path::PathBuf;
 
-pub const USAGE: &str = "usage: noiser --headless GRAPH.noisegraph --batch-out DIR (--batch-file F.obj ... | --batch-dir SRC)
+pub const USAGE: &str = "usage: noiser --headless --mesh-graph FILE.meshgraph [--seed N]   (runs a mesh graph)
+   or: noiser --headless GRAPH.noisegraph --batch-out DIR (--batch-file F.obj ... | --batch-dir SRC)
   [--export-noiser OUT.noiser] [--export-shader OUT.hlsl|glsl|wgsl] [--manifest meshes.json] [--param name=value ...] [--set 3.scale=8 ...] [--amount 0.25] [--amount-var 0.2] [--tile 1.0] [--size 1.0] [--seed 0] [--seed-mode same|increment|random]
   [--res 256] [--grid-res 128] [--format obj|ply] [--cull 0.01] [--mask KIND ...]
   [--combine union|intersect|smooth-union|smooth-intersect] [--combine-smooth 0.1] [--object-units] [--report] [--remesh TRIANGLES] [--uv] [--uv-res 2048] [--uv-cost 4] [--uv-smooth 10] [--uv-merge 3]
@@ -281,7 +282,42 @@ pub fn try_run() -> Option<i32> {
     Some(code)
 }
 
+/// `noiser --headless --mesh-graph FILE.meshgraph [--seed N]`: runs a mesh graph (see meshgraph.rs).
+fn run_mesh_graph(args: &[String], log: &mut Log) -> Result<usize, String> {
+    let at = args.iter().position(|a| a == "--mesh-graph").unwrap();
+    let file = PathBuf::from(args.get(at + 1).ok_or("--mesh-graph needs a file")?);
+    let seed = args.iter().position(|a| a == "--seed").and_then(|i| args.get(i + 1)).map_or(Ok(0), |v| v.parse::<u32>().map_err(|_| format!("--seed {v}: not a whole number")))?;
+    let text = std::fs::read_to_string(&file).map_err(|e| format!("{}: {e}", file.display()))?;
+    let graph = Graph::from_json(&text)?;
+    let (device, queue) = crate::meshgraph::headless_gpu()?;
+    let mut cache = crate::meshgraph::MeshCache::default();
+    let base = file.parent().map_or(PathBuf::from("."), |p| p.to_path_buf());
+    let started = std::time::Instant::now();
+    let lines = std::cell::RefCell::new(Vec::<String>::new());
+    let mut note = |s: &str| lines.borrow_mut().push(s.to_string());
+    let result = {
+        let mut runner = crate::meshgraph::Runner { device: &device, queue: &queue, cache: &mut cache, base, seed, progress: Default::default(), log: &mut note };
+        runner.run(&graph)
+    };
+    for l in lines.borrow().iter() {
+        log.line(l);
+    }
+    match result {
+        Ok(files) => {
+            log.line(&format!("done: {} file(s) written in {:.1} s", files.len(), started.elapsed().as_secs_f32()));
+            Ok(0)
+        }
+        Err(e) => {
+            log.line(&format!("FAILED: {e}"));
+            Ok(1)
+        }
+    }
+}
+
 fn run(args: &[String], log: &mut Log) -> Result<usize, String> {
+    if args.iter().any(|a| a == "--mesh-graph") {
+        return run_mesh_graph(args, log);
+    }
     let o = parse(args)?;
     let text = std::fs::read_to_string(&o.graph).map_err(|e| format!("{}: {e}", o.graph.display()))?;
     let mut sets = o.sets.clone();

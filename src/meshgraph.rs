@@ -127,3 +127,235 @@ pub fn lowered_mesh(g: &Graph) -> Result<Graph, String> {
     }
     Ok(out)
 }
+
+// ---- running a mesh graph ----------------------------------------------------------------------------------
+
+use crate::graph::NodeId;
+use crate::mesh::Normalization;
+use crate::meshexport::{Displace, GraphMesh, Job, MeshEvaluator, Settings};
+use crate::surface::RawMesh;
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+
+/// A GPU device for running graphs without a window.
+pub fn headless_gpu() -> Result<(eframe::wgpu::Device, eframe::wgpu::Queue), String> {
+    use eframe::wgpu;
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+    let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default())).map_err(|e| format!("no GPU adapter: {e}"))?;
+    pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).map_err(|e| format!("no GPU device: {e}"))
+}
+
+/// What a node of the operation part of the graph produced.
+#[derive(Clone)]
+enum Value {
+    Mesh(RawMesh),
+    Uv(crate::uvgen::UvMesh),
+    Images(Vec<crate::bake::Image>),
+}
+
+/// A loaded mesh baked into a distance grid, kept between runs (the grid takes seconds to build).
+pub struct LoadedMesh {
+    texture: eframe::wgpu::Texture,
+    view: eframe::wgpu::TextureView,
+    origin: [f32; 3],
+    voxel: f32,
+    norm: Normalization,
+    /// Bounds in the mesh file's units.
+    lo: [f32; 3],
+    hi: [f32; 3],
+}
+
+#[derive(Default)]
+pub struct MeshCache {
+    meshes: BTreeMap<String, std::sync::Arc<LoadedMesh>>,
+}
+
+pub struct Runner<'a> {
+    pub device: &'a eframe::wgpu::Device,
+    pub queue: &'a eframe::wgpu::Queue,
+    pub cache: &'a mut MeshCache,
+    /// Relative paths in the graph are relative to this folder (the graph file's).
+    pub base: PathBuf,
+    pub seed: u32,
+    /// Progress in thousandths and log lines.
+    pub progress: crate::meshexport::Progress,
+    pub log: &'a mut dyn FnMut(&str),
+}
+
+impl Runner<'_> {
+    fn resolve(&self, p: &str) -> PathBuf {
+        let path = Path::new(p);
+        if path.is_absolute() { path.to_path_buf() } else { self.base.join(path) }
+    }
+
+    fn mesh(&mut self, p: &LoadMeshParams) -> Result<std::sync::Arc<LoadedMesh>, String> {
+        if p.path.is_empty() {
+            return Err("a Load Mesh node has no file chosen".into());
+        }
+        let path = self.resolve(&p.path);
+        let key = format!("{}|{}|{}|{:?}|{}", path.display(), p.resolution, p.padding, p.combine.mode, p.combine.smooth);
+        if let Some(m) = self.cache.meshes.get(&key) {
+            return Ok(m.clone());
+        }
+        (self.log)(&format!("loading {}", path.display()));
+        let (mesh, norm) = crate::meshformats::load(&path)?.normalized();
+        let sdf = crate::meshsdf::MeshSdf::build_with(&mesh, p.resolution, p.padding, &Default::default(), p.combine);
+        let (texture, view) = sdf.upload(self.device, self.queue);
+        let (nlo, nhi) = mesh.bounds();
+        let loaded = std::sync::Arc::new(LoadedMesh { texture, view, origin: sdf.origin, voxel: sdf.voxel, norm, lo: norm.to_object(nlo), hi: norm.to_object(nhi) });
+        self.cache.meshes.insert(key, loaded.clone());
+        Ok(loaded)
+    }
+
+    /// The evaluator of the field that feeds `source`, and the bounds and reach extraction needs.
+    fn field(&mut self, original: &Graph, lowered: &Graph, source: (NodeId, usize)) -> Result<FieldSource, String> {
+        // The cone of the source with an output node on it: that is all the compiler looks at.
+        let mut g = lowered.clone();
+        g.nodes.retain(|_, n| !matches!(n.kind, NodeKind::OutDensity | NodeKind::OutNormal));
+        let nodes: std::collections::BTreeSet<NodeId> = g.nodes.keys().copied().collect();
+        g.edges.retain(|e| nodes.contains(&e.from) && nodes.contains(&e.to));
+        let out = g.add(NodeKind::OutDensity, [0.0; 2]);
+        g.connect_from(source.0, source.1, out, 0);
+        let compiled = crate::codegen::compile(&g)?;
+        let mut loaded = Vec::new();
+        let mut graph_meshes = Vec::new();
+        for id in &compiled.mesh_slots {
+            let NodeKind::LoadMesh(p) = &g.nodes[id].kind else { continue };
+            let m = self.mesh(p)?;
+            graph_meshes.push(GraphMesh { view: m.view.clone(), origin: m.origin, voxel: m.voxel, centre: m.norm.center, scale: m.norm.scale });
+            loaded.push(m);
+        }
+        if loaded.is_empty() {
+            return Err("the field has no Load Mesh node, so there is no surface to extract".into());
+        }
+        let ev = MeshEvaluator::new_graph(self.device, self.queue, &g, self.seed, graph_meshes)?;
+        let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
+        for m in &loaded {
+            for a in 0..3 {
+                lo[a] = lo[a].min(m.lo[a]);
+                hi[a] = hi[a].max(m.hi[a]);
+            }
+        }
+        let radius = (0..3).map(|a| hi[a] - lo[a]).fold(0.0, f32::max) * 0.5;
+        // How far noise graphs can move the surface: their amplitudes times the largest value of their density, plus a margin.
+        let mut reach = 0.05 * radius;
+        for n in original.nodes.values() {
+            if let NodeKind::NoiseGraph(p) = &n.kind {
+                if let Ok(sub) = noise_graph_source(p) {
+                    let (a, b) = sub.density_range();
+                    let size = if a.is_finite() && b.is_finite() { a.abs().max(b.abs()) } else { 1.0 };
+                    reach += p.amplitude.abs() * size;
+                }
+            }
+        }
+        Ok(FieldSource { ev, lo, hi, reach: reach.min(2.0 * radius), _loaded: loaded })
+    }
+
+    fn output_path(&self, o: &OutParams, suffix: &str, ext: &str) -> PathBuf {
+        let dir = if o.folder.is_empty() { self.base.clone() } else { self.resolve(&o.folder) };
+        let _ = std::fs::create_dir_all(&dir);
+        crate::meshapp::unique_path(&dir, &format!("{}{suffix}", o.name), ext)
+    }
+
+    /// Runs the operation nodes upstream of every output node and writes the files; returns the files written.
+    pub fn run(&mut self, graph: &Graph) -> Result<Vec<PathBuf>, String> {
+        let lowered = lowered_mesh(graph)?;
+        let outputs: Vec<NodeId> = graph.nodes.iter().filter(|(_, n)| matches!(n.kind, NodeKind::OutMesh(_) | NodeKind::OutImage(_)) && !n.muted).map(|(id, _)| *id).collect();
+        if outputs.is_empty() {
+            return Err("the graph has no Mesh or Image output node".into());
+        }
+        let mut memo: BTreeMap<NodeId, Value> = BTreeMap::new();
+        let mut fields: BTreeMap<(NodeId, usize), std::rc::Rc<FieldSource>> = BTreeMap::new();
+        let mut written = Vec::new();
+        for out in outputs {
+            let Some((src, port)) = graph.input_from(out, 0) else { return Err(format!("output node {out} has nothing connected")) };
+            let value = self.value(graph, &lowered, src, &mut memo, &mut fields)?;
+            match (&graph.nodes[&out].kind, value) {
+                (NodeKind::OutMesh(o), Value::Uv(uv)) => {
+                    let path = self.output_path(o, "", "obj");
+                    uv.write_obj(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+                    (self.log)(&format!("wrote {}", path.display()));
+                    written.push(path);
+                }
+                (NodeKind::OutMesh(o), Value::Mesh(mesh)) => {
+                    let path = self.output_path(o, "", "obj");
+                    mesh.write_obj(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+                    (self.log)(&format!("wrote {}", path.display()));
+                    written.push(path);
+                }
+                (NodeKind::OutImage(o), Value::Images(images)) => {
+                    let Some(image) = images.get(port) else { return Err(format!("output node {out} reads image {port}, which the Bake node does not produce")) };
+                    let path = self.output_path(o, &format!("_{}", image.channel.name()), "png");
+                    image.write_png(&path)?;
+                    (self.log)(&format!("wrote {}", path.display()));
+                    written.push(path);
+                }
+                (NodeKind::OutMesh(_), _) => return Err(format!("output node {out} needs a mesh")),
+                _ => return Err(format!("output node {out} needs an image from a Bake node")),
+            }
+        }
+        Ok(written)
+    }
+
+    fn field_for(&mut self, original: &Graph, lowered: &Graph, src: (NodeId, usize), fields: &mut BTreeMap<(NodeId, usize), std::rc::Rc<FieldSource>>) -> Result<std::rc::Rc<FieldSource>, String> {
+        if let Some(f) = fields.get(&src) {
+            return Ok(f.clone());
+        }
+        let f = std::rc::Rc::new(self.field(original, lowered, src)?);
+        fields.insert(src, f.clone());
+        Ok(f)
+    }
+
+    fn value(&mut self, original: &Graph, lowered: &Graph, id: NodeId, memo: &mut BTreeMap<NodeId, Value>, fields: &mut BTreeMap<(NodeId, usize), std::rc::Rc<FieldSource>>) -> Result<Value, String> {
+        if let Some(v) = memo.get(&id) {
+            return Ok(v.clone());
+        }
+        let node = original.nodes.get(&id).ok_or("a wire reads a missing node")?;
+        let input = |port: usize| original.input_from(id, port).ok_or_else(|| format!("node {id} has input {} unconnected", port + 1));
+        let v = match &node.kind {
+            NodeKind::Remesh { triangles } => {
+                let field = self.field_for(original, lowered, input(0)?, fields)?;
+                (self.log)(&format!("remeshing to {triangles} triangles"));
+                let d = Displace { amount: 0.0, tile_size: 1.0, prim_size: 1.0, mask: crate::meshmask::PackedMask::NONE };
+                let norm = Normalization { center: [0.0; 3], scale: 1.0 };
+                let settings = Settings { remesh: Some(*triangles as usize), ..Default::default() };
+                let job = Job { ev: &field.ev, d, lo: field.lo, hi: field.hi, reach: field.reach, norm, settings };
+                let mut mesh = job.remeshed(*triangles as usize, &self.progress);
+                mesh.recompute_normals();
+                Value::Mesh(mesh)
+            }
+            NodeKind::AutoUv(params) => {
+                let (src, _) = input(0)?;
+                let Value::Mesh(mesh) = self.value(original, lowered, src, memo, fields)? else { return Err(format!("node {id} (Auto UVs) needs a mesh")) };
+                (self.log)("unwrapping");
+                Value::Uv(crate::uvgen::generate(&mesh, params)?)
+            }
+            NodeKind::Bake(settings) => {
+                let (mesh_src, _) = input(0)?;
+                let field_src = input(1)?;
+                let Value::Uv(uv) = self.value(original, lowered, mesh_src, memo, fields)? else { return Err(format!("node {id} (Bake) needs a mesh with UVs: put Auto UVs before it")) };
+                let field = self.field_for(original, lowered, field_src, fields)?;
+                (self.log)("baking");
+                let (lo, hi) = (field.lo, field.hi);
+                let diagonal = (0..3).map(|a| (hi[a] - lo[a]).powi(2)).sum::<f32>().sqrt();
+                let d = Displace { amount: 0.0, tile_size: 1.0, prim_size: 1.0, mask: crate::meshmask::PackedMask::NONE };
+                let mut source = crate::meshexport::EvalField::new(&field.ev, d, 0.0005 * diagonal);
+                let progress = self.progress.clone();
+                let images = crate::bake::bake(&uv, &mut source, settings, &|done, total| progress.store((done * 1000 / total.max(1)) as u32, std::sync::atomic::Ordering::Relaxed))?;
+                Value::Images(images)
+            }
+            _ => return Err(format!("node {id} cannot be run: it is not an operation (Remesh, Auto UVs or Bake)")),
+        };
+        memo.insert(id, v.clone());
+        Ok(v)
+    }
+}
+
+struct FieldSource {
+    ev: MeshEvaluator,
+    lo: [f32; 3],
+    hi: [f32; 3],
+    reach: f32,
+    /// Keeps the distance grids' textures alive as long as the evaluator.
+    _loaded: Vec<std::sync::Arc<LoadedMesh>>,
+}

@@ -86,6 +86,16 @@ struct Block {
     mask: [[f32; 4]; 12],
 }
 
+// The displaced field at `p` (the preview's space); beyond x.band of the mesh the noise is skipped.
+const CLASSIC_FIELD_WGSL: &str = "
+fn field_at(p: vec3f) -> f32 {
+    let base = mesh_sdf_at(mesh_tex, p / x.prim_size, x.mesh_origin, x.mesh_voxel) * x.prim_size;
+    if (abs(base) > x.band) { return base; }
+    let m = mesh_mask(mesh_tex, p / x.prim_size, x.mesh_origin, x.mesh_voxel, x.mesh_lo, x.mesh_hi, x.mask, x.mask_n);
+    return base - x.amount * m * graph_density(p / x.tile_size);
+}
+";
+
 const MESH_EVAL_WGSL: &str = "
 struct X { grid_min: vec3f, h: f32, mesh_origin: vec3f, mesh_voxel: f32, nx: u32, ny: u32, z0: u32, count: u32, amount: f32, tile_size: f32, prim_size: f32, _pad: f32, mesh_lo: vec3f, mask_n: u32, mesh_hi: vec3f, band: f32, mask: array<vec4f, 12> };
 @group(0) @binding(4) var<uniform> x: X;
@@ -93,14 +103,6 @@ struct X { grid_min: vec3f, h: f32, mesh_origin: vec3f, mesh_voxel: f32, nx: u32
 @group(0) @binding(6) var mesh_tex: texture_3d<f32>;
 @group(0) @binding(7) var<storage, read> pts: array<vec4f>;
 @group(0) @binding(8) var<storage, read_write> samples: array<vec4f>;
-
-// The displaced field at `p` (the preview's space); beyond x.band of the mesh the noise is skipped.
-fn field_at(p: vec3f) -> f32 {
-    let base = mesh_sdf_at(mesh_tex, p / x.prim_size, x.mesh_origin, x.mesh_voxel) * x.prim_size;
-    if (abs(base) > x.band) { return base; }
-    let m = mesh_mask(mesh_tex, p / x.prim_size, x.mesh_origin, x.mesh_voxel, x.mesh_lo, x.mesh_hi, x.mask, x.mask_n);
-    return base - x.amount * m * graph_density(p / x.tile_size);
-}
 
 @compute @workgroup_size(4, 4, 4)
 fn main(@builtin(global_invocation_id) id: vec3u) {
@@ -170,15 +172,80 @@ pub struct MeshEvaluator {
     mesh_voxel: f32,
     /// The mesh's bounds in normalized space (the mask's position ramps run across them).
     mesh_bounds: (V3, V3),
+    /// Mesh graph: the distance grids of the loaded meshes after the first (which is `mesh`), padded with dummies,
+    /// and the (origin, voxel, centre, scale) of all four.
+    extra: Vec<wgpu::TextureView>,
+    info: wgpu::Buffer,
 }
+
+/// A mesh baked as a distance grid, as a mesh graph's Load Mesh node uses it.
+pub struct GraphMesh {
+    pub view: wgpu::TextureView,
+    pub origin: V3,
+    pub voxel: f32,
+    /// Normalization of the mesh: positions of the field are in the mesh file's units, the grid in the normalized ones.
+    pub centre: V3,
+    pub scale: f32,
+}
+
+/// Most meshes a mesh graph can load.
+pub const MAX_GRAPH_MESHES: usize = 4;
+
+const GRAPH_FIELD_WGSL: &str = "
+struct MeshInfo { origin: vec3f, voxel: f32, centre: vec3f, scale: f32 };
+@group(0) @binding(9) var<uniform> meshes: array<MeshInfo, 4>;
+@group(0) @binding(10) var mesh_tex1: texture_3d<f32>;
+@group(0) @binding(11) var mesh_tex2: texture_3d<f32>;
+@group(0) @binding(12) var mesh_tex3: texture_3d<f32>;
+fn mesh_dist_0(p: vec3f) -> f32 { let m = meshes[0]; return mesh_sdf_at(mesh_tex, (p - m.centre) / m.scale, m.origin, m.voxel) * m.scale; }
+fn mesh_dist_1(p: vec3f) -> f32 { let m = meshes[1]; return mesh_sdf_at(mesh_tex1, (p - m.centre) / m.scale, m.origin, m.voxel) * m.scale; }
+fn mesh_dist_2(p: vec3f) -> f32 { let m = meshes[2]; return mesh_sdf_at(mesh_tex2, (p - m.centre) / m.scale, m.origin, m.voxel) * m.scale; }
+fn mesh_dist_3(p: vec3f) -> f32 { let m = meshes[3]; return mesh_sdf_at(mesh_tex3, (p - m.centre) / m.scale, m.origin, m.voxel) * m.scale; }
+fn field_at(p: vec3f) -> f32 { return graph_density(p); }
+";
 
 impl MeshEvaluator {
     /// `mesh` is the baked distance grid (see `MeshSdf::upload`); `origin` and `voxel` describe it.
     pub fn new(device: &wgpu::Device, queue: &wgpu::Queue, graph: &Graph, seed: u32, mesh: wgpu::TextureView, origin: V3, voxel: f32, bounds: (V3, V3), mask: bool) -> Result<Self, String> {
-        use wgpu::util::DeviceExt;
         let c = codegen::compile(graph)?;
-        let src = format!("{NOISE_LIB}\n{}\n{}\n{EVAL_BINDINGS}\n{MESH_EVAL_WGSL}", codegen::mesh_mask_lib(mask), c.wgsl);
-        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("mesh export"), source: wgpu::ShaderSource::Wgsl(src.into()) });
+        // The kernels come after the field function, which the classic displaced-mesh field defines here.
+        let src = format!("{NOISE_LIB}\n{}\n{}\n{EVAL_BINDINGS}\n{CLASSIC_FIELD_WGSL}\n{MESH_EVAL_WGSL}", codegen::mesh_mask_lib(mask), c.wgsl);
+        let info = [[origin[0], origin[1], origin[2], voxel, 0.0, 0.0, 0.0, 1.0]; MAX_GRAPH_MESHES];
+        Ok(Self::build(device, queue, &src, &c.params, seed, mesh, origin, voxel, bounds, Vec::new(), info))
+    }
+
+    /// An evaluator for a mesh graph's field: `graph` is the lowered graph (see `meshgraph::lowered_mesh`) with the
+    /// output node whose source is the field to evaluate; the loaded-mesh nodes read `meshes` in the order of
+    /// `Compiled::mesh_slots`. The field is in the units of the mesh files.
+    pub fn new_graph(device: &wgpu::Device, queue: &wgpu::Queue, graph: &Graph, seed: u32, mut meshes: Vec<GraphMesh>) -> Result<Self, String> {
+        let c = codegen::compile(graph)?;
+        if meshes.len() > MAX_GRAPH_MESHES {
+            return Err(format!("a mesh graph can load at most {MAX_GRAPH_MESHES} meshes"));
+        }
+        let src = format!("{NOISE_LIB}\n{}\n{}\n{EVAL_BINDINGS}\n{GRAPH_FIELD_WGSL}\n{MESH_EVAL_WGSL}", codegen::mesh_mask_lib(false), c.wgsl);
+        let dummy = |device: &wgpu::Device, queue: &wgpu::Queue| {
+            let size = wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 };
+            let t = device.create_texture(&wgpu::TextureDescriptor { label: Some("unused mesh"), size, mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D3, format: wgpu::TextureFormat::R32Float, usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST, view_formats: &[] });
+            queue.write_texture(wgpu::TexelCopyTextureInfo { texture: &t, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All }, bytemuck::bytes_of(&1000.0f32), wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(4), rows_per_image: Some(1) }, size);
+            t.create_view(&Default::default())
+        };
+        while meshes.len() < MAX_GRAPH_MESHES {
+            meshes.push(GraphMesh { view: dummy(device, queue), origin: [0.0; 3], voxel: 1.0, centre: [0.0; 3], scale: 1.0 });
+        }
+        let info: [[f32; 8]; MAX_GRAPH_MESHES] = std::array::from_fn(|i| {
+            let m = &meshes[i];
+            [m.origin[0], m.origin[1], m.origin[2], m.voxel, m.centre[0], m.centre[1], m.centre[2], m.scale]
+        });
+        let mut views = meshes.into_iter().map(|m| (m.view, m.origin, m.voxel));
+        let (first, origin, voxel) = views.next().unwrap();
+        let extra = views.map(|(v, _, _)| v).collect();
+        Ok(Self::build(device, queue, &src, &c.params, seed, first, origin, voxel, ([0.0; 3], [0.0; 3]), extra, info))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn build(device: &wgpu::Device, queue: &wgpu::Queue, src: &str, params: &[f32], seed: u32, mesh: wgpu::TextureView, origin: V3, voxel: f32, bounds: (V3, V3), mut extra: Vec<wgpu::TextureView>, info: [[f32; 8]; MAX_GRAPH_MESHES]) -> Self {
+        use wgpu::util::DeviceExt;
+        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("mesh export"), source: wgpu::ShaderSource::Wgsl(src.to_string().into()) });
         let buffer = |binding, ty| wgpu::BindGroupLayoutEntry {
             binding,
             visibility: wgpu::ShaderStages::COMPUTE,
@@ -186,6 +253,12 @@ impl MeshEvaluator {
             count: None,
         };
         let ro = wgpu::BufferBindingType::Storage { read_only: true };
+        let texture = |binding| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::COMPUTE,
+            ty: wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Float { filterable: false }, view_dimension: wgpu::TextureViewDimension::D3, multisampled: false },
+            count: None,
+        };
         let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: None,
             entries: &[
@@ -194,24 +267,13 @@ impl MeshEvaluator {
                 buffer(3, ro),
                 buffer(4, wgpu::BufferBindingType::Uniform),
                 buffer(5, wgpu::BufferBindingType::Storage { read_only: false }),
-                wgpu::BindGroupLayoutEntry {
-                    binding: 6,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
-                        view_dimension: wgpu::TextureViewDimension::D3,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
+                texture(6),
+                buffer(9, wgpu::BufferBindingType::Uniform),
+                texture(10),
+                texture(11),
+                texture(12),
             ],
         });
-        let texture = |binding| wgpu::BindGroupLayoutEntry {
-            binding,
-            visibility: wgpu::ShaderStages::COMPUTE,
-            ty: wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Float { filterable: false }, view_dimension: wgpu::TextureViewDimension::D3, multisampled: false },
-            count: None,
-        };
         let points_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: None,
             entries: &[
@@ -222,6 +284,10 @@ impl MeshEvaluator {
                 texture(6),
                 buffer(7, ro),
                 buffer(8, wgpu::BufferBindingType::Storage { read_only: false }),
+                buffer(9, wgpu::BufferBindingType::Uniform),
+                texture(10),
+                texture(11),
+                texture(12),
             ],
         });
         let points_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: None, bind_group_layouts: &[Some(&points_bgl)], immediate_size: 0 });
@@ -243,7 +309,10 @@ impl MeshEvaluator {
             cache: None,
         });
         let init = |contents: &[u8], usage| device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: None, contents, usage });
-        Ok(Self {
+        while extra.len() < MAX_GRAPH_MESHES - 1 {
+            extra.push(mesh.clone());
+        }
+        Self {
             device: device.clone(),
             queue: queue.clone(),
             pipeline,
@@ -251,13 +320,15 @@ impl MeshEvaluator {
             points_pipeline,
             points_bgl,
             uniforms: init(bytemuck::bytes_of(&[seed, 0, 0, 0]), wgpu::BufferUsages::UNIFORM),
-            params: init(bytemuck::cast_slice(&c.params), wgpu::BufferUsages::STORAGE),
+            params: init(bytemuck::cast_slice(params), wgpu::BufferUsages::STORAGE),
             blue: init(bytemuck::cast_slice(&crate::bluenoise::tables()), wgpu::BufferUsages::STORAGE),
             mesh,
             mesh_origin: origin,
             mesh_voxel: voxel,
             mesh_bounds: bounds,
-        })
+            extra,
+            info: init(bytemuck::cast_slice(&info), wgpu::BufferUsages::UNIFORM),
+        }
     }
 
     /// The field at layers `z0..z0 + count` of the grid: `nx * ny` values per layer, x fastest.
@@ -301,6 +372,10 @@ impl MeshEvaluator {
                 entry(4, &block),
                 entry(5, &out),
                 wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(&self.mesh) },
+                entry(9, &self.info),
+                wgpu::BindGroupEntry { binding: 10, resource: wgpu::BindingResource::TextureView(&self.extra[0]) },
+                wgpu::BindGroupEntry { binding: 11, resource: wgpu::BindingResource::TextureView(&self.extra[1]) },
+                wgpu::BindGroupEntry { binding: 12, resource: wgpu::BindingResource::TextureView(&self.extra[2]) },
             ],
         });
         let mut enc = dev.create_command_encoder(&Default::default());
@@ -375,6 +450,10 @@ impl MeshEvaluator {
                     wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(&self.mesh) },
                     entry(7, &input),
                     entry(8, &out),
+                    entry(9, &self.info),
+                    wgpu::BindGroupEntry { binding: 10, resource: wgpu::BindingResource::TextureView(&self.extra[0]) },
+                    wgpu::BindGroupEntry { binding: 11, resource: wgpu::BindingResource::TextureView(&self.extra[1]) },
+                    wgpu::BindGroupEntry { binding: 12, resource: wgpu::BindingResource::TextureView(&self.extra[2]) },
                 ],
             });
             let mut enc = dev.create_command_encoder(&Default::default());
@@ -561,10 +640,16 @@ impl Job<'_> {
 }
 
 /// The displaced field as a bake source.
-struct EvalField<'a> {
+pub struct EvalField<'a> {
     ev: &'a MeshEvaluator,
     d: Displace,
     eps: f32,
+}
+
+impl<'a> EvalField<'a> {
+    pub fn new(ev: &'a MeshEvaluator, d: Displace, eps: f32) -> Self {
+        EvalField { ev, d, eps }
+    }
 }
 
 impl crate::bake::Field for EvalField<'_> {

@@ -1709,6 +1709,76 @@ fn a_mesh_graph_of_two_noise_graphs_matches_the_standalone_graphs() {
     assert!(crate::meshgraph::lowered_mesh(&bad).unwrap_err().contains("no/such/file"));
 }
 
+/// A mesh graph shaped like the one in the design: a mesh, two noise graphs blended by how much the surface faces up,
+/// added to the mesh, then remeshed, unwrapped, baked and written. Run end to end on a GPU.
+#[test]
+fn a_mesh_graph_runs_from_a_mesh_file_to_files() {
+    use crate::graph::MathOp;
+    let Some(gpu) = gpu() else { return eprintln!("no GPU adapter; skipping") };
+    let dir = std::env::temp_dir().join("noiser-mesh-graph-test");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let sphere = crate::mesh::shapes::icosphere(1.0, 3);
+    crate::surface::RawMesh { normals: sphere.positions.clone(), positions: sphere.positions, triangles: sphere.triangles }.write_obj(&dir.join("ball.obj")).unwrap();
+    let rough = noise_graph(NoiseParams { kind: NoiseKind::Perlin, scale: 6.0, octaves: 3, seed: Some(2), ..Default::default() });
+    let smooth = noise_graph(NoiseParams { kind: NoiseKind::Perlin, scale: 2.0, octaves: 1, seed: Some(5), ..Default::default() });
+    std::fs::write(dir.join("rough.noisegraph"), rough.to_json()).unwrap();
+
+    let mut g = Graph::default();
+    let mesh = g.add(NodeKind::LoadMesh(crate::meshgraph::LoadMeshParams { path: "ball.obj".into(), resolution: 64, ..Default::default() }), [0.0; 2]);
+    let normal = g.add(NodeKind::Normal { flip: false }, [0.0; 2]);
+    let up = g.add(NodeKind::Vec3([0.0, 1.0, 0.0]), [0.0; 2]);
+    let facing = g.add(NodeKind::Math { op: MathOp::Dot, a: 0.0, b: 0.0, c: 0.5 }, [0.0; 2]);
+    // The rough one from a file next to the graph, the smooth one embedded: both ways of naming a noise graph.
+    let a = g.add(NodeKind::NoiseGraph(crate::meshgraph::NoiseGraphParams { file: dir.join("rough.noisegraph").to_string_lossy().into_owned(), frequency: 1.0, amplitude: 0.1, ..Default::default() }), [0.0; 2]);
+    let b = g.add(NodeKind::NoiseGraph(crate::meshgraph::NoiseGraphParams { embedded: smooth.to_json(), frequency: 1.0, amplitude: 0.1, ..Default::default() }), [0.0; 2]);
+    let blend = g.add(NodeKind::Math { op: MathOp::Lerp, a: 0.0, b: 0.0, c: 0.5 }, [0.0; 2]);
+    let sum = g.add(NodeKind::Math { op: MathOp::Add, a: 0.0, b: 0.0, c: 0.5 }, [0.0; 2]);
+    g.connect(mesh, normal, 0);
+    g.connect(normal, facing, 0);
+    g.connect(up, facing, 1);
+    g.connect(a, blend, 0);
+    g.connect(b, blend, 1);
+    g.connect(facing, blend, 2);
+    g.connect(mesh, sum, 0);
+    g.connect(blend, sum, 1);
+    let remesh = g.add(NodeKind::Remesh { triangles: 3000 }, [0.0; 2]);
+    let uv = g.add(NodeKind::AutoUv(crate::uvgen::UvParams { resolution: 512, ..Default::default() }), [0.0; 2]);
+    let bake = g.add(NodeKind::Bake(crate::bake::Settings { size: 128, padding: 2, channels: vec![crate::bake::Channel::Normal, crate::bake::Channel::Occlusion], green_up: false }), [0.0; 2]);
+    let out_mesh = g.add(NodeKind::OutMesh(crate::meshgraph::OutParams { folder: "out".into(), name: "ball".into() }), [0.0; 2]);
+    let out_normal = g.add(NodeKind::OutImage(crate::meshgraph::OutParams { folder: "out".into(), name: "ball".into() }), [0.0; 2]);
+    g.connect(sum, remesh, 0);
+    g.connect(remesh, uv, 0);
+    g.connect(uv, bake, 0);
+    g.connect(sum, bake, 1);
+    g.connect(uv, out_mesh, 0);
+    g.connect_from(bake, 0, out_normal, 0);
+
+    let mut cache = crate::meshgraph::MeshCache::default();
+    let mut log = Vec::new();
+    let mut note = |s: &str| log.push(s.to_string());
+    let mut runner = crate::meshgraph::Runner { device: &gpu.device, queue: &gpu.queue, cache: &mut cache, base: dir.clone(), seed: 0, progress: Default::default(), log: &mut note };
+    let written = runner.run(&g).unwrap();
+    assert_eq!(written.len(), 2, "{written:?}");
+    let obj = std::fs::read_to_string(dir.join("out").join("ball.obj")).unwrap();
+    let (mut radii, mut tris, mut uvs) = (Vec::new(), 0, 0);
+    for line in obj.lines() {
+        let p: Vec<&str> = line.split_whitespace().collect();
+        match p.first().copied() {
+            Some("v") => radii.push((0..3).map(|i| p[i + 1].parse::<f32>().unwrap().powi(2)).sum::<f32>().sqrt()),
+            Some("vt") => uvs += 1,
+            Some("f") => tris += 1,
+            _ => {}
+        }
+    }
+    assert!((2500..3600).contains(&tris), "{tris} triangles");
+    assert!(uvs >= radii.len() && uvs > 0, "UVs written");
+    // The surface is the unit sphere moved by up to the two amplitudes (the noise is in about -1..1).
+    let (lo, hi) = (radii.iter().cloned().fold(9.0, f32::min), radii.iter().cloned().fold(0.0, f32::max));
+    assert!(lo > 0.8 && hi < 1.2 && hi - lo > 0.03, "radii {lo}..{hi}");
+    assert!(dir.join("out").join("ball_Normal.png").exists());
+}
+
 // ---- batch pipeline ---------------------------------------------------------------
 
 mod batch_tests {
