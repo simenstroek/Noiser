@@ -30,7 +30,8 @@ pub fn props(ui: &mut egui::Ui, kind: &mut NodeKind) -> bool {
     match kind {
         NodeKind::LoadMesh(p) => {
             ui.weak("A mesh file as a field: its signed distance, negative inside, in the units of the file.");
-            path_row(ui, "mesh path", &mut p.path, "mesh file", Some(("Mesh", &["obj", "ply", "stl", "gltf", "glb"])));
+            ui.weak("A path of {batch} reads the mesh file of a headless batch run (--mesh-graph with --batch-dir).");
+            path_row(ui, "mesh path", &mut p.path, "mesh file or {batch}", Some(("Mesh", &["obj", "ply", "stl", "gltf", "glb"])));
             let d = crate::meshgraph::LoadMeshParams::default();
             crate::row(ui, &mut p.resolution, d.resolution, |ui, v| _ = ui.add(egui::DragValue::new(v).range(32..=512).suffix(" samples")).on_hover_text("Resolution of the distance grid the mesh is baked into."));
             crate::row(ui, &mut p.padding, d.padding, |ui, v| _ = ui.add(egui::DragValue::new(v).range(0.1..=4.0).speed(0.01).prefix("padding ")).on_hover_text("Room around the mesh in the grid, in units of the mesh's radius: displacement cannot reach past it."));
@@ -52,8 +53,16 @@ pub fn props(ui: &mut egui::Ui, kind: &mut NodeKind) -> bool {
             let d = crate::meshgraph::NoiseGraphParams::default();
             crate::row(ui, &mut p.frequency, d.frequency, |ui, v| _ = ui.add(egui::DragValue::new(v).speed(0.01).prefix("frequency × ")).on_hover_text("The noise graph sees the position times this: tiles per unit of the mesh file."));
             crate::row(ui, &mut p.amplitude, d.amplitude, |ui, v| _ = ui.add(egui::DragValue::new(v).speed(0.001).prefix("amplitude × ")).on_hover_text("The graph's density output times this: its size in units of the mesh file."));
+            if p.detached {
+                ui.colored_label(crate::editor::ORANGE, "Detached: this graph lives in the mesh graph only.");
+                if ui.button("Re-attach to the file").clicked() {
+                    p.detached = false;
+                }
+            } else if !p.embedded.is_empty() && ui.button("Detach (keep only the embedded copy)").on_hover_text("Edits to the file no longer change this mesh graph.").clicked() {
+                p.detached = true;
+            }
             match crate::meshgraph::noise_graph_source(p, std::path::Path::new(".")) {
-                Ok(_) if !p.file.is_empty() && std::fs::metadata(&p.file).is_ok() => {
+                Ok(_) if !p.detached && !p.file.is_empty() && std::fs::metadata(&p.file).is_ok() => {
                     if ui.button("Refresh embedded copy").on_hover_text("Saving the mesh graph does this too.").clicked() {
                         if let Ok(text) = std::fs::read_to_string(&p.file) {
                             p.embedded = text;

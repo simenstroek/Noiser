@@ -36,11 +36,13 @@ pub struct NoiseGraphParams {
     pub embedded: String,
     pub frequency: f32,
     pub amplitude: f32,
+    /// Detached: only the embedded copy is used, the file is ignored (it lives in this mesh graph alone).
+    pub detached: bool,
 }
 
 impl Default for NoiseGraphParams {
     fn default() -> Self {
-        NoiseGraphParams { file: String::new(), embedded: String::new(), frequency: 1.0, amplitude: 1.0 }
+        NoiseGraphParams { file: String::new(), embedded: String::new(), frequency: 1.0, amplitude: 1.0, detached: false }
     }
 }
 
@@ -66,7 +68,7 @@ pub fn resolve_in(base: &Path, p: &str) -> PathBuf {
 
 /// The noise graph a Noise Graph node refers to: the file when it can be read, else the embedded copy.
 pub fn noise_graph_source(p: &NoiseGraphParams, base: &Path) -> Result<Graph, String> {
-    let from_file = if p.file.is_empty() { None } else { std::fs::read_to_string(resolve_in(base, &p.file)).ok() };
+    let from_file = if p.file.is_empty() || p.detached { None } else { std::fs::read_to_string(resolve_in(base, &p.file)).ok() };
     let text = from_file.as_deref().or(if p.embedded.is_empty() { None } else { Some(p.embedded.as_str()) }).ok_or_else(|| format!("the noise graph {} cannot be read and has no embedded copy", if p.file.is_empty() { "(none chosen)" } else { &p.file }))?;
     Graph::from_json(text)
 }
@@ -186,6 +188,8 @@ pub struct Runner<'a> {
     /// Progress in thousandths and log lines.
     pub progress: crate::meshexport::Progress,
     pub log: &'a mut dyn FnMut(&str),
+    /// Batch runs: the mesh file a Load Mesh node whose path is `{batch}` reads, and the `{name}` output names use.
+    pub batch_file: Option<PathBuf>,
 }
 
 impl Runner<'_> {
@@ -197,7 +201,11 @@ impl Runner<'_> {
         if p.path.is_empty() {
             return Err("a Load Mesh node has no file chosen".into());
         }
-        let path = self.resolve(&p.path);
+        let path = match (&self.batch_file, p.path.as_str()) {
+            (Some(f), "{batch}") => f.clone(),
+            (None, "{batch}") => return Err("a Load Mesh node reads {batch}, which needs a batch run (--batch-dir or --batch-file)".into()),
+            _ => self.resolve(&p.path),
+        };
         let key = format!("{}|{}|{}|{:?}|{}", path.display(), p.resolution, p.padding, p.combine.mode, p.combine.smooth);
         if let Some(m) = self.cache.meshes.get(&key) {
             return Ok(m.clone());
@@ -259,7 +267,8 @@ impl Runner<'_> {
     fn output_path(&self, o: &OutParams, suffix: &str, ext: &str) -> PathBuf {
         let dir = if o.folder.is_empty() { self.base.clone() } else { self.resolve(&o.folder) };
         let _ = std::fs::create_dir_all(&dir);
-        crate::meshapp::unique_path(&dir, &format!("{}{suffix}", o.name), ext)
+        let stem = self.batch_file.as_ref().and_then(|f| f.file_stem()).map_or(String::new(), |s| s.to_string_lossy().into_owned());
+        crate::meshapp::unique_path(&dir, &format!("{}{suffix}", o.name.replace("{name}", &stem)), ext)
     }
 
     /// Runs the operation nodes upstream of every output node and writes the files; returns the files written.

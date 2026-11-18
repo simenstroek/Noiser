@@ -1767,7 +1767,7 @@ fn a_mesh_graph_runs_from_a_mesh_file_to_files() {
     let mut cache = crate::meshgraph::MeshCache::default();
     let mut log = Vec::new();
     let mut note = |s: &str| log.push(s.to_string());
-    let mut runner = crate::meshgraph::Runner { device: &gpu.device, queue: &gpu.queue, cache: &mut cache, base: dir.clone(), seed: 0, progress: Default::default(), log: &mut note };
+    let mut runner = crate::meshgraph::Runner { device: &gpu.device, queue: &gpu.queue, cache: &mut cache, base: dir.clone(), seed: 0, progress: Default::default(), log: &mut note, batch_file: None };
     let written = runner.run(&g).unwrap();
     assert_eq!(written.len(), 3, "{written:?}");
     let obj = std::fs::read_to_string(dir.join("out").join("ball.obj")).unwrap();

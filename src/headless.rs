@@ -9,7 +9,7 @@ use crate::meshmask::{MaskKind, MaskSettings, MaskTerm};
 use std::io::Write;
 use std::path::PathBuf;
 
-pub const USAGE: &str = "usage: noiser --headless --mesh-graph FILE.meshgraph [--seed N]   (runs a mesh graph)
+pub const USAGE: &str = "usage: noiser --headless --mesh-graph FILE.meshgraph [--seed N] [--batch-dir SRC | --batch-file F ...]   (runs a mesh graph, once per mesh file for a batch: Load Mesh paths of {batch} and output names with {name})
    or: noiser --headless GRAPH.noisegraph --batch-out DIR (--batch-file F.obj ... | --batch-dir SRC)
   [--export-noiser OUT.noiser] [--export-shader OUT.hlsl|glsl|wgsl] [--manifest meshes.json] [--param name=value ...] [--set 3.scale=8 ...] [--amount 0.25] [--amount-var 0.2] [--tile 1.0] [--size 1.0] [--seed 0] [--seed-mode same|increment|random]
   [--res 256] [--grid-res 128] [--format obj|ply] [--cull 0.01] [--mask KIND ...]
@@ -293,26 +293,47 @@ fn run_mesh_graph(args: &[String], log: &mut Log) -> Result<usize, String> {
     let (device, queue) = crate::meshgraph::headless_gpu()?;
     let mut cache = crate::meshgraph::MeshCache::default();
     let base = file.parent().map_or(PathBuf::from("."), |p| p.to_path_buf());
+    // Batch runs: the graph once per mesh file; without any, once.
+    let mut batch: Vec<Option<PathBuf>> = Vec::new();
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--batch-file" => batch.extend(it.next().map(|f| Some(PathBuf::from(f)))),
+            "--batch-dir" => {
+                let dir = PathBuf::from(it.next().ok_or("--batch-dir needs a folder")?);
+                let mut found: Vec<PathBuf> = std::fs::read_dir(&dir).map_err(|e| format!("{}: {e}", dir.display()))?.filter_map(|e| e.ok().map(|e| e.path())).filter(|p| crate::meshformats::is_mesh_file(p)).collect();
+                found.sort();
+                batch.extend(found.into_iter().map(Some));
+            }
+            _ => {}
+        }
+    }
+    if batch.is_empty() {
+        batch.push(None);
+    }
     let started = std::time::Instant::now();
-    let lines = std::cell::RefCell::new(Vec::<String>::new());
-    let mut note = |s: &str| lines.borrow_mut().push(s.to_string());
-    let result = {
-        let mut runner = crate::meshgraph::Runner { device: &device, queue: &queue, cache: &mut cache, base, seed, progress: Default::default(), log: &mut note };
-        runner.run(&graph)
-    };
-    for l in lines.borrow().iter() {
-        log.line(l);
-    }
-    match result {
-        Ok(files) => {
-            log.line(&format!("done: {} file(s) written in {:.1} s", files.len(), started.elapsed().as_secs_f32()));
-            Ok(0)
+    let (mut failed, mut written) = (0usize, 0usize);
+    for (i, file) in batch.iter().enumerate() {
+        let lines = std::cell::RefCell::new(Vec::<String>::new());
+        let mut note = |s: &str| lines.borrow_mut().push(s.to_string());
+        let result = {
+            let mut runner = crate::meshgraph::Runner { device: &device, queue: &queue, cache: &mut cache, base: base.clone(), seed, progress: Default::default(), log: &mut note, batch_file: file.clone() };
+            runner.run(&graph)
+        };
+        let label = file.as_ref().map_or(String::new(), |f| format!("[{}/{}] {}: ", i + 1, batch.len(), f.display()));
+        for l in lines.borrow().iter() {
+            log.line(&format!("{label}{l}"));
         }
-        Err(e) => {
-            log.line(&format!("FAILED: {e}"));
-            Ok(1)
+        match result {
+            Ok(files) => written += files.len(),
+            Err(e) => {
+                failed += 1;
+                log.line(&format!("{label}FAILED: {e}"));
+            }
         }
     }
+    log.line(&format!("done: {written} file(s) written, {failed} run(s) failed, in {:.1} s", started.elapsed().as_secs_f32()));
+    Ok(failed)
 }
 
 fn run(args: &[String], log: &mut Log) -> Result<usize, String> {

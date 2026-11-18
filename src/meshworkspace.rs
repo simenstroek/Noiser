@@ -212,7 +212,7 @@ impl MeshWorkspace {
         std::thread::spawn(move || {
             let mut note = |s: &str| l.lock().unwrap().push(s.to_string());
             let mut cache = cache.lock().unwrap();
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| Runner { device: &device, queue: &queue, cache: &mut cache, base, seed, progress: p, log: &mut note }.run(&graph)));
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| Runner { device: &device, queue: &queue, cache: &mut cache, base, seed, progress: p, log: &mut note, batch_file: None }.run(&graph)));
             let _ = tx.send(result.unwrap_or_else(|_| Err("the run crashed".into())));
         });
         self.log.clear();
