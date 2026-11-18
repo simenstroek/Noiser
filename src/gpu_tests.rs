@@ -951,6 +951,34 @@ fn continuous_noises_have_no_jumps_at_grid_points() {
     }
 }
 
+/// The distance outputs of most patterns are continuous too (their hard-edged Shape outputs are not). Bricks is left
+/// out on purpose: its Distance is measured from the centre of the brick that contains the point, so it jumps at the
+/// seams between staggered rows (by design, like a per-brick gradient mask).
+#[test]
+fn pattern_distances_have_no_jumps_at_grid_points() {
+    use crate::graph::{PatternKind, PatternOutput, PatternParams};
+    let Some(gpu) = gpu() else { return eprintln!("no GPU adapter; skipping") };
+    for kind in [PatternKind::Dimples, PatternKind::Stripes, PatternKind::Gyroid, PatternKind::Honeycomb] {
+        let mut p = PatternParams::for_kind(kind);
+        p.output = PatternOutput::Distance;
+        let g = single_node_graph(NodeKind::Pattern(p));
+        for n in [6u32, 8] {
+            let mut on = Vec::new();
+            for z in 0..n {
+                for y in 0..n {
+                    for x in 0..n {
+                        on.push([(x as f32 + 0.5) / n as f32, (y as f32 + 0.5) / n as f32, (z as f32 + 0.5) / n as f32]);
+                    }
+                }
+            }
+            let near: Vec<[f32; 3]> = on.iter().map(|q| [q[0] + 2e-5, q[1] - 3e-5, q[2] + 1e-5]).collect();
+            let (a, b) = (eval(&gpu, &g, &on), eval(&gpu, &g, &near));
+            let (worst, at) = a.iter().zip(&b).zip(&on).map(|((x, y), q)| ((x - y).abs(), *q)).fold((0.0f32, [0.0; 3]), |m, v| if v.0 > m.0 { v } else { m });
+            assert!(worst < 2e-2, "{kind:?} on a {n}^3 grid: jump of {worst} at {at:?}");
+        }
+    }
+}
+
 /// On the main diagonals of a lattice cube all three simplex fractions are equal; the value there must be the
 /// limit from nearby points, not a double count of two corners.
 #[test]
