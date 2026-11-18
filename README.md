@@ -81,7 +81,7 @@ reported and the rest continue; nothing is ever overwritten. From a script:
 
 **Headless.** `noiser-batch.cmd graph.noisegraph --batch-out DIR --batch-dir SRC` (it runs `noiser.exe --headless`, waits for it and returns the exit code; `noiser.exe` itself is a windowed program that shells do not wait for) does the same without a window
 (options: `--amount`, `--amount-var 0.2` (each mesh varies its displacement by up to 20 %), `--tile`, `--size`, `--seed`, `--seed-mode same|increment|random`, `--res`, `--grid-res`,
-`--format obj|ply`, `--cull`, `--mask KIND`). Progress goes to the console and to `noiser-batch.log` in the output
+`--format obj|ply`, `--cull`, `--mask KIND`, `--set 3.scale=8` to override a node setting in the graph file). Progress goes to the console and to `noiser-batch.log` in the output
 folder; the exit code is 1 if any mesh failed. Without the .cmd, use `Start-Process -Wait -PassThru` in PowerShell.
 
 **Editing.** Undo and redo, copy and paste of nodes (also between two Noiser windows), duplicate, reroute nodes, mute (bypass) a

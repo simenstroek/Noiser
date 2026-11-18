@@ -10,7 +10,7 @@ use std::io::Write;
 use std::path::PathBuf;
 
 pub const USAGE: &str = "usage: noiser --headless GRAPH.noisegraph --batch-out DIR (--batch-file F.obj ... | --batch-dir SRC)
-  [--amount 0.25] [--amount-var 0.2] [--tile 1.0] [--size 1.0] [--seed 0] [--seed-mode same|increment|random]
+  [--set 3.scale=8 ...] [--amount 0.25] [--amount-var 0.2] [--tile 1.0] [--size 1.0] [--seed 0] [--seed-mode same|increment|random]
   [--res 256] [--grid-res 128] [--format obj|ply] [--cull 0.01] [--mask KIND ...]";
 
 #[derive(Debug)]
@@ -24,6 +24,8 @@ struct Options {
     seed: u32,
     mode: SeedMode,
     amount_var: f32,
+    /// `--set NODE.FIELD=VALUE` overrides of node settings in the graph file.
+    sets: Vec<(String, String, serde_json::Value)>,
     settings: Settings,
     grid_res: u32,
     mask: MaskSettings,
@@ -40,6 +42,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
         seed: 0,
         mode: SeedMode::Same,
         amount_var: 0.0,
+        sets: Vec::new(),
         settings: Settings::default(),
         grid_res: 128,
         mask: MaskSettings::default(),
@@ -66,6 +69,14 @@ fn parse(args: &[String]) -> Result<Options, String> {
             "--amount" => o.amount = float(value("a number")?)?,
             "--tile" => o.tile = float(value("a number")?)?,
             "--size" => o.size = float(value("a number")?)?,
+            "--set" => {
+                let spec = value("NODE.FIELD=VALUE")?;
+                let (target, v) = spec.split_once('=').ok_or(format!("--set {spec}: expected NODE.FIELD=VALUE"))?;
+                let (node, field) = target.split_once('.').ok_or(format!("--set {spec}: expected NODE.FIELD=VALUE"))?;
+                // Numbers, booleans and quoted strings are JSON; anything else is taken as a plain string (an enum name).
+                let value = serde_json::from_str(v).unwrap_or_else(|_| serde_json::Value::String(v.to_string()));
+                o.sets.push((node.to_string(), field.to_string(), value));
+            }
             "--amount-var" => o.amount_var = float(value("a fraction like 0.2")?)?.clamp(0.0, 0.5),
             "--cull" => o.settings.cull = float(value("a number")?)?,
             "--seed" => o.seed = whole(value("a number")?)?,
@@ -107,6 +118,31 @@ fn parse(args: &[String]) -> Result<Options, String> {
     Ok(o)
 }
 
+/// The graph file with node settings overridden: `--set 3.scale=8` sets the `scale` field of node 3 (the names
+/// are those in the .noisegraph file; a Value node has `value`). An unknown node or field is an error.
+fn apply_sets(text: &str, sets: &[(String, String, serde_json::Value)]) -> Result<String, String> {
+    if sets.is_empty() {
+        return Ok(text.to_string());
+    }
+    let mut doc: serde_json::Value = serde_json::from_str(text).map_err(|e| e.to_string())?;
+    for (node, field, value) in sets {
+        let kind = doc["nodes"].get_mut(node.as_str()).and_then(|n| n.get_mut("kind")).ok_or(format!("--set: there is no node {node}"))?;
+        match kind {
+            // A Value node is {"Float": 1.0}.
+            serde_json::Value::Object(m) if m.len() == 1 && field == "value" && m.values().next().is_some_and(|v| v.is_number()) => {
+                *m.values_mut().next().unwrap() = value.clone();
+            }
+            serde_json::Value::Object(m) => {
+                let fields = m.values_mut().next().and_then(|v| v.as_object_mut()).ok_or(format!("--set: node {node} has no settings"))?;
+                let slot = fields.get_mut(field.as_str()).ok_or(format!("--set: node {node} has no setting {field}"))?;
+                *slot = value.clone();
+            }
+            _ => return Err(format!("--set: node {node} has no settings")),
+        }
+    }
+    Ok(doc.to_string())
+}
+
 /// Runs the batch when `--headless` is among the arguments; returns the process exit code.
 pub fn try_run() -> Option<i32> {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -127,7 +163,8 @@ pub fn try_run() -> Option<i32> {
 
 fn run(args: &[String], log: &mut Log) -> Result<usize, String> {
     let o = parse(args)?;
-    let graph = Graph::from_json(&std::fs::read_to_string(&o.graph).map_err(|e| format!("{}: {e}", o.graph.display()))?)?;
+    let text = std::fs::read_to_string(&o.graph).map_err(|e| format!("{}: {e}", o.graph.display()))?;
+    let graph = Graph::from_json(&apply_sets(&text, &o.sets)?)?;
     std::fs::create_dir_all(&o.out).map_err(|e| format!("{}: {e}", o.out.display()))?;
     log.file = std::fs::OpenOptions::new().create(true).append(true).open(o.out.join("noiser-batch.log")).ok();
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
@@ -208,5 +245,23 @@ mod tests {
         assert!(parse(&args("--headless --batch-out out --batch-file a.obj")).unwrap_err().contains("graph"));
         assert!(parse(&args("--headless g.noisegraph --batch-out out --batch-file a.obj --seed x")).is_err());
         assert!(parse(&args("--headless g.noisegraph --batch-out out --batch-file a.obj --bogus")).is_err());
+    }
+
+    #[test]
+    fn set_overrides_node_settings_and_rejects_unknown_ones() {
+        let mut g = Graph::default_graph(); // 0 Position, 1 Noise, 2 and 3 outputs
+        let float = g.add(crate::graph::NodeKind::Float(1.0), [0.0; 2]);
+        let text = g.to_json();
+        let set = |node: &str, field: &str, v: serde_json::Value| vec![(node.to_string(), field.to_string(), v)];
+        let patched = Graph::from_json(&apply_sets(&text, &set("1", "scale", serde_json::json!(8.0))).unwrap()).unwrap();
+        assert!(matches!(&patched.nodes[&1].kind, crate::graph::NodeKind::Noise(p) if p.scale == 8.0));
+        let patched = Graph::from_json(&apply_sets(&text, &set(&float.to_string(), "value", serde_json::json!(2.5))).unwrap()).unwrap();
+        assert_eq!(patched.nodes[&float].kind, crate::graph::NodeKind::Float(2.5));
+        assert!(apply_sets(&text, &set("1", "no_such", serde_json::json!(1))).unwrap_err().contains("no setting"));
+        assert!(apply_sets(&text, &set("99", "scale", serde_json::json!(1))).unwrap_err().contains("no node"));
+        assert_eq!(apply_sets(&text, &[]).unwrap(), text);
+        let o = parse(&args("--headless g.noisegraph --batch-out out --batch-file a.obj --set 1.scale=8 --set 1.kind=Simplex")).unwrap();
+        assert_eq!(o.sets.len(), 2);
+        assert_eq!(o.sets[1].2, serde_json::json!("Simplex"));
     }
 }
