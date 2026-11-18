@@ -215,6 +215,9 @@ fn load_ply(path: &Path) -> Result<Mesh, String> {
             for p in &el.props {
                 if let Some(ct) = p.count {
                     let count = body.next(ct)? as usize;
+                    if count > 1 << 16 {
+                        return Err(format!("the PLY file has a polygon with {count} corners"));
+                    }
                     let idx = (0..count).map(|_| body.next(p.ty).map(|v| v as u32)).collect::<Result<Vec<_>, _>>()?;
                     if p.name == "vertex_indices" || p.name == "vertex_index" {
                         face = Some(idx);
