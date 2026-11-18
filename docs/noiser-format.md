@@ -195,8 +195,7 @@ Fields: `kind`, `position` (op id or `null` for `p`), `scale`, `normalize`, `oct
 `lacunarity`, `roughness`, `distortion`, `seed` (already resolved; a non-negative integer), and `feature` for Worley (`f1`, `f2`, `f2_minus_f1`, `cell_value`; Worley is fractal when `octaves` > 1). Type float.
 
 `kind` is one of `perlin`, `simplex`, `worley`, `white`, `blue`.
-Version 1 specifies `perlin`, `white`, `worley` (default settings) and `simplex` exactly below; `blue` reads
-a table of tileable blue noise and `src/noise.wgsl` (with `src/bluenoise.rs`) is its definition.
+Version 1 specifies `perlin`, `white`, `blue`, `worley` (default settings) and `simplex` exactly below.
 
 ### `normal`
 The normalized gradient of the float field `field`, negated if `flip`. Type vector. Tetrahedral
@@ -273,6 +272,24 @@ white(x, period, seed) = hash3(wrap(floor(x)), seed).x · 2 − 1
 ```
 
 No octaves (the file stores `octaves` as 1); `normalize` and `distortion` apply as for every kind.
+
+## Blue
+
+A lookup into tileable blue-noise tables, shipped in the repository as `assets/bluenoise.bin`: the tables of size
+4³, 8³, 16³ and 32³ one after the other, each as little-endian `u16` ranks (a permutation of 0 to n³ − 1, x fastest,
+then y, then z). A value is `rank / (n³ − 1)`, in [0, 1].
+
+```
+blue(x, period, seed):
+  t = 32                                    (the table size)
+  if period > 0:  t = 16 if period % 32 ≠ 0;  t = 8 if period % 16 ≠ 0;  t = 4 if period % 8 ≠ 0
+                  (each test applies after the previous one, so the last one that fires wins)
+  shift = floor(hash3((0,0,0), seed) · t)  per component (a whole number of cells)
+  c = wrap(floor(x) + shift) with period t
+  result = table_t[c.x + t (c.y + t c.z)] · 2 − 1
+```
+
+No octaves. The table generator is `src/bluenoise.rs`'s companion tool; the shipped file is the definition.
 
 ## Worley (Euclidean, jitter 1, default features)
 
