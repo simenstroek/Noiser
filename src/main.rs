@@ -249,7 +249,11 @@ impl App {
             None => (template.map_or_else(Graph::default_graph, |t| Graph::template(t)), None, String::new()),
         };
         let prefs: Prefs = cc.storage.and_then(|s| s.get_string(PREFS_KEY)).and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
-        let prefs = prefs.sane();
+        let mut prefs = prefs.sane();
+        // Started with a file, mesh or template: the getting-started window is not needed.
+        if std::env::args().skip(1).next().is_some() {
+            prefs.seen_about = true;
+        }
         cc.egui_ctx.set_zoom_factor(prefs.ui_scale);
         let mut editor = editor::Editor::default();
         editor.frame_next = true;

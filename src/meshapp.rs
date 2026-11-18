@@ -12,6 +12,18 @@ use std::sync::atomic::AtomicU32;
 use std::sync::{Arc, mpsc};
 
 pub const DEFAULT_RES: u32 = 128;
+
+/// The grid resolution (voxels along the longest side) for an open mesh: a flat terrain needs far more voxels
+/// along its length than a compact solid, but the grid is thin, so the budget is the total voxel count
+/// (about 16 million, 64 MB) rather than the side.
+pub fn open_mesh_res(mesh: &Mesh, pad: f32) -> u32 {
+    let (lo, hi) = mesh.bounds();
+    let extent: [f32; 3] = std::array::from_fn(|a| hi[a] - lo[a] + 2.0 * pad);
+    let volume = extent[0] * extent[1] * extent[2];
+    let voxel = (volume / 16.0e6).cbrt();
+    let longest = extent[0].max(extent[1]).max(extent[2]);
+    ((longest / voxel.max(1e-6)).round() as u32).clamp(2 * DEFAULT_RES, 768)
+}
 pub const DEFAULT_PAD: f32 = 0.5;
 
 /// The mesh's index in the preview's shape list (after the primitives); raymarch.wgsl switches on it.
@@ -61,7 +73,7 @@ impl App {
             let baked = crate::meshformats::load(&path).map(|mesh| {
                 let (normalized, norm) = mesh.normalized();
                 // Open sheets (terrains) need a finer grid to look right; a default setting is raised for them.
-                let res = if res == DEFAULT_RES && crate::meshsdf::MeshQuery::new(&normalized).is_open() { 2 * DEFAULT_RES } else { res };
+                let res = if res == DEFAULT_RES && crate::meshsdf::MeshQuery::new(&normalized).is_open() { open_mesh_res(&normalized, pad) } else { res };
                 let sdf = MeshSdf::build(&normalized, res, pad, &AtomicU32::new(0));
                 Baked { name, normalized: Arc::new(normalized), norm, sdf, res, pad, new_file: true }
             });
@@ -144,7 +156,8 @@ impl App {
         if self.mesh.as_ref().is_some_and(|m| m.sdf.open) {
             ui.weak("Open surface (terrain, sheet): the side its normals face is outside. Raise the grid resolution for fine detail.");
         }
-        crate::row(ui, &mut self.mesh_res, DEFAULT_RES, |ui, v| _ = ui.add(egui::Slider::new(v, 32..=384).text("grid resolution")));
+        let max_res = if self.mesh.as_ref().is_some_and(|m| m.sdf.open) { 768 } else { 384 };
+        crate::row(ui, &mut self.mesh_res, DEFAULT_RES, |ui, v| _ = ui.add(egui::Slider::new(v, 32..=max_res).text("grid resolution")));
         crate::row(ui, &mut self.mesh_pad, DEFAULT_PAD, |ui, v| _ = ui.add(egui::Slider::new(v, 0.1..=2.0).text("grid padding")));
         if (self.mesh_res, self.mesh_pad) != (grid_res, grid_pad) && self.mesh_job.is_none() && ui.button("Rebuild distance grid").clicked() {
             self.start_mesh_rebake();
@@ -512,5 +525,18 @@ impl App {
                 ui.weak(format!("Strength ranges from {lo:.2} to {hi:.2}."));
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_flat_open_mesh_gets_more_voxels_along_its_length_than_a_cube() {
+        let flat = Mesh { positions: vec![[-1.0, -0.02, -1.0], [1.0, 0.02, -1.0], [1.0, 0.0, 1.0], [-1.0, 0.0, 1.0]], triangles: vec![[0, 1, 2], [0, 2, 3]], colors: Vec::new() };
+        let cube = crate::mesh::shapes::icosphere(1.0, 1);
+        assert!(open_mesh_res(&flat, 0.5) > open_mesh_res(&cube, 0.5));
+        assert!(open_mesh_res(&flat, 0.5) <= 768);
     }
 }
