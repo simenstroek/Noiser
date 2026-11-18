@@ -89,7 +89,7 @@ Type vector.
 `a + (b − a)·t`, where `t` is `factor`, limited to 0..1 when `clamp` is true. Type float.
 
 ### `curve`
-`value` (op id or a number, float), `points` (a list of `[x, y]`, already sorted by x, 1 to 16 of them) and
+`value` (a number or `{"node": id}`, float; an unconnected input is 0), `points` (a list of `[x, y]`, already sorted by x, 1 to 16 of them) and
 `mode` (`linear`, `smooth`, `step` or `cubic`). Below the first x the result is the first y and above the last x the
 last y. Between points i and i+1, with `t = (value − x_i) / (x_i+1 − x_i)`: `linear` gives `mix(y_i, y_i+1, t)`,
 `smooth` the same with `t` replaced by `t²(3 − 2t)`, `step` gives `y_i`, and `cubic` is a cubic Hermite

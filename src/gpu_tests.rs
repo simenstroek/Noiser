@@ -685,6 +685,184 @@ fn the_density_range_analysis_is_sound() {
     eprintln!("{checked} of {rounds} random graphs had a finite range and kept to it");
 }
 
+/// A small interpreter for the `.noiser` op list (everything except the noise-like ops), written from the
+/// format document: the GPU must agree with it, so the document is a faithful spec for other hosts.
+mod noiser_interpreter {
+    use serde_json::Value;
+    use std::collections::BTreeMap;
+
+    #[derive(Clone, Copy, Debug)]
+    pub enum V {
+        F(f32),
+        V3([f32; 3]),
+    }
+
+    fn vec3(v: V) -> [f32; 3] {
+        match v {
+            V::F(x) => [x; 3],
+            V::V3(a) => a,
+        }
+    }
+
+    fn float(v: V) -> f32 {
+        match v {
+            V::F(x) => x,
+            V::V3(a) => (a[0] + a[1] + a[2]) / 3.0,
+        }
+    }
+
+    fn pow_safe(a: f32, b: f32) -> f32 {
+        if b == 0.0 {
+            1.0
+        } else if a > 0.0 {
+            a.powf(b)
+        } else if a == 0.0 || b.fract() != 0.0 {
+            0.0
+        } else {
+            let m = (-a).powf(b);
+            if (b * 0.5).fract() != 0.0 { -m } else { m }
+        }
+    }
+
+    fn smin(a: f32, b: f32, k: f32) -> f32 {
+        if k <= 0.0 {
+            return a.min(b);
+        }
+        let h = (k - (a - b).abs()).max(0.0) / k;
+        a.min(b) - h * h * h * k / 6.0
+    }
+
+    fn math(f: &str, a: f32, b: f32, k: f32) -> f32 {
+        match f {
+            "add" => a + b,
+            "subtract" => a - b,
+            "multiply" => a * b,
+            "divide" => if b == 0.0 { 0.0 } else { a / b },
+            "min" => a.min(b),
+            "max" => a.max(b),
+            "power" => pow_safe(a, b),
+            "smooth_min" => smin(a, b, k),
+            "smooth_max" => -smin(-a, -b, k),
+            "absolute" => a.abs(),
+            "ridge" => 1.0 - a.abs(),
+            "floor" => a.floor(),
+            "fract" => a - a.floor(),
+            "sine" => a.sin(),
+            "sqrt" => a.max(0.0).sqrt(),
+            "modulo" => if b == 0.0 { 0.0 } else { a - b * (a / b).floor() },
+            "greater" => if a > b { 1.0 } else { 0.0 },
+            other => panic!("unknown math fn {other}"),
+        }
+    }
+
+    /// Whether every op of the list is one the interpreter knows.
+    pub fn supported(ops: &Value) -> bool {
+        ops["ops"].as_array().unwrap().iter().all(|o| matches!(o["op"].as_str().unwrap(), "position" | "value" | "math" | "remap" | "mix" | "curve" | "separate" | "combine"))
+    }
+
+    pub fn density(file: &Value, p: [f32; 3]) -> f32 {
+        let mut vals: BTreeMap<u64, V> = BTreeMap::new();
+        for o in file["ops"].as_array().unwrap() {
+            let operand = |x: &Value, vals: &BTreeMap<u64, V>| -> V {
+                match x {
+                    Value::Null => V::V3([0.0; 3]),
+                    Value::Number(n) => V::F(n.as_f64().unwrap() as f32),
+                    Value::Array(a) => V::V3([a[0].as_f64().unwrap() as f32, a[1].as_f64().unwrap() as f32, a[2].as_f64().unwrap() as f32]),
+                    Value::Object(m) => vals[&m["node"].as_u64().unwrap()],
+                    other => panic!("operand {other}"),
+                }
+            };
+            let id = o["id"].as_u64().unwrap();
+            let kind = o["op"].as_str().unwrap();
+            let v = match kind {
+                "position" => V::V3(p),
+                "value" => operand(&o["value"], &vals),
+                "math" => {
+                    let f = o["fn"].as_str().unwrap();
+                    let (a, b) = (operand(&o["a"], &vals), operand(&o["b"], &vals));
+                    let k = if o.get("k").is_some() { float(operand(&o["k"], &vals)) } else { 0.5 };
+                    if f == "dot" {
+                        let (a, b) = (vec3(a), vec3(b));
+                        V::F(a[0] * b[0] + a[1] * b[1] + a[2] * b[2])
+                    } else if o["type"] == "vector" {
+                        let (a, b) = (vec3(a), vec3(b));
+                        V::V3(std::array::from_fn(|i| math(f, a[i], b[i], k)))
+                    } else {
+                        V::F(math(f, float(a), float(b), k))
+                    }
+                }
+                "remap" => {
+                    let g = |key: &str| float(operand(&o[key], &vals));
+                    let (x, a, b, c, d) = (g("value"), g("from_min"), g("from_max"), g("to_min"), g("to_max"));
+                    let t = if b != a { (x - a) / (b - a) } else { 0.0 };
+                    let r = c + t * (d - c);
+                    V::F(if o["clamp"] == true { r.clamp(c.min(d), c.max(d)) } else { r })
+                }
+                "mix" => {
+                    let g = |key: &str| float(operand(&o[key], &vals));
+                    let (t, a, b) = (g("factor"), g("a"), g("b"));
+                    let t = if o["clamp"] == true { t.clamp(0.0, 1.0) } else { t };
+                    V::F(a + (b - a) * t)
+                }
+                "curve" => {
+                    let pts: Vec<[f32; 2]> = o["points"].as_array().unwrap().iter().map(|q| [q[0].as_f64().unwrap() as f32, q[1].as_f64().unwrap() as f32]).collect();
+                    let mode = match o["mode"].as_str().unwrap() {
+                        "linear" => crate::graph::CurveMode::Linear,
+                        "smooth" => crate::graph::CurveMode::Smooth,
+                        "step" => crate::graph::CurveMode::Step,
+                        _ => crate::graph::CurveMode::Cubic,
+                    };
+                    V::F(crate::graph::curve_value(&pts, mode, float(operand(&o["value"], &vals))))
+                }
+                "separate" => {
+                    // `vector` is a plain op id (or null for the zero vector), like `position` and `field`.
+                    let v = match &o["vector"] {
+                        Value::Null => [0.0; 3],
+                        id => vec3(vals[&id.as_u64().unwrap()]),
+                    };
+                    V::F(v[match o["component"].as_str().unwrap() { "x" => 0, "y" => 1, _ => 2 }])
+                }
+                "combine" => V::V3([float(operand(&o["x"], &vals)), float(operand(&o["y"], &vals)), float(operand(&o["z"], &vals))]),
+                other => panic!("op {other} is not supported by the interpreter"),
+            };
+            vals.insert(id, v);
+        }
+        float(vals[&file["outputs"]["density"].as_u64().unwrap()])
+    }
+}
+
+/// The exported op list, read back with an interpreter written from the format document, gives what the GPU gives.
+#[test]
+fn the_noiser_format_document_matches_the_shader() {
+    let Some(gpu) = gpu() else { return eprintln!("no GPU adapter; skipping") };
+    let mut state = 0x5EED_0000_1111_2222u64;
+    let mut rnd = move |n: usize| {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        (state % n as u64) as usize
+    };
+    let rounds: usize = std::env::var("NOISER_FUZZ_ROUNDS").ok().and_then(|v| v.parse().ok()).unwrap_or(60);
+    let pts = points(60, 9);
+    let mut checked = 0;
+    for round in 0..rounds {
+        let g = codegen::random_graph(&mut rnd);
+        let file = crate::noiser_file::ops(&g, 1).unwrap();
+        if file["outputs"]["density"].is_null() || !noiser_interpreter::supported(&file) {
+            continue;
+        }
+        let want = eval(&gpu, &g, &pts);
+        for (p, w) in pts.iter().zip(&want) {
+            let got = noiser_interpreter::density(&file, *p);
+            if w.is_finite() && got.is_finite() {
+                assert!((got - w).abs() <= 2e-3 * (1.0 + w.abs()), "round {round}: interpreter {got} vs GPU {w} at {p:?}\n{file}");
+            }
+        }
+        checked += 1;
+    }
+    eprintln!("{checked} of {rounds} random graphs matched the interpreter");
+}
+
 #[test]
 fn separate_and_combine_move_components_around() {
     let Some(gpu) = gpu() else { return eprintln!("no GPU adapter; skipping") };
