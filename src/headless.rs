@@ -10,7 +10,7 @@ use std::io::Write;
 use std::path::PathBuf;
 
 pub const USAGE: &str = "usage: noiser --headless GRAPH.noisegraph --batch-out DIR (--batch-file F.obj ... | --batch-dir SRC)
-  [--export-noiser OUT.noiser] [--set 3.scale=8 ...] [--amount 0.25] [--amount-var 0.2] [--tile 1.0] [--size 1.0] [--seed 0] [--seed-mode same|increment|random]
+  [--export-noiser OUT.noiser] [--param name=value ...] [--set 3.scale=8 ...] [--amount 0.25] [--amount-var 0.2] [--tile 1.0] [--size 1.0] [--seed 0] [--seed-mode same|increment|random]
   [--res 256] [--grid-res 128] [--format obj|ply] [--cull 0.01] [--mask KIND ...]";
 
 #[derive(Debug)]
@@ -26,6 +26,8 @@ struct Options {
     amount_var: f32,
     /// `--export-noiser FILE`: write the graph as a .noiser math function instead of displacing meshes.
     export_noiser: Option<PathBuf>,
+    /// `--param name=value`: overrides of the graph's exposed parameters.
+    params: Vec<(String, serde_json::Value)>,
     /// `--set NODE.FIELD=VALUE` overrides of node settings in the graph file.
     sets: Vec<(String, String, serde_json::Value)>,
     settings: Settings,
@@ -45,6 +47,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
         mode: SeedMode::Same,
         amount_var: 0.0,
         export_noiser: None,
+        params: Vec::new(),
         sets: Vec::new(),
         settings: Settings::default(),
         grid_res: 128,
@@ -73,6 +76,11 @@ fn parse(args: &[String]) -> Result<Options, String> {
             "--tile" => o.tile = float(value("a number")?)?,
             "--size" => o.size = float(value("a number")?)?,
             "--export-noiser" => o.export_noiser = Some(value("a file")?.into()),
+            "--param" => {
+                let spec = value("name=value")?;
+                let (name, v) = spec.split_once('=').ok_or(format!("--param {spec}: expected name=value"))?;
+                o.params.push((name.to_string(), serde_json::from_str(v).unwrap_or_else(|_| serde_json::Value::String(v.to_string()))));
+            }
             "--set" => {
                 let spec = value("NODE.FIELD=VALUE")?;
                 let (target, v) = spec.split_once('=').ok_or(format!("--set {spec}: expected NODE.FIELD=VALUE"))?;
@@ -150,6 +158,24 @@ fn apply_sets(text: &str, sets: &[(String, String, serde_json::Value)]) -> Resul
     Ok(doc.to_string())
 }
 
+/// `--param name=value` turned into `--set` overrides through the graph file's exposed parameters.
+fn resolve_params(text: &str, params: &[(String, serde_json::Value)]) -> Result<Vec<(String, String, serde_json::Value)>, String> {
+    if params.is_empty() {
+        return Ok(Vec::new());
+    }
+    let graph = Graph::from_json(text)?;
+    params
+        .iter()
+        .map(|(name, v)| {
+            let e = graph.exposed.iter().find(|e| e.name == *name).ok_or_else(|| {
+                let known: Vec<&str> = graph.exposed.iter().map(|e| e.name.as_str()).collect();
+                format!("--param: the graph exposes no parameter named {name} (it exposes: {})", if known.is_empty() { "none".into() } else { known.join(", ") })
+            })?;
+            Ok((e.node.to_string(), e.field.clone(), v.clone()))
+        })
+        .collect()
+}
+
 /// Runs the batch when `--headless` is among the arguments; returns the process exit code.
 pub fn try_run() -> Option<i32> {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -171,7 +197,9 @@ pub fn try_run() -> Option<i32> {
 fn run(args: &[String], log: &mut Log) -> Result<usize, String> {
     let o = parse(args)?;
     let text = std::fs::read_to_string(&o.graph).map_err(|e| format!("{}: {e}", o.graph.display()))?;
-    let graph = Graph::from_json(&apply_sets(&text, &o.sets)?)?;
+    let mut sets = o.sets.clone();
+    sets.extend(resolve_params(&text, &o.params)?);
+    let graph = Graph::from_json(&apply_sets(&text, &sets)?)?;
     if let Some(path) = &o.export_noiser {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default())).map_err(|e| format!("no GPU adapter: {e}"))?;
@@ -280,5 +308,20 @@ mod tests {
         let o = parse(&args("--headless g.noisegraph --batch-out out --batch-file a.obj --set 1.scale=8 --set 1.kind=Simplex")).unwrap();
         assert_eq!(o.sets.len(), 2);
         assert_eq!(o.sets[1].2, serde_json::json!("Simplex"));
+    }
+
+    #[test]
+    fn exposed_parameters_resolve_to_node_settings() {
+        let mut g = Graph::default_graph();
+        g.exposed.push(crate::graph::Exposed { name: "roughness".into(), node: 1, field: "scale".into() });
+        let text = g.to_json();
+        let sets = resolve_params(&text, &[("roughness".to_string(), serde_json::json!(6.0))]).unwrap();
+        let patched = Graph::from_json(&apply_sets(&text, &sets).unwrap()).unwrap();
+        assert!(matches!(&patched.nodes[&1].kind, crate::graph::NodeKind::Noise(p) if p.scale == 6.0));
+        assert_eq!(patched.exposed.len(), 1, "the exposed list survives");
+        let err = resolve_params(&text, &[("nope".to_string(), serde_json::json!(1))]).unwrap_err();
+        assert!(err.contains("roughness"), "the error lists what is exposed: {err}");
+        assert_eq!(g.exposed_value(&g.exposed[0]).unwrap(), serde_json::json!(4.0));
+        assert!(g.exposed_value(&crate::graph::Exposed { name: "x".into(), node: 1, field: "bogus".into() }).is_err());
     }
 }

@@ -187,6 +187,7 @@ struct App {
     /// A New / Open that is waiting for the user to decide about unsaved changes.
     pending: Option<Pending>,
     about_open: bool,
+    exposed_open: bool,
     /// Last window title sent, so it is only sent when it changes.
     title: String,
     /// The window was asked to close with unsaved changes; waiting for Save / Discard / Cancel.
@@ -312,6 +313,7 @@ impl App {
             side_tab: SideTab::default(),
             pending: None,
             about_open: false,
+            exposed_open: false,
             title: String::new(),
             close_prompt: false,
             close_ok: false,
@@ -1137,6 +1139,38 @@ impl eframe::App for App {
                 });
             });
         }
+        egui::Window::new("Exposed parameters").open(&mut self.exposed_open).collapsible(false).show(&ctx, |ui| {
+            ui.weak("Name a node setting so a script can set it: noiser-batch.cmd graph.noisegraph --param name=value. The field is the setting's name in the .noisegraph file (scale, octaves, jitter, weight, value for a Value node...).");
+            let mut remove = None;
+            let ids: Vec<graph::NodeId> = self.graph.nodes.keys().copied().collect();
+            for i in 0..self.graph.exposed.len() {
+                let shown = self.graph.exposed_value(&self.graph.exposed[i]);
+                let e = &mut self.graph.exposed[i];
+                ui.horizontal(|ui| {
+                    ui.add(egui::TextEdit::singleline(&mut e.name).hint_text("name").desired_width(90.0));
+                    egui::ComboBox::from_id_salt(("exposed node", i)).selected_text(format!("node {}", e.node)).show_ui(ui, |ui| {
+                        for id in &ids {
+                            ui.selectable_value(&mut e.node, *id, format!("node {id}"));
+                        }
+                    });
+                    ui.add(egui::TextEdit::singleline(&mut e.field).hint_text("field").desired_width(90.0));
+                    match &shown {
+                        Ok(v) => _ = ui.weak(v.to_string()),
+                        Err(why) => _ = ui.colored_label(editor::ORANGE, why),
+                    }
+                    if ui.small_button("×").on_hover_text("Remove").clicked() {
+                        remove = Some(i);
+                    }
+                });
+            }
+            if let Some(i) = remove {
+                self.graph.exposed.remove(i);
+            }
+            if ui.button("Add parameter").clicked() {
+                let node = self.editor.selected.iter().next().copied().unwrap_or(0);
+                self.graph.exposed.push(graph::Exposed { name: format!("param{}", self.graph.exposed.len() + 1), node, field: "scale".into() });
+            }
+        });
         egui::Window::new("About Noiser").open(&mut self.about_open).collapsible(false).resizable(false).show(&ctx, |ui| {
             ui.heading(format!("Noiser {}", env!("CARGO_PKG_VERSION")));
             ui.label("A node editor for tiling 3D noise: build a graph of noises, patterns and math, watch it in 3D and as a slice, export it as textures, a volume, a math function, or use it to displace meshes.");
@@ -1201,6 +1235,10 @@ impl eframe::App for App {
                     if ui.button("Arrange nodes").on_hover_text("Lay the graph out in columns, inputs on the left").clicked() {
                         editor::arrange(&mut self.graph);
                         self.editor.frame_next = true;
+                    }
+                    if ui.button("Exposed parameters…").clicked() {
+                        self.exposed_open = true;
+                        ui.close();
                     }
                     if ui.button("Preferences…").clicked() {
                         self.prefs_open = true;

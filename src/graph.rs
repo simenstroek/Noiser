@@ -696,6 +696,32 @@ pub struct Graph {
     /// Comment boxes drawn behind the nodes; they have no effect on the result.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub frames: Vec<Frame>,
+    /// Named node settings that scripts and batches may override (`--param name=value`), see `Exposed`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exposed: Vec<Exposed>,
+}
+
+/// A node setting with a name: `field` is the setting's name in the .noisegraph file (for example `scale` on a
+/// Noise node, `value` on a Value node, `weight`...), so the name stands for "node N's field".
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Exposed {
+    pub name: String,
+    pub node: NodeId,
+    pub field: String,
+}
+
+impl Graph {
+    /// The current value of an exposed setting as JSON, or why it cannot be read.
+    pub fn exposed_value(&self, e: &Exposed) -> Result<serde_json::Value, String> {
+        let node = self.nodes.get(&e.node).ok_or(format!("there is no node {}", e.node))?;
+        let kind = serde_json::to_value(&node.kind).map_err(|x| x.to_string())?;
+        if e.field == "value" {
+            if let Some(v) = kind.as_object().and_then(|m| m.values().next()).filter(|v| v.is_number()) {
+                return Ok(v.clone());
+            }
+        }
+        kind.as_object().and_then(|m| m.values().next()).and_then(|v| v.get(e.field.as_str())).cloned().ok_or(format!("node {} has no setting {}", e.node, e.field))
+    }
 }
 
 /// A labelled box in the graph editor for grouping nodes.
