@@ -628,7 +628,12 @@ pub enum NodeKind {
     /// Mesh graph: a noise graph as a node. Input: position (defaults to world position).
     NoiseGraph(crate::meshgraph::NoiseGraphParams),
     /// Mesh graph: the surface of a field as an adaptive triangle mesh of about `triangles` triangles.
-    Remesh { triangles: u32 },
+    Remesh {
+        triangles: u32,
+        /// 0: even triangles everywhere; 1: strongly smaller ones where the surface bends (the default).
+        #[serde(default = "one")]
+        adaptivity: f32,
+    },
     /// Mesh graph: UVs for a mesh.
     AutoUv(crate::uvgen::UvParams),
     /// Mesh graph: maps baked onto a mesh (input 0) from a field (input 1); one image output per map.
@@ -1966,7 +1971,7 @@ mod frame_tests {
     fn meshes_and_images_only_connect_to_their_own_kind() {
         let mut g = Graph::default();
         let mesh = g.add(NodeKind::LoadMesh(Default::default()), [0.0; 2]);
-        let remesh = g.add(NodeKind::Remesh { triangles: 1000 }, [0.0; 2]);
+        let remesh = g.add(NodeKind::Remesh { triangles: 1000, adaptivity: 1.0 }, [0.0; 2]);
         let uv = g.add(NodeKind::AutoUv(Default::default()), [0.0; 2]);
         let bake = g.add(NodeKind::Bake(Default::default()), [0.0; 2]);
         let out_mesh = g.add(NodeKind::OutMesh(Default::default()), [0.0; 2]);

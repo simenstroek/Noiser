@@ -126,7 +126,7 @@ impl MeshWorkspace {
         let mesh = g.add(NodeKind::LoadMesh(Default::default()), [0.0, 0.0]);
         let noise = g.add(NodeKind::NoiseGraph(Default::default()), [0.0, 140.0]);
         let add = g.add(NodeKind::Math { op: MathOp::Add, a: 0.0, b: 0.0, c: 0.5 }, [200.0, 60.0]);
-        let remesh = g.add(NodeKind::Remesh { triangles: 20_000 }, [400.0, 60.0]);
+        let remesh = g.add(NodeKind::Remesh { triangles: 20_000, adaptivity: 1.0 }, [400.0, 60.0]);
         let uv = g.add(NodeKind::AutoUv(Default::default()), [600.0, 60.0]);
         let bake = g.add(NodeKind::Bake(Default::default()), [800.0, 100.0]);
         let out_mesh = g.add(NodeKind::OutMesh(Default::default()), [1000.0, 0.0]);

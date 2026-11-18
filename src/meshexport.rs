@@ -534,6 +534,10 @@ impl Job<'_> {
     /// The displaced surface remeshed to about `target` triangles, in the preview's space: a coarse uniform
     /// extraction (fine enough to keep the shape's topology), then adaptive remeshing onto the exact field.
     pub fn remeshed(&self, target: usize, progress: &Progress) -> RawMesh {
+        self.remeshed_with(target, 1.0, progress)
+    }
+
+    pub fn remeshed_with(&self, target: usize, adaptivity: f32, progress: &Progress) -> RawMesh {
         let start_res = ((target as f32 / 8.0).sqrt() * 1.5).clamp(64.0, 192.0) as u32;
         let coarse = self.with_res(start_res);
         let mut mesh = coarse.extract_with(progress, true);
@@ -544,7 +548,8 @@ impl Job<'_> {
         }
         let grid = coarse.grid();
         let diagonal = (0..3).map(|a| (grid.dims[a] as f32 * grid.h).powi(2)).sum::<f32>().sqrt();
-        let params = crate::remesh::Params::new(target, diagonal);
+        let mut params = crate::remesh::Params::new(target, diagonal);
+        params.adaptivity = adaptivity;
         let eps = 0.5 * params.min_edge;
         let d = self.d;
         // The field averaged over a seven point stencil of the requested radius (distance and gradient alike).

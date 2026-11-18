@@ -1742,7 +1742,7 @@ fn a_mesh_graph_runs_from_a_mesh_file_to_files() {
     g.connect(facing, blend, 2);
     g.connect(mesh, sum, 0);
     g.connect(blend, sum, 1);
-    let remesh = g.add(NodeKind::Remesh { triangles: 3000 }, [0.0; 2]);
+    let remesh = g.add(NodeKind::Remesh { triangles: 3000, adaptivity: 1.0 }, [0.0; 2]);
     let uv = g.add(NodeKind::AutoUv(crate::uvgen::UvParams { resolution: 512, ..Default::default() }), [0.0; 2]);
     let bake = g.add(NodeKind::Bake(crate::bake::Settings { size: 128, padding: 2, channels: vec![crate::bake::Channel::Normal, crate::bake::Channel::Occlusion], custom: vec!["Mask".into()], green_up: false }), [0.0; 2]);
     let out_mesh = g.add(NodeKind::OutMesh(crate::meshgraph::OutParams { folder: "out".into(), name: "ball".into(), ..Default::default() }), [0.0; 2]);
@@ -1824,7 +1824,7 @@ fn write_demo_mesh_graph() {
     let b = g.add(NodeKind::NoiseGraph(crate::meshgraph::NoiseGraphParams { file: "smooth.noisegraph".into(), frequency: 0.25, amplitude: 0.08, ..Default::default() }), [480.0, 260.0]);
     let blend = g.add(NodeKind::Math { op: MathOp::Lerp, a: 0.0, b: 0.0, c: 0.5 }, [660.0, 160.0]);
     let sum = g.add(NodeKind::Math { op: MathOp::Add, a: 0.0, b: 0.0, c: 0.5 }, [820.0, 80.0]);
-    let remesh = g.add(NodeKind::Remesh { triangles: 20_000 }, [980.0, 80.0]);
+    let remesh = g.add(NodeKind::Remesh { triangles: 20_000, adaptivity: 1.0 }, [980.0, 80.0]);
     let uv = g.add(NodeKind::AutoUv(Default::default()), [1140.0, 80.0]);
     let bake = g.add(NodeKind::Bake(crate::bake::Settings { size: 1024, channels: vec![crate::bake::Channel::Normal, crate::bake::Channel::Occlusion], custom: vec!["Mask".into()], ..Default::default() }), [1300.0, 120.0]);
     let out_mesh = g.add(NodeKind::OutMesh(crate::meshgraph::OutParams { folder: "out".into(), name: "rock".into(), ..Default::default() }), [1480.0, 40.0]);

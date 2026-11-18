@@ -90,9 +90,10 @@ pub fn props(ui: &mut egui::Ui, kind: &mut NodeKind) -> bool {
             }
             true
         }
-        NodeKind::Remesh { triangles } => {
+        NodeKind::Remesh { triangles, adaptivity } => {
             ui.weak("The surface of the field as an adaptive triangle mesh: small even triangles where it bends, large ones where it is flat.");
             crate::row(ui, triangles, 20_000, |ui, v| _ = ui.add(egui::DragValue::new(v).range(200..=2_000_000).speed(100.0).suffix(" triangles")));
+            crate::row(ui, adaptivity, 1.0, |ui, v| _ = ui.add(egui::Slider::new(v, 0.0..=1.0).text("adaptivity")).on_hover_text("0 gives triangles of one size everywhere; 1 lets them be a quarter of that size on tight curves and five times larger on flat ground."));
             true
         }
         NodeKind::AutoUv(uv) => {

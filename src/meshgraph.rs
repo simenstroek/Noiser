@@ -340,14 +340,14 @@ impl Runner<'_> {
         let node = original.nodes.get(&id).ok_or("a wire reads a missing node")?;
         let input = |port: usize| original.input_from(id, port).ok_or_else(|| format!("node {id} has input {} unconnected", port + 1));
         let v = match &node.kind {
-            NodeKind::Remesh { triangles } => {
+            NodeKind::Remesh { triangles, adaptivity } => {
                 let field = self.field_for(original, lowered, input(0)?, true, fields)?;
                 (self.log)(&format!("remeshing to {triangles} triangles"));
                 let d = Displace { amount: 0.0, tile_size: 1.0, prim_size: 1.0, mask: crate::meshmask::PackedMask::NONE };
                 let norm = Normalization { center: [0.0; 3], scale: 1.0 };
                 let settings = Settings { remesh: Some(*triangles as usize), ..Default::default() };
                 let job = Job { ev: &field.ev, d, lo: field.lo, hi: field.hi, reach: field.reach, norm, settings };
-                let mut mesh = job.remeshed(*triangles as usize, &self.progress);
+                let mut mesh = job.remeshed_with(*triangles as usize, *adaptivity, &self.progress);
                 mesh.recompute_normals();
                 Value::Mesh(mesh)
             }

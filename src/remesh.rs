@@ -31,12 +31,14 @@ pub struct Params {
     /// The smoothing radius as a fraction of the local edge length. 0 (the default) follows the exact field: blurring
     /// it was tried and made the triangles no cleaner, only the surface less true.
     pub blur: f32,
+    /// 0: one edge length everywhere; 1: from a quarter to five times the uniform length, following the curvature.
+    pub adaptivity: f32,
 }
 
 impl Params {
     /// Sensible edge limits for a mesh with the given bounding box diagonal.
     pub fn new(target: usize, diagonal: f32) -> Params {
-        Params { target, iterations: 14, min_edge: diagonal / 1500.0, max_edge: diagonal / 6.0, blur: 0.0 }
+        Params { target, iterations: 14, min_edge: diagonal / 1500.0, max_edge: diagonal / 6.0, blur: 0.0, adaptivity: 1.0 }
     }
 }
 
@@ -568,7 +570,8 @@ pub fn remesh(start: RawMesh, field: Field, params: &Params, progress: &dyn Fn(u
     // crease has a huge curvature but must not eat the whole triangle budget.
     let area: f32 = m.tris.iter().enumerate().filter(|(t, _)| m.alive[*t]).map(|(_, t)| 0.5 * len(m.tri_cross(*t, &[]))).sum();
     let uniform = (4.0 * area / (3f32.sqrt() * params.target as f32)).sqrt();
-    let p = &Params { min_edge: params.min_edge.max(uniform / 4.0), max_edge: params.max_edge.min(uniform * 5.0).max(uniform / 2.0), ..params.clone() };
+    let a = params.adaptivity.clamp(0.0, 1.0);
+    let p = &Params { min_edge: params.min_edge.max(uniform * (1.0 - 0.75 * a)), max_edge: params.max_edge.min(uniform * (1.0 + 4.0 * a)).max(uniform * (1.0 - 0.5 * a)), ..params.clone() };
     m.size.iter_mut().for_each(|s| *s = 0.25 * p.max_edge);
     m.project(field, 2, p.blur);
     let rounds = p.iterations;
@@ -683,6 +686,27 @@ mod tests {
         let (tip, flank) = (mean_edge(&|p| p[0].abs() > 1.3), mean_edge(&|p| p[0].abs() < 0.4));
         eprintln!("{} triangles, edge at the tips {tip:.4}, on the flanks {flank:.4}", out.triangles.len());
         assert!(tip < 0.7 * flank, "tips {tip}, flanks {flank}");
+        // With no adaptivity the same surface gets even triangles.
+        let mut start = icosphere(1.0, 3);
+        for p in &mut start.positions {
+            *p = [p[0] * 1.6, p[1] * 0.5, p[2] * 0.5];
+        }
+        let even = remesh(start, &mut { field }, &Params { adaptivity: 0.0, ..Params::new(3000, 3.5) }, &|_, _| {});
+        let mean_even = |keep: &dyn Fn(V3) -> bool| {
+            let (mut sum, mut n) = (0.0, 0);
+            for t in &even.triangles {
+                for i in 0..3 {
+                    let (a, b) = (even.positions[t[i] as usize], even.positions[t[(i + 1) % 3] as usize]);
+                    if keep(a) && keep(b) {
+                        sum += len(sub(a, b));
+                        n += 1;
+                    }
+                }
+            }
+            sum / n.max(1) as f32
+        };
+        let (tip_e, flank_e) = (mean_even(&|p| p[0].abs() > 1.3), mean_even(&|p| p[0].abs() < 0.4));
+        assert!(tip_e > 0.85 * flank_e, "even: tips {tip_e}, flanks {flank_e}");
         let r = meshquality::report(&out);
         assert!(r.watertight() && r.thin_fraction < 0.05, "{r}");
     }

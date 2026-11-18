@@ -236,7 +236,7 @@ fn palette() -> Vec<(&'static str, NodeKind)> {
         all.extend([
             ("Load Mesh", NodeKind::LoadMesh(Default::default())),
             ("Noise Graph", NodeKind::NoiseGraph(Default::default())),
-            ("Remesh", NodeKind::Remesh { triangles: 20_000 }),
+            ("Remesh", NodeKind::Remesh { triangles: 20_000, adaptivity: 1.0 }),
             ("Auto UVs", NodeKind::AutoUv(Default::default())),
             ("Bake", NodeKind::Bake(Default::default())),
             ("Mesh Output", NodeKind::OutMesh(Default::default())),
