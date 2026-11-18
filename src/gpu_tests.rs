@@ -979,6 +979,30 @@ fn pattern_distances_have_no_jumps_at_grid_points() {
     }
 }
 
+/// Far from the origin and at negative coordinates (object-space samplers produce both) no graph may give NaN.
+#[test]
+fn random_graphs_give_no_nan_far_from_the_origin() {
+    let Some(gpu) = gpu() else { return eprintln!("no GPU adapter; skipping") };
+    let mut state = 0xDEAD_BEEF_0BAD_F00Du64 ^ fuzz_seed();
+    let mut rnd = move |n: usize| {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        (state % n as u64) as usize
+    };
+    let rounds: usize = std::env::var("NOISER_FUZZ_ROUNDS").ok().and_then(|v| v.parse().ok()).unwrap_or(40);
+    let pts: Vec<[f32; 3]> = vec![[-3.7, 2.2, -0.1], [250.3, -40.5, 17.9], [-1200.25, 0.75, 3000.5], [9.9e3, -9.9e3, 123.4], [0.0, 0.0, 0.0], [-1.0, -1.0, -1.0], [1.0, 1.0, 1.0], [0.5, -0.5, 2.5]];
+    for round in 0..rounds {
+        let g = codegen::random_graph(&mut rnd);
+        if g.nodes.values().any(|n| matches!(n.kind, crate::graph::NodeKind::Normal { .. })) {
+            continue; // a gradient of a constant is a normalized zero; its handling is tested elsewhere
+        }
+        let v = eval(&gpu, &g, &pts);
+        assert!(v.iter().all(|x| !x.is_nan()), "round {round}: NaN in {v:?}
+{}", g.to_json());
+    }
+}
+
 /// On the main diagonals of a lattice cube all three simplex fractions are equal; the value there must be the
 /// limit from nearby points, not a double count of two corners.
 #[test]
