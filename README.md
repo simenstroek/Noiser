@@ -56,6 +56,7 @@ tiling 3D texture for the preview, and the nodes it covers get a green outline. 
 **Export**
 - 2D image or 3D slice grid: PNG 8 or 16 bit, EXR 32 bit; density or normals.
 - 3D OpenVDB (a float grid, written by Noiser's own minimal writer).
+- 3D raw floats (`.raw`, 32-bit little-endian, x fastest; a `.raw.txt` note says the size), for tools that read volumes by hand.
 - `.noiser` math function: the graph as an op list plus test vectors, so a sampler in another host
   can check itself. The format is specified in [`docs/noiser-format.md`](docs/noiser-format.md). A Blender
   extension that builds Geometry Nodes groups from it is in [`blender/`](blender).

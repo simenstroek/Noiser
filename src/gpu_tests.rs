@@ -306,6 +306,26 @@ fn export_evaluates_texel_centres() {
 }
 
 #[test]
+fn raw_volume_export_writes_every_voxel_x_fastest() {
+    use crate::export::{self, Kind, Settings};
+    let Some(gpu) = gpu() else { return eprintln!("no GPU adapter; skipping") };
+    let g = position_graph(); // density = (x + y + z) / 3 at each voxel centre
+    let ev = export::Evaluator::new(&gpu.device, &gpu.queue, &g, 0).unwrap();
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target").join("volume.raw");
+    let s = Settings { kind: Kind::Raw3d, res: 6, ..Default::default() };
+    export::run(&ev, &s, g.density_range(), &path, &Default::default()).unwrap();
+    let bytes = std::fs::read(&path).unwrap();
+    assert_eq!(bytes.len(), 6 * 6 * 6 * 4);
+    let v: &[f32] = bytemuck::cast_slice(&bytes);
+    let n = 6.0f32;
+    // Voxel (x, y, z) is at index x + 6 * (y + 6 * z).
+    let want = |x: f32, y: f32, z: f32| (x + y + z + 1.5) / (3.0 * n);
+    assert!((v[1 + 6 * (2 + 6 * 3)] - want(1.0, 2.0, 3.0)).abs() < 1e-5, "{}", v[1 + 6 * (2 + 6 * 3)]);
+    assert!((v[5 + 6 * (0 + 6 * 4)] - want(5.0, 0.0, 4.0)).abs() < 1e-5);
+    assert!(path.with_extension("raw.txt").exists());
+}
+
+#[test]
 fn slice_grid_png_places_slices_and_levels() {
     use crate::export::{self, Format, Kind, Layout, Levels, Output, Settings};
     let Some(gpu) = gpu() else { return eprintln!("no GPU adapter; skipping") };

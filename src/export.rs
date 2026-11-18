@@ -18,6 +18,8 @@ pub enum Kind {
     /// All N slices laid out in one image.
     SliceGrid,
     Vdb,
+    /// All N slices as raw little-endian 32-bit floats (x fastest, then y, then z), plus a small text note.
+    Raw3d,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -107,13 +109,19 @@ impl Settings {
                 let (c, r) = self.grid();
                 Some((c as u64 * n, r as u64 * n))
             }
-            Kind::Vdb => None,
+            Kind::Vdb | Kind::Raw3d => None,
         }
+    }
+
+    /// 3D exports write a volume, not an image.
+    pub fn is_volume(&self) -> bool {
+        matches!(self.kind, Kind::Vdb | Kind::Raw3d)
     }
 
     pub fn extension(&self) -> &'static str {
         match (self.kind, self.format) {
             (Kind::Vdb, _) => "vdb",
+            (Kind::Raw3d, _) => "raw",
             (_, Format::Exr32) => "exr",
             _ => "png",
         }
@@ -133,6 +141,7 @@ impl Settings {
                 (w * h * self.channels() * bytes_per, w * h * self.channels() * (4 + bytes_per))
             }
             // Dense float leaves plus node overhead; evaluated 128³ at a time.
+            None if self.kind == Kind::Raw3d => (n * n * n * 4, 64 << 20),
             None => (n * n * n * 4 + (n * n * n / 512) * 65, 128 * 128 * 128 * 4 * 2),
         }
     }
@@ -153,8 +162,8 @@ impl Settings {
                 w.push(format!("{iw}×{ih} px is larger than most viewers and engines accept (16384)"));
             }
         }
-        if self.kind == Kind::Vdb && self.output == Output::Normal {
-            w.push("VDB export writes density only".into());
+        if self.is_volume() && self.output == Output::Normal {
+            w.push("3D volume exports write density only".into());
         }
         w
     }
@@ -328,6 +337,25 @@ pub type Progress = Arc<AtomicU32>;
 pub fn run(ev: &Evaluator, s: &Settings, range: (f32, f32), path: &Path, progress: &Progress) -> Result<String, String> {
     if s.res == 0 {
         return Err("resolution must be at least 1".into());
+    }
+    if s.kind == Kind::Raw3d {
+        use std::io::Write;
+        let n = s.res;
+        let mut w = std::io::BufWriter::new(std::fs::File::create(path).map_err(|e| e.to_string())?);
+        // As many slices per GPU round trip as fit in about 64 MB.
+        let per = ((64usize << 20) / (n as usize * n as usize * 4)).clamp(1, n as usize) as u32;
+        let mut z = 0;
+        while z < n {
+            let dz = per.min(n - z);
+            let v = ev.eval(n, [0, 0, z], [n, n, dz], false, None);
+            w.write_all(bytemuck::cast_slice(&v)).map_err(|e| e.to_string())?;
+            z += dz;
+            progress.store((z as f32 / n as f32 * 1000.0) as u32, Ordering::Relaxed);
+        }
+        w.flush().map_err(|e| e.to_string())?;
+        let note = format!("{n} x {n} x {n} float32 little-endian, x varies fastest, then y, then z. One tile of the graph; raw signed density values.\n");
+        std::fs::write(path.with_extension("raw.txt"), note).map_err(|e| e.to_string())?;
+        return Ok(format!("Exported {n}³ raw float volume to {}", path.display()));
     }
     if s.kind == Kind::Vdb {
         let n = s.res;

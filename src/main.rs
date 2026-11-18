@@ -356,6 +356,7 @@ impl App {
                 ui.selectable_value(v, Kind::Image2d, "2D image");
                 ui.selectable_value(v, Kind::SliceGrid, "3D slice grid");
                 ui.selectable_value(v, Kind::Vdb, "3D OpenVDB");
+                ui.selectable_value(v, Kind::Raw3d, "3D raw floats");
             });
             row(ui, &mut s.output, d.output, |ui, v| {
                 ui.selectable_value(v, Output::Density, "Density");
@@ -363,7 +364,7 @@ impl App {
             });
             let res_default = if s.kind == Kind::Image2d { 1024 } else { 128 };
             row(ui, &mut s.res, res_default, |ui, v| _ = ui.add(egui::DragValue::new(v).range(1..=16384).suffix(" px").speed(4.0)).on_hover_text("Texels per tile side"));
-            if s.kind != Kind::Vdb {
+            if !s.is_volume() {
                 row(ui, &mut s.format, d.format, |ui, v| {
                     ui.selectable_value(v, Format::Png8, "PNG 8-bit");
                     ui.selectable_value(v, Format::Png16, "PNG 16-bit");
@@ -385,9 +386,10 @@ impl App {
             match s.kind {
                 Kind::Image2d => _ = ui.weak(format!("Slice {} = {:.3}, from the slice view.", ["X", "Y", "Z"][self.pv.slice_axis as usize], self.pv.slice_pos)),
                 Kind::Vdb => _ = ui.weak("Float grid \"density\" with raw signed values, 1 tile = 1 unit."),
+                Kind::Raw3d => _ = ui.weak("Raw 32-bit floats, x fastest, then y, then z (a .raw.txt note is written next to it)."),
                 Kind::SliceGrid => {}
             }
-            if s.format == Format::Exr32 && s.kind != Kind::Vdb {
+            if s.format == Format::Exr32 && !s.is_volume() {
                 ui.weak("EXR keeps raw signed values.");
             }
             let (file, _) = s.estimate();
