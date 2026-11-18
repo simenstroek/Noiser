@@ -375,6 +375,43 @@ def math_op(b, op, operand):
     return b.math(MATH_OPS[fn], a, c)
 
 
+TETRA = [(1.0, -1.0, -1.0), (-1.0, -1.0, 1.0), (-1.0, 1.0, -1.0), (1.0, 1.0, 1.0)]
+
+
+def op_inputs(op):
+    """The op ids an op reads (operands are {"node": id}, position / field / vector are plain ids)."""
+    ids = set()
+    for key, value in op.items():
+        if isinstance(value, dict) and "node" in value:
+            ids.add(value["node"])
+        elif key in ("position", "field", "vector") and isinstance(value, int) and not isinstance(value, bool):
+            ids.add(value)
+    return ids
+
+
+def normal_op(b, op, ops, pos, emit):
+    """The normalized tetrahedral gradient of a float field: the ops upstream of `field` are built four times,
+    each with the position moved by a tetrahedron corner times e = 1e-3 (docs/noiser-format.md, `normal`)."""
+    if op["field"] is None:
+        return b.combine(0.0, 0.0, 0.0)
+    by_id = {o["id"]: o for o in ops}
+    needed, stack = set(), [op["field"]]
+    while stack:
+        i = stack.pop()
+        if i not in needed:
+            needed.add(i)
+            stack.extend(op_inputs(by_id[i]))
+    subset = [o for o in ops if o["id"] in needed]
+    total = None
+    for k in TETRA:
+        moved = b.vmath("ADD", pos, tuple(c * 1e-3 for c in k))
+        value = emit(subset, moved)[op["field"]]
+        term = b.vmath("SCALE", k, value)
+        total = term if total is None else b.vmath("ADD", total, term)
+    n = b.vmath("NORMALIZE", total)
+    return b.vmath("SCALE", n, -1.0) if op["flip"] else n
+
+
 def build(data, name, tree_type=GN):
     """Returns a node group with a Position (vector) input and a Density (float) output."""
     if data.get("format") != "noiser" or data.get("version") != 1:
@@ -386,86 +423,93 @@ def build(data, name, tree_type=GN):
     sock.default_input = "POSITION"  # behaves like a texture node: unconnected means the point's position
     sock.hide_value = True
     b = Builder(g)
-    out = {}
-    for op in data["ops"]:
-        kind = op["op"]
-        if kind == "position":
-            v = gin.outputs["Position"]
-        elif kind == "value":
-            if op["type"] == "vector":
-                v = b.combine(*op["value"])
+    def emit(ops, pos):
+        """Builds `ops` with `pos` as the position; returns {op id: socket}."""
+        out = {}
+        for op in ops:
+            kind = op["op"]
+            if kind == "position":
+                v = pos
+            elif kind == "value":
+                if op["type"] == "vector":
+                    v = b.combine(*op["value"])
+                else:
+                    vn = b.node("ShaderNodeValue")
+                    vn.outputs[0].default_value = op["value"]
+                    v = vn.outputs[0]
+            elif kind == "math":
+                operand = lambda x: out[x["node"]] if isinstance(x, dict) else (float(x),) * 3 if op["type"] == "vector" else float(x)
+                # Links convert like Blender's implicit conversions, which the format adopts.
+                v = math_op(b, op, operand)
+            elif kind == "remap":
+                fl = lambda x: out[x["node"]] if isinstance(x, dict) else float(x)
+                n = b.node("ShaderNodeMapRange", data_type="FLOAT", interpolation_type="LINEAR", clamp=bool(op["clamp"]))
+                for name, key in [("Value", "value"), ("From Min", "from_min"), ("From Max", "from_max"), ("To Min", "to_min"), ("To Max", "to_max")]:
+                    b.feed(n.inputs[name], fl(op[key]))
+                v = n.outputs[0]
+            elif kind == "mix":
+                fl = lambda x: out[x["node"]] if isinstance(x, dict) else float(x)
+                v = b.mix(fl(op["a"]), fl(op["b"]), fl(op["factor"]), clamp=bool(op["clamp"]))
+            elif kind == "curve":
+                if op["mode"] != "linear":
+                    raise Unsupported(f"{op['mode']} curves (Blender's Float Curve is a spline; only linear segments match)")
+                xs0 = [p[0] for p in op["points"]]
+                if len(xs0) < 2 or len(set(xs0)) < len(xs0):
+                    raise Unsupported("a curve needs two or more points with different x")
+                fl = lambda x: out[x["node"]] if isinstance(x, dict) else float(x)
+                n = b.node("ShaderNodeFloatCurve")
+                xs = [p[0] for p in op["points"]]
+                span = max(xs) - min(xs) or 1.0
+                m = n.mapping
+                m.use_clip = False
+                m.extend = "HORIZONTAL"  # hold the end values, as the format says
+                curve = m.curves[0]
+                while len(curve.points) > len(op["points"]):
+                    curve.points.remove(curve.points[-1])
+                while len(curve.points) < len(op["points"]):
+                    curve.points.new(0.5, 0.5)
+                for p, (x, y) in zip(curve.points, op["points"]):
+                    p.location = (x, y)
+                    p.handle_type = "VECTOR"
+                m.update()
+                b.feed(n.inputs[0], 1.0)
+                b.feed(n.inputs[1], fl(op["value"]))
+                v = n.outputs[0]
+            elif kind == "separate":
+                n = b.node("ShaderNodeSeparateXYZ")
+                if op["vector"] is not None:
+                    g.links.new(out[op["vector"]], n.inputs[0])
+                v = n.outputs["XYZ".index(op["component"].upper())]
+            elif kind == "combine":
+                fl = lambda x: out[x["node"]] if isinstance(x, dict) else float(x)
+                v = b.combine(fl(op["x"]), fl(op["y"]), fl(op["z"]))
+            elif kind == "grid":
+                # The format's formula, node by node: f = fract(q n); d = (f - 0.5) / n (centre) or min(f, 1 - f) / n
+                # (corner); the result is |d| / (0.5 |1 / n|) * 2 - 1.
+                q = pos if op["position"] is None else out[op["position"]]
+                nx, ny, nz = [float(c) for c in op["counts"]]
+                f = b.vmath("FRACTION", b.vmath("MULTIPLY", q, (nx, ny, nz)))
+                if op["reference"] == "corner":
+                    d = b.vmath("MINIMUM", f, b.vmath("SUBTRACT", (1.0, 1.0, 1.0), f))
+                else:
+                    d = b.vmath("SUBTRACT", f, (0.5, 0.5, 0.5))
+                d = b.vmath("DIVIDE", d, (nx, ny, nz))
+                length = b.vmath("LENGTH", d, out=1)
+                inv = (1 / nx, 1 / ny, 1 / nz)
+                scale = 2.0 / (0.5 * (inv[0] ** 2 + inv[1] ** 2 + inv[2] ** 2) ** 0.5)
+                v = b.math("MULTIPLY_ADD", length, scale)
+                v.node.inputs[2].default_value = -1.0
+            elif kind == "noise":
+                q = pos if op["position"] is None else out[op["position"]]
+                v = noise(b, op, q)
+            elif kind == "normal":
+                v = normal_op(b, op, ops, pos, emit)
             else:
-                vn = b.node("ShaderNodeValue")
-                vn.outputs[0].default_value = op["value"]
-                v = vn.outputs[0]
-        elif kind == "math":
-            operand = lambda x: out[x["node"]] if isinstance(x, dict) else (float(x),) * 3 if op["type"] == "vector" else float(x)
-            # Links convert like Blender's implicit conversions, which the format adopts.
-            v = math_op(b, op, operand)
-        elif kind == "remap":
-            fl = lambda x: out[x["node"]] if isinstance(x, dict) else float(x)
-            n = b.node("ShaderNodeMapRange", data_type="FLOAT", interpolation_type="LINEAR", clamp=bool(op["clamp"]))
-            for name, key in [("Value", "value"), ("From Min", "from_min"), ("From Max", "from_max"), ("To Min", "to_min"), ("To Max", "to_max")]:
-                b.feed(n.inputs[name], fl(op[key]))
-            v = n.outputs[0]
-        elif kind == "mix":
-            fl = lambda x: out[x["node"]] if isinstance(x, dict) else float(x)
-            v = b.mix(fl(op["a"]), fl(op["b"]), fl(op["factor"]), clamp=bool(op["clamp"]))
-        elif kind == "curve":
-            if op["mode"] != "linear":
-                raise Unsupported(f"{op['mode']} curves (Blender's Float Curve is a spline; only linear segments match)")
-            xs0 = [p[0] for p in op["points"]]
-            if len(xs0) < 2 or len(set(xs0)) < len(xs0):
-                raise Unsupported("a curve needs two or more points with different x")
-            fl = lambda x: out[x["node"]] if isinstance(x, dict) else float(x)
-            n = b.node("ShaderNodeFloatCurve")
-            xs = [p[0] for p in op["points"]]
-            span = max(xs) - min(xs) or 1.0
-            m = n.mapping
-            m.use_clip = False
-            m.extend = "HORIZONTAL"  # hold the end values, as the format says
-            curve = m.curves[0]
-            while len(curve.points) > len(op["points"]):
-                curve.points.remove(curve.points[-1])
-            while len(curve.points) < len(op["points"]):
-                curve.points.new(0.5, 0.5)
-            for p, (x, y) in zip(curve.points, op["points"]):
-                p.location = (x, y)
-                p.handle_type = "VECTOR"
-            m.update()
-            b.feed(n.inputs[0], 1.0)
-            b.feed(n.inputs[1], fl(op["value"]))
-            v = n.outputs[0]
-        elif kind == "separate":
-            n = b.node("ShaderNodeSeparateXYZ")
-            if op["vector"] is not None:
-                g.links.new(out[op["vector"]], n.inputs[0])
-            v = n.outputs["XYZ".index(op["component"].upper())]
-        elif kind == "combine":
-            fl = lambda x: out[x["node"]] if isinstance(x, dict) else float(x)
-            v = b.combine(fl(op["x"]), fl(op["y"]), fl(op["z"]))
-        elif kind == "grid":
-            # The format's formula, node by node: f = fract(q n); d = (f - 0.5) / n (centre) or min(f, 1 - f) / n
-            # (corner); the result is |d| / (0.5 |1 / n|) * 2 - 1.
-            q = gin.outputs["Position"] if op["position"] is None else out[op["position"]]
-            nx, ny, nz = [float(c) for c in op["counts"]]
-            f = b.vmath("FRACTION", b.vmath("MULTIPLY", q, (nx, ny, nz)))
-            if op["reference"] == "corner":
-                d = b.vmath("MINIMUM", f, b.vmath("SUBTRACT", (1.0, 1.0, 1.0), f))
-            else:
-                d = b.vmath("SUBTRACT", f, (0.5, 0.5, 0.5))
-            d = b.vmath("DIVIDE", d, (nx, ny, nz))
-            length = b.vmath("LENGTH", d, out=1)
-            inv = (1 / nx, 1 / ny, 1 / nz)
-            scale = 2.0 / (0.5 * (inv[0] ** 2 + inv[1] ** 2 + inv[2] ** 2) ** 0.5)
-            v = b.math("MULTIPLY_ADD", length, scale)
-            v.node.inputs[2].default_value = -1.0
-        elif kind == "noise":
-            q = gin.outputs["Position"] if op["position"] is None else out[op["position"]]
-            v = noise(b, op, q)
-        else:
-            raise Unsupported(f"{kind} op")
-        out[op["id"]] = v
+                raise Unsupported(f"{kind} op")
+            out[op["id"]] = v
+        return out
+
+    out = emit(data["ops"], gin.outputs["Position"])
     density = data["outputs"]["density"]
     if density is None:
         gout.inputs["Density"].default_value = 0.0

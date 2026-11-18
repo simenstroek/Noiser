@@ -900,7 +900,7 @@ fn write_random_noiser_files() {
             "noise" => o["kind"] == "perlin" || o["kind"] == "white" || o["kind"] == "worley" || o["kind"] == "simplex",
             "position" | "value" | "math" | "remap" | "mix" | "separate" | "combine" => true,
             "curve" => o["mode"] == "linear",
-            "grid" => true,
+            "grid" | "normal" => true,
             _ => false,
         });
         if !ok || file["outputs"]["density"].is_null() {
