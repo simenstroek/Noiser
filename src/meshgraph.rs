@@ -187,6 +187,9 @@ pub struct MeshCache {
     meshes: BTreeMap<String, std::sync::Arc<LoadedMesh>>,
 }
 
+/// Set by the Mesh tab's Cancel button; a run stops before its next node. One run at a time, so one flag will do.
+pub static CANCEL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 pub struct Runner<'a> {
     pub device: &'a eframe::wgpu::Device,
     pub queue: &'a eframe::wgpu::Queue,
@@ -365,6 +368,9 @@ impl Runner<'_> {
     fn value(&mut self, original: &Graph, lowered: &Graph, id: NodeId, memo: &mut BTreeMap<NodeId, Value>, fields: &mut Fields) -> Result<Value, String> {
         if let Some(v) = memo.get(&id) {
             return Ok(v.clone());
+        }
+        if CANCEL.load(std::sync::atomic::Ordering::Relaxed) {
+            return Err("cancelled".into());
         }
         let node = original.nodes.get(&id).ok_or("a wire reads a missing node")?;
         let input = |port: usize| original.input_from(id, port).ok_or_else(|| format!("node {id} has input {} unconnected", port + 1));

@@ -296,6 +296,7 @@ impl MeshWorkspace {
             }));
             let _ = tx.send(result.unwrap_or_else(|_| Err("the preview crashed".into())));
         });
+        crate::meshgraph::CANCEL.store(false, std::sync::atomic::Ordering::Relaxed);
         self.log.clear();
         self.written.clear();
         self.thumbnails.clear();
@@ -326,6 +327,7 @@ impl MeshWorkspace {
             }
             let _ = tx.send(if failures.is_empty() { Ok(written) } else { Err(format!("{} of {total} run(s) failed: {}", failures.len(), failures[0])) });
         });
+        crate::meshgraph::CANCEL.store(false, std::sync::atomic::Ordering::Relaxed);
         self.log.clear();
         self.written.clear();
         self.job = Some(RunJob { progress, log, done: rx });
@@ -509,6 +511,9 @@ impl crate::App {
                         let (d, q, g) = (self.rs.device.clone(), self.rs.queue.clone(), self.graph_for_run());
                         self.mesh_ws.start(g, d, q, files.into_iter().map(Some).collect());
                     }
+                }
+                if ui.add_enabled(running, egui::Button::new("Cancel")).on_hover_text("Stops the run before its next node (a node that is already working finishes first).").clicked() {
+                    crate::meshgraph::CANCEL.store(true, std::sync::atomic::Ordering::Relaxed);
                 }
                 ui.add(egui::DragValue::new(&mut self.mesh_ws.seed).prefix("seed "));
             });
