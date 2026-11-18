@@ -176,11 +176,6 @@ impl MathOp {
         }
     }
 
-    /// Smooth min and max take a third input, the blend width.
-    pub fn is_smooth(self) -> bool {
-        matches!(self, MathOp::SmoothMin | MathOp::SmoothMax)
-    }
-
     /// The ops with a third input: the blend width of smooth min/max, the factor of Lerp, the value of Inverse lerp.
     pub fn is_ternary(self) -> bool {
         matches!(self, MathOp::SmoothMin | MathOp::SmoothMax | MathOp::Lerp | MathOp::InverseLerp)

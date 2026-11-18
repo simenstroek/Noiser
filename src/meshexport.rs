@@ -377,13 +377,14 @@ pub struct FileJob<'a> {
     /// The distance grid: samples along the longest side, and padding in normalized units.
     pub grid_res: u32,
     pub grid_pad: f32,
+    pub combine: crate::meshsdf::Combine,
 }
 
 impl FileJob<'_> {
     /// Loads `input`, displaces it like the preview would and writes the result to `output`.
     pub fn run(&self, input: &Path, output: &Path, progress: &Progress) -> Result<String, String> {
         let (mesh, norm) = crate::meshformats::load(input)?.normalized();
-        let sdf = crate::meshsdf::MeshSdf::build(&mesh, self.grid_res, self.grid_pad, &Default::default());
+        let sdf = crate::meshsdf::MeshSdf::build_with(&mesh, self.grid_res, self.grid_pad, &Default::default(), self.combine);
         let (_texture, view) = sdf.upload(self.device, self.queue); // keep the texture alive for the whole job
         let (lo, hi) = mesh.bounds();
         let ev = MeshEvaluator::new(self.device, self.queue, self.graph, self.seed, view, sdf.origin, sdf.voxel, (lo, hi), self.d.mask.count > 0)?;

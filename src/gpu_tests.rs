@@ -1668,6 +1668,7 @@ mod batch_tests {
                 settings: Settings { res: 48, format: Format::Obj, cull: 0.0 },
                 grid_res: 48,
                 grid_pad: 0.5,
+                combine: Default::default(),
             };
             let out = dir.join(out);
             job.run(&dir.join(input), &out, &Default::default()).unwrap();
@@ -1685,7 +1686,7 @@ mod batch_tests {
         let worst = a.positions.iter().zip(&big.positions).map(|(p, q)| (0..3).map(|k| (p[k] * 3.0 - q[k]).abs()).fold(0.0, f32::max)).fold(0.0, f32::max);
         assert!(worst < 0.02, "scaled mesh differs by {worst}");
         // A missing file is an error, not a panic.
-        let job = FileJob { device: &gpu.device, queue: &gpu.queue, graph: &noise, seed: 0, d: Displace { amount: 0.1, tile_size: 1.0, prim_size: 1.0, mask: crate::meshmask::PackedMask::NONE }, settings: Settings::default(), grid_res: 32, grid_pad: 0.5 };
+        let job = FileJob { device: &gpu.device, queue: &gpu.queue, graph: &noise, seed: 0, d: Displace { amount: 0.1, tile_size: 1.0, prim_size: 1.0, mask: crate::meshmask::PackedMask::NONE }, settings: Settings::default(), grid_res: 32, grid_pad: 0.5, combine: Default::default() };
         assert!(job.run(&dir.join("nope.obj"), &dir.join("x.obj"), &Default::default()).is_err());
     }
 }

@@ -165,6 +165,8 @@ struct App {
     /// Grid settings for the next bake (see the Mesh section of the panel).
     mesh_res: u32,
     mesh_pad: f32,
+    /// How the separate parts of an imported mesh are combined (see `meshsdf::Combine`).
+    mesh_combine: meshsdf::Combine,
     mesh_export_open: bool,
     mesh_export: meshexport::Settings,
     mesh_export_job: Option<meshapp::MeshExportJob>,
@@ -308,6 +310,7 @@ impl App {
             mesh_gen: 0,
             mesh_res: meshapp::DEFAULT_RES,
             mesh_pad: meshapp::DEFAULT_PAD,
+            mesh_combine: meshsdf::Combine::default(),
             mesh_export_open: false,
             mesh_export: meshexport::Settings::default(),
             mesh_export_job: None,

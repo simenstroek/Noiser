@@ -80,7 +80,7 @@ tiling 3D texture for the preview, and the nodes it covers get a green outline. 
 **Meshes.** Import a low-resolution OBJ, PLY or STL (File menu, drag and drop, or `noiser.exe --mesh file.obj`) and it appears as the
 *Mesh* shape in the 3D view, shaped live by your graph. *Export displaced mesh* then writes a high-resolution
 OBJ or PLY of the same surface (as many samples along the longest side as you ask for), with small floating
-bits removed and the mesh's own size and position restored. The mesh can be made of overlapping parts. A
+bits removed and the mesh's own size and position restored. The mesh can be made of overlapping parts, and when it has several separate ones the Mesh tab says how they combine: *union* (the default), *intersect* (only where all overlap, for interior spaces), or *smooth union / smooth intersect* with a blend width (`--combine MODE --combine-smooth W` headless). A
 *displacement mask* varies how strongly the noise acts on each part of the mesh, as a weighted sum of terms: a ramp
 along an axis, which way the surface faces, occlusion, thickness, curvature, and a channel of the vertex colours
 painted on the mesh (OBJ `v x y z r g b` lines or PLY red/green/blue). See `PLAN.md` for how it works and

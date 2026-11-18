@@ -380,6 +380,166 @@ impl MeshQuery {
     }
 }
 
+/// How the separate parts of a mesh (pieces that share no vertices) are put together.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CombineMode {
+    /// Solid where any part is (a single winding-number query over the whole mesh).
+    #[default]
+    Union,
+    /// Solid only where every part is: overlaps become the shape, hollows stay hollow.
+    Intersect,
+    SmoothUnion,
+    SmoothIntersect,
+}
+
+impl CombineMode {
+    pub const ALL: [CombineMode; 4] = [CombineMode::Union, CombineMode::Intersect, CombineMode::SmoothUnion, CombineMode::SmoothIntersect];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            CombineMode::Union => "Union (min)",
+            CombineMode::Intersect => "Intersect (max)",
+            CombineMode::SmoothUnion => "Smooth union (smooth min)",
+            CombineMode::SmoothIntersect => "Smooth intersect (smooth max)",
+        }
+    }
+
+    pub fn is_smooth(self) -> bool {
+        matches!(self, CombineMode::SmoothUnion | CombineMode::SmoothIntersect)
+    }
+
+    /// The name used on the command line.
+    pub fn file_name(self) -> &'static str {
+        match self {
+            CombineMode::Union => "union",
+            CombineMode::Intersect => "intersect",
+            CombineMode::SmoothUnion => "smooth-union",
+            CombineMode::SmoothIntersect => "smooth-intersect",
+        }
+    }
+}
+
+/// The part-combining settings: the mode and, for the smooth ones, the blend width in normalized mesh units.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Combine {
+    pub mode: CombineMode,
+    pub smooth: f32,
+}
+
+impl Default for Combine {
+    fn default() -> Self {
+        Combine { mode: CombineMode::Union, smooth: 0.1 }
+    }
+}
+
+impl Combine {
+    fn pair(self, a: f32, b: f32) -> f32 {
+        let smin = |a: f32, b: f32| {
+            let k = self.smooth;
+            if k <= 0.0 {
+                return a.min(b);
+            }
+            let h = (k - (a - b).abs()).max(0.0) / k;
+            a.min(b) - h * h * h * k / 6.0
+        };
+        match self.mode {
+            CombineMode::Union => a.min(b),
+            CombineMode::Intersect => a.max(b),
+            CombineMode::SmoothUnion => smin(a, b),
+            CombineMode::SmoothIntersect => -smin(-a, -b),
+        }
+    }
+}
+
+/// Splits a mesh into its connected parts (triangles linked by shared vertices).
+pub fn split_parts(mesh: &Mesh) -> Vec<Mesh> {
+    fn find(parent: &mut [u32], mut i: u32) -> u32 {
+        while parent[i as usize] != i {
+            parent[i as usize] = parent[parent[i as usize] as usize];
+            i = parent[i as usize];
+        }
+        i
+    }
+    let mut parent: Vec<u32> = (0..mesh.positions.len() as u32).collect();
+    for t in &mesh.triangles {
+        let a = find(&mut parent, t[0]);
+        let b = find(&mut parent, t[1]);
+        parent[b as usize] = a;
+        let c = find(&mut parent, t[2]);
+        parent[c as usize] = a;
+    }
+    let mut index_of_root = std::collections::HashMap::new();
+    // Each part with its vertex remap (u32::MAX = not used yet).
+    let mut parts: Vec<(Mesh, Vec<u32>)> = Vec::new();
+    for t in &mesh.triangles {
+        let root = find(&mut parent, t[0]);
+        let next = parts.len();
+        let pi = *index_of_root.entry(root).or_insert(next);
+        if pi == next {
+            parts.push((Mesh::default(), vec![u32::MAX; mesh.positions.len()]));
+        }
+        let (part, remap) = &mut parts[pi];
+        let tri = t.map(|v| {
+            if remap[v as usize] == u32::MAX {
+                remap[v as usize] = part.positions.len() as u32;
+                part.positions.push(mesh.positions[v as usize]);
+                if !mesh.colors.is_empty() {
+                    part.colors.push(mesh.colors[v as usize]);
+                }
+            }
+            remap[v as usize]
+        });
+        part.triangles.push(tri);
+    }
+    parts.into_iter().map(|(m, _)| m).collect()
+}
+
+/// One query for the whole mesh, or one per part when parts are combined with something other than a union.
+enum Sampler {
+    Whole(MeshQuery),
+    Parts(Vec<MeshQuery>, Combine),
+}
+
+impl Sampler {
+    fn new(mesh: &Mesh, combine: Combine) -> Sampler {
+        if combine.mode != CombineMode::Union {
+            let parts = split_parts(mesh);
+            if parts.len() > 1 {
+                return Sampler::Parts(parts.iter().map(MeshQuery::new).collect(), combine);
+            }
+        }
+        Sampler::Whole(MeshQuery::new(mesh))
+    }
+
+    fn open(&self) -> bool {
+        match self {
+            Sampler::Whole(q) => q.open,
+            Sampler::Parts(qs, _) => qs.iter().any(|q| q.open),
+        }
+    }
+
+    /// The combined distance, and the vertex colour of the part whose surface is nearest.
+    fn at(&self, p: V3) -> (f32, V3) {
+        match self {
+            Sampler::Whole(q) => q.signed_distance_and_color(p),
+            Sampler::Parts(qs, combine) => {
+                let mut acc: Option<(f32, V3, f32)> = None;
+                for q in qs {
+                    let (d, c) = q.signed_distance_and_color(p);
+                    acc = Some(match acc {
+                        None => (d, c, d.abs()),
+                        Some((ad, ac, near)) => {
+                            let (c, near) = if d.abs() < near { (c, d.abs()) } else { (ac, near) };
+                            (combine.pair(ad, d), c, near)
+                        }
+                    });
+                }
+                acc.map_or((f32::INFINITY, [0.0; 3]), |(d, c, _)| (d, c))
+            }
+        }
+    }
+}
+
 /// A signed distance grid. Texel (i, j, k) has its centre at `origin + (i + 0.5, j + 0.5, k + 0.5) × voxel`
 /// (the layout of a 3D texture), x varying fastest.
 pub struct MeshSdf {
@@ -396,13 +556,19 @@ pub struct MeshSdf {
 impl MeshSdf {
     /// Bakes the distance to `mesh` (already normalized) on a grid with `res` voxels along the
     /// longest side of its bounds, padded by `pad` on every side. `progress` counts finished slabs.
+    #[cfg(test)]
     pub fn build(mesh: &Mesh, res: u32, pad: f32, progress: &AtomicU32) -> MeshSdf {
+        Self::build_with(mesh, res, pad, progress, Combine::default())
+    }
+
+    /// Like `build`, with the parts of the mesh combined as `combine` says.
+    pub fn build_with(mesh: &Mesh, res: u32, pad: f32, progress: &AtomicU32, combine: Combine) -> MeshSdf {
         let (lo, hi) = mesh.bounds();
         let origin = [lo[0] - pad, lo[1] - pad, lo[2] - pad];
         let extent = [hi[0] - lo[0] + 2.0 * pad, hi[1] - lo[1] + 2.0 * pad, hi[2] - lo[2] + 2.0 * pad];
         let voxel = extent[0].max(extent[1]).max(extent[2]) / res.max(2) as f32;
         let dims: [u32; 3] = std::array::from_fn(|a| ((extent[a] / voxel).ceil() as u32).max(1));
-        let query = MeshQuery::new(mesh);
+        let query = Sampler::new(mesh, combine);
         let (nx, ny) = (dims[0] as usize, dims[1] as usize);
         let mut data = vec![0.0f32; nx * ny * dims[2] as usize];
         let has_colors = !mesh.colors.is_empty();
@@ -412,7 +578,7 @@ impl MeshSdf {
             for j in 0..ny {
                 for i in 0..nx {
                     let p = [origin[0] + (i as f32 + 0.5) * voxel, origin[1] + (j as f32 + 0.5) * voxel, origin[2] + (k as f32 + 0.5) * voxel];
-                    let (d, c) = query.signed_distance_and_color(p);
+                    let (d, c) = query.at(p);
                     slab[j * nx + i] = d;
                     if let Some(cs) = color_slab.as_deref_mut() {
                         cs[j * nx + i] = c;
@@ -426,7 +592,7 @@ impl MeshSdf {
         } else {
             data.par_chunks_mut(nx * ny).enumerate().for_each(|(k, slab)| bake(k, slab, None));
         }
-        MeshSdf { dims, origin, voxel, data, colors: has_colors.then_some(colors), open: query.open }
+        MeshSdf { dims, origin, voxel, data, colors: has_colors.then_some(colors), open: query.open() }
     }
 
     /// Puts the grid on the GPU as an R32Float 3D texture.
@@ -595,6 +761,28 @@ mod tests {
             assert_eq!(q.signed_distance(p) < 0.0, da < 0.0 || db < 0.0, "{p:?}: balls say {da} and {db}");
         }
         assert!(checked > 2000);
+    }
+
+    #[test]
+    fn parts_combine_as_union_intersection_and_smooth_blends() {
+        let (ca, cb) = ([-0.5, 0.0, 0.0], [0.5, 0.0, 0.0]);
+        let two = merged(moved(shapes::icosphere(1.0, 3), ca), moved(shapes::icosphere(1.0, 3), cb));
+        assert_eq!(split_parts(&two).len(), 2);
+        let sdf = |mode, smooth| MeshSdf::build_with(&two, 48, 0.5, &AtomicU32::new(0), Combine { mode, smooth });
+        let (union, inter) = (sdf(CombineMode::Union, 0.1), sdf(CombineMode::Intersect, 0.1));
+        let (smin, smax) = (sdf(CombineMode::SmoothUnion, 0.5), sdf(CombineMode::SmoothIntersect, 0.5));
+        let only_a = [-1.3, 0.0, 0.0]; // inside one ball only
+        let both = [0.0, 0.0, 0.0];
+        assert!(union.sample(only_a) < 0.0 && inter.sample(only_a) > 0.0, "a point in one ball: in the union, not the intersection");
+        assert!(union.sample(both) < 0.0 && inter.sample(both) < 0.0);
+        // The smooth blends sit within k / 6 of the hard ones (below for min, above for max).
+        for p in cheap_points(200, -1.5, 1.5) {
+            let (da, db) = (length(sub(p, ca)) - 1.0, length(sub(p, cb)) - 1.0);
+            let (u, i) = (da.min(db), da.max(db));
+            assert!((inter.sample(p) - i).abs() < 0.05, "intersection at {p:?}");
+            assert!(smin.sample(p) <= u + 0.05 && smin.sample(p) >= u - 0.5 / 6.0 - 0.05, "smooth min at {p:?}");
+            assert!(smax.sample(p) >= i - 0.05 && smax.sample(p) <= i + 0.5 / 6.0 + 0.05, "smooth max at {p:?}");
+        }
     }
 
     #[test]

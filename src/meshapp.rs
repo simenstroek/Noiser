@@ -4,7 +4,7 @@
 
 use crate::mesh::{Mesh, Normalization};
 use crate::meshexport::{self, Displace, FileJob, Format, Job, MeshEvaluator, SeedMode};
-use crate::meshsdf::MeshSdf;
+use crate::meshsdf::{Combine, CombineMode, MeshSdf};
 use crate::{App, view};
 use eframe::{egui, wgpu};
 use std::path::PathBuf;
@@ -43,6 +43,9 @@ pub struct MeshState {
     /// The settings the grid was baked with.
     pub res: u32,
     pub pad: f32,
+    pub combine: Combine,
+    /// How many separate pieces the mesh has (the combine setting only matters above one).
+    pub parts: usize,
 }
 
 /// A distance grid being baked on a worker thread.
@@ -58,6 +61,8 @@ struct Baked {
     sdf: MeshSdf,
     res: u32,
     pad: f32,
+    combine: Combine,
+    parts: usize,
     /// A newly loaded file (show it) rather than a rebake of the current one.
     new_file: bool,
 }
@@ -65,7 +70,7 @@ struct Baked {
 impl App {
     /// Loads an OBJ and bakes its distance grid, without blocking the UI.
     pub fn start_mesh_load(&mut self, path: PathBuf) {
-        let (res, pad) = (self.mesh_res, self.mesh_pad);
+        let (res, pad, combine) = (self.mesh_res, self.mesh_pad, self.mesh_combine);
         let name = path.file_stem().map_or("mesh".into(), |n| n.to_string_lossy().into_owned());
         let (tx, rx) = mpsc::channel();
         let label = format!("Loading {name}…");
@@ -74,8 +79,9 @@ impl App {
                 let (normalized, norm) = mesh.normalized();
                 // Open sheets (terrains) need a finer grid to look right; a default setting is raised for them.
                 let res = if res == DEFAULT_RES && crate::meshsdf::MeshQuery::new(&normalized).is_open() { open_mesh_res(&normalized, pad) } else { res };
-                let sdf = MeshSdf::build(&normalized, res, pad, &AtomicU32::new(0));
-                Baked { name, normalized: Arc::new(normalized), norm, sdf, res, pad, new_file: true }
+                let parts = crate::meshsdf::split_parts(&normalized).len();
+                let sdf = MeshSdf::build_with(&normalized, res, pad, &AtomicU32::new(0), combine);
+                Baked { name, normalized: Arc::new(normalized), norm, sdf, res, pad, combine, parts, new_file: true }
             });
             let _ = tx.send(baked);
         });
@@ -85,13 +91,13 @@ impl App {
     /// Bakes the current mesh again at the resolution and padding now set in the panel.
     pub fn start_mesh_rebake(&mut self) {
         let Some(m) = &self.mesh else { return };
-        let (res, pad) = (self.mesh_res, self.mesh_pad);
+        let (res, pad, combine, parts) = (self.mesh_res, self.mesh_pad, self.mesh_combine, m.parts);
         let (name, normalized, norm) = (m.name.clone(), m.normalized.clone(), m.norm);
         let (tx, rx) = mpsc::channel();
         let label = format!("Rebuilding the distance grid of {name}…");
         std::thread::spawn(move || {
-            let sdf = MeshSdf::build(&normalized, res, pad, &AtomicU32::new(0));
-            let _ = tx.send(Ok(Baked { name, normalized, norm, sdf, res, pad, new_file: false }));
+            let sdf = MeshSdf::build_with(&normalized, res, pad, &AtomicU32::new(0), combine);
+            let _ = tx.send(Ok(Baked { name, normalized, norm, sdf, res, pad, combine, parts, new_file: false }));
         });
         self.mesh_job = Some(MeshJob { label, done: rx });
     }
@@ -116,7 +122,7 @@ impl App {
         let (texture, view) = b.sdf.upload(&self.rs.device, &self.rs.queue);
         self.status = format!("{}: {} triangles, distance grid {nx}×{ny}×{nz}", b.name, b.normalized.triangles.len());
         let bounds = b.normalized.bounds();
-        self.mesh = Some(MeshState { name: b.name, normalized: b.normalized, norm: b.norm, bounds, sdf: Arc::new(b.sdf), view, _texture: texture, res: b.res, pad: b.pad });
+        self.mesh = Some(MeshState { name: b.name, normalized: b.normalized, norm: b.norm, bounds, sdf: Arc::new(b.sdf), view, _texture: texture, res: b.res, pad: b.pad, combine: b.combine, parts: b.parts });
         self.mesh_gen += 1;
         if b.new_file {
             self.pv.prim = MESH_PRIM;
@@ -150,7 +156,7 @@ impl App {
         };
         let reach = view::push_range(self.graph.density_range(), self.pv.amount, self.mesh_mask.range());
         let reach = reach.0.abs().max(reach.1.abs());
-        let (name, tris, dims, grid_res, grid_pad) = (m.name.clone(), m.normalized.triangles.len(), m.sdf.dims, m.res, m.pad);
+        let (name, tris, dims, grid_res, grid_pad, baked_combine, parts) = (m.name.clone(), m.normalized.triangles.len(), m.sdf.dims, m.res, m.pad, m.combine, m.parts);
         ui.label(format!("{name}: {tris} triangles"));
         ui.weak(format!("distance grid {}×{}×{}", dims[0], dims[1], dims[2]));
         if self.mesh.as_ref().is_some_and(|m| m.sdf.open) {
@@ -159,7 +165,22 @@ impl App {
         let max_res = if self.mesh.as_ref().is_some_and(|m| m.sdf.open) { 768 } else { 384 };
         crate::row(ui, &mut self.mesh_res, DEFAULT_RES, |ui, v| _ = ui.add(egui::Slider::new(v, 32..=max_res).text("grid resolution")));
         crate::row(ui, &mut self.mesh_pad, DEFAULT_PAD, |ui, v| _ = ui.add(egui::Slider::new(v, 0.1..=2.0).text("grid padding")));
-        if (self.mesh_res, self.mesh_pad) != (grid_res, grid_pad) && self.mesh_job.is_none() && ui.button("Rebuild distance grid").clicked() {
+        if parts > 1 {
+            ui.weak(format!("{parts} separate parts. How they combine decides what counts as inside:"));
+            crate::row(ui, &mut self.mesh_combine.mode, CombineMode::Union, |ui, v| {
+                egui::ComboBox::from_id_salt("combine mode").selected_text(v.label()).show_ui(ui, |ui| {
+                    for m in CombineMode::ALL {
+                        ui.selectable_value(v, m, m.label());
+                    }
+                });
+            });
+            if self.mesh_combine.mode.is_smooth() {
+                crate::row(ui, &mut self.mesh_combine.smooth, Combine::default().smooth, |ui, v| _ = ui.add(egui::Slider::new(v, 0.0..=0.5).text("blend width")));
+            }
+            ui.weak("Union fills every part; Intersect keeps only where all parts overlap (interior spaces); the smooth ones round the seams.");
+        }
+        let combine_changed = parts > 1 && (self.mesh_combine.mode != baked_combine.mode || (self.mesh_combine.mode.is_smooth() && self.mesh_combine.smooth != baked_combine.smooth));
+        if ((self.mesh_res, self.mesh_pad) != (grid_res, grid_pad) || combine_changed) && self.mesh_job.is_none() && ui.button("Rebuild distance grid").clicked() {
             self.start_mesh_rebake();
         }
         // The displaced surface can only move as far as the grid extends past the mesh.
@@ -404,7 +425,7 @@ impl App {
         let (graph, base, mode, var) = (self.graph.clone(), self.pv.seed, self.batch_seeds, self.batch_amount_var);
         let d = Displace { amount: self.pv.amount, tile_size: self.pv.tile_size, prim_size: self.pv.prim_size, mask: self.mesh_mask.pack() };
         let settings = self.mesh_export.clone();
-        let (grid_res, grid_pad) = (self.mesh_res, self.mesh_pad);
+        let (grid_res, grid_pad, combine) = (self.mesh_res, self.mesh_pad, self.mesh_combine);
         let (device, queue) = (self.rs.device.clone(), self.rs.queue.clone());
         let index = Arc::new(AtomicU32::new(0));
         let file_progress = meshexport::Progress::default();
@@ -425,7 +446,7 @@ impl App {
                 let label = if mode == SeedMode::Same { stem.clone() } else { format!("{stem}_seed{seed}") };
                 let output = unique_path(&dir, &format!("{label}_displaced"), settings.format.extension());
                 let d = Displace { amount: d.amount * meshexport::amount_factor(base, i, var), ..d };
-                let job = FileJob { device: &device, queue: &queue, graph: &graph, seed, d, settings: settings.clone(), grid_res, grid_pad };
+                let job = FileJob { device: &device, queue: &queue, graph: &graph, seed, d, settings: settings.clone(), grid_res, grid_pad, combine };
                 // One bad file (or a GPU error inside it) must not stop the rest.
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| job.run(input, &output, &fp)));
                 match result {
