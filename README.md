@@ -97,7 +97,7 @@ quarter) and a march step limit; none of them affect exports.
 | | Drag from a pin to connect; drag a connected input away to disconnect; drop a wire on empty space to pick a node for it |
 | | | Delete removes the selection, Ctrl+D duplicates it at the cursor, Ctrl+C / Ctrl+V copy and paste, M mutes, F / Home frame, Ctrl+A selects all; drop a lone node on a wire to splice it in; Ctrl+S / Ctrl+O save and open |
 | 3D view | Drag orbits, scroll zooms |
-| Slice view | Scroll moves the slice |
+| Slice view | Scroll moves the slice; hovering shows the value under the pointer |
 
 ## Project docs
 
@@ -108,4 +108,4 @@ quarter) and a march step limit; none of them affect exports.
 ## Roadmap
 
 Ideas: vertex-colour masks for meshes, exposed graph parameters for batch work, shader-code export of the density
-function, a value readout in the slice view. See `PLAN.md` for the details.
+function. See `PLAN.md` for the details.

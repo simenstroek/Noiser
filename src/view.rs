@@ -160,6 +160,11 @@ pub struct Gpu {
     raymarch_cloud: wgpu::RenderPipeline,
     slice_cs: wgpu::ComputePipeline,
     slice_fs: wgpu::RenderPipeline,
+    /// CPU copy of the slice values, read back only while the pointer is over the slice view (for the value readout).
+    slice_read: wgpu::Buffer,
+    slice_state: Arc<AtomicU8>,
+    slice_cpu: Arc<std::sync::Mutex<Vec<f32>>>,
+    slice_wanted: Arc<std::sync::atomic::AtomicBool>,
     blit: wgpu::RenderPipeline,
     blit_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
@@ -238,6 +243,40 @@ impl Gpu {
     }
 
     /// Evaluates the graph over the slice and its min/max.
+    /// Advances the slice readback (map, copy to `slice_cpu`, unmap); call once per frame.
+    pub fn collect_slice(&self) {
+        match self.slice_state.load(Ordering::Acquire) {
+            WRITTEN => {
+                self.slice_state.store(MAPPING, Ordering::Release);
+                let state = self.slice_state.clone();
+                self.slice_read.map_async(wgpu::MapMode::Read, .., move |r| state.store(if r.is_ok() { READY } else { IDLE }, Ordering::Release));
+            }
+            READY => {
+                {
+                    let view = self.slice_read.get_mapped_range(..).unwrap();
+                    if let Ok(mut cpu) = self.slice_cpu.lock() {
+                        cpu.clear();
+                        cpu.extend_from_slice(bytemuck::cast_slice(&view));
+                    }
+                }
+                self.slice_read.unmap();
+                self.slice_state.store(IDLE, Ordering::Release);
+            }
+            _ => {}
+        }
+        let _ = self.device.poll(wgpu::PollType::Poll);
+    }
+
+    /// Asks for (or stops asking for) the CPU copy of the slice values.
+    pub fn want_slice_values(&self, wanted: bool) {
+        self.slice_wanted.store(wanted, Ordering::Relaxed);
+    }
+
+    /// The slice value at texel (x, y) of the last copy that arrived, if any.
+    pub fn slice_value(&self, x: u32, y: u32) -> Option<f32> {
+        self.slice_cpu.lock().ok()?.get((y * SLICE_RES + x) as usize).copied()
+    }
+
     pub fn compute_slice(&self, queue: &wgpu::Queue, encoder: &mut wgpu::CommandEncoder) {
         // Reset min/max (queue writes land before this frame's commands run).
         queue.write_buffer(&self.slice, 0, bytemuck::cast_slice(&[u32::MAX, 0u32]));
@@ -252,6 +291,10 @@ impl Gpu {
         let groups = SLICE_RES.div_ceil(8);
         pass.dispatch_workgroups(groups, groups, 1);
         drop(pass);
+        if self.slice_wanted.load(Ordering::Relaxed) && self.slice_state.load(Ordering::Acquire) == IDLE {
+            encoder.copy_buffer_to_buffer(&self.slice, 8, &self.slice_read, 0, (SLICE_RES * SLICE_RES * 4) as u64);
+            self.slice_state.store(WRITTEN, Ordering::Release);
+        }
         if let Some(t) = &self.timer {
             t.resolve(encoder);
         }
@@ -310,6 +353,7 @@ impl egui_wgpu::CallbackTrait for SliceView {
         res: &mut egui_wgpu::CallbackResources,
     ) -> Vec<wgpu::CommandBuffer> {
         let gpu: &Gpu = res.get().unwrap();
+        gpu.collect_slice();
         gpu.upload(queue, &self.uniforms, &self.params);
         gpu.compute_slice(queue, encoder);
         Vec::new()
@@ -533,7 +577,8 @@ pub fn build(device: &wgpu::Device, queue: &wgpu::Queue, format: wgpu::TextureFo
     };
     let uniforms = buffer("uniforms", std::mem::size_of::<Uniforms>() as u64, wgpu::BufferUsages::UNIFORM);
     let params = buffer("params", (MAX_PARAMS * 4) as u64, wgpu::BufferUsages::STORAGE);
-    let slice = buffer("slice", 8 + (SLICE_RES * SLICE_RES * 4) as u64, wgpu::BufferUsages::STORAGE);
+    let slice = buffer("slice", 8 + (SLICE_RES * SLICE_RES * 4) as u64, wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC);
+    let slice_read = buffer("slice readback", (SLICE_RES * SLICE_RES * 4) as u64, wgpu::BufferUsages::MAP_READ);
     let blue: &[f32] = &crate::bluenoise::tables();
     let blue_noise = buffer("blue noise", std::mem::size_of_val(blue) as u64, wgpu::BufferUsages::STORAGE);
     queue.write_buffer(&blue_noise, 0, bytemuck::cast_slice(blue));
@@ -554,6 +599,10 @@ pub fn build(device: &wgpu::Device, queue: &wgpu::Queue, format: wgpu::TextureFo
         raymarch_cloud,
         slice_cs,
         slice_fs,
+        slice_read,
+        slice_state: Arc::new(AtomicU8::new(IDLE)),
+        slice_cpu: Arc::new(std::sync::Mutex::new(Vec::new())),
+        slice_wanted: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         blit,
         blit_layout,
         sampler,

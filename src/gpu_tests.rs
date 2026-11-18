@@ -564,6 +564,40 @@ fn random_graphs_build_and_evaluate_on_the_gpu() {
 }
 
 #[test]
+fn slice_values_can_be_read_back_for_the_value_readout() {
+    // A device of our own (not `gpu()`): the pipelines are built with crate::view::build.
+    let Some(g) = gpu() else { return eprintln!("no GPU adapter; skipping") };
+    let graph = Graph::default_graph();
+    let c = codegen::compile(&graph).unwrap();
+    let view_gpu = crate::view::build(&g.device, &g.queue, wgpu::TextureFormat::Bgra8Unorm, &c.wgsl, false, Default::default());
+    let u = crate::view::Uniforms {
+        cam_pos: [0.0, 0.0, 3.0], aspect: 1.0, cam_fwd: [0.0, 0.0, -1.0], amount: 0.25, cam_right: [1.0, 0.0, 0.0], step_scale: 0.6, cam_up: [0.0, 1.0, 0.0], seed: 0,
+        tile_size: 1.0, prim_size: 1.0, pixel: 0.002, cloud_density: 8.0, mode: 0, prim: 0,
+        slice_axis: 2, slice_mode: 0, slice_pos: 0.5, slice_aspect: 1.0, slice_tiles: 1.0, slice_res: crate::view::SLICE_RES,
+        push_min: -1.0, push_max: 1.0, _pad: [0.0; 2], mesh_origin: [0.0; 3], mesh_voxel: 1.0, mesh_lo: [0.0; 3], mask_n: 0, mesh_hi: [0.0; 3], _pad_mask: 0.0, mask: [[0.0; 4]; 12],
+        look: [[0.8, 0.78, 0.74, 0.0], [0.5, 0.0, 0.0, 0.0]],
+        light: crate::Lighting::default().pack(),
+    };
+    view_gpu.want_slice_values(true);
+    let (ix, iy) = (100u32, 400u32);
+    let mut got = None;
+    for _ in 0..8 {
+        view_gpu.upload(&g.queue, &u, &c.params);
+        let mut enc = g.device.create_command_encoder(&Default::default());
+        view_gpu.compute_slice(&g.queue, &mut enc);
+        g.queue.submit([enc.finish()]);
+        g.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+        view_gpu.collect_slice();
+        view_gpu.collect_slice();
+        got = view_gpu.slice_value(ix, iy).or(got);
+    }
+    let n = crate::view::SLICE_RES as f32;
+    let want = eval(&g, &graph, &[[(ix as f32 + 0.5) / n, (iy as f32 + 0.5) / n, 0.5]])[0];
+    let got = got.expect("the readback should have arrived");
+    assert!((got - want).abs() < 1e-4, "slice readback {got} vs direct {want}");
+}
+
+#[test]
 fn mix_matches_reference() {
     let Some(gpu) = gpu() else { return eprintln!("no GPU adapter; skipping") };
     let mix = |vals: [f32; 3], clamp: bool| {

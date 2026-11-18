@@ -1369,6 +1369,28 @@ impl eframe::App for App {
                     if let Some(node) = self.editor.preview.and_then(|id| self.graph.nodes.get(&id)) {
                         label = format!("{label}\nPreviewing {}", editor::title(&node.kind));
                     }
+                    // Value under the pointer: the slice values are copied back only while the pointer is over the view.
+                    let hover = ui.input(|i| i.pointer.hover_pos()).filter(|p| rslice.contains(*p));
+                    if let Some(gpu) = self.rs.renderer.read().callback_resources.get::<view::Gpu>() {
+                        gpu.want_slice_values(hover.is_some());
+                        if let Some(p) = hover {
+                            // The same mapping as fs_slice in slice.wgsl: a square fitted into the view, tiled 1 or 2 times.
+                            let aspect = rslice.width() / rslice.height().max(1.0);
+                            let (ux, uy) = ((p.x - rslice.left()) / rslice.width() * 2.0 - 1.0, 1.0 - (p.y - rslice.top()) / rslice.height() * 2.0);
+                            let (qx, qy) = (ux * aspect / aspect.min(1.0), uy / aspect.min(1.0));
+                            if qx.abs() <= 1.0 && qy.abs() <= 1.0 {
+                                let tiles = if self.pv.tiles_2x2 { 2.0 } else { 1.0 };
+                                let (tx, ty) = ((qx * 0.5 * tiles + 0.5 * tiles).rem_euclid(1.0), (-qy * 0.5 * tiles + 0.5 * tiles).rem_euclid(1.0));
+                                let n = view::SLICE_RES;
+                                let (ix, iy) = (((tx * n as f32) as u32).min(n - 1), ((ty * n as f32) as u32).min(n - 1));
+                                if let Some(v) = gpu.slice_value(ix, iy) {
+                                    label = format!("{label}
+value {v:.4} at ({tx:.3}, {ty:.3})");
+                                }
+                            }
+                            ui.ctx().request_repaint();
+                        }
+                    }
                     let font = egui::FontId::monospace(12.0);
                     let grey = egui::Color32::from_gray(200);
                     painter.text(rslice.left_top() + egui::vec2(8.0, 6.0), egui::Align2::LEFT_TOP, label, font.clone(), grey);
