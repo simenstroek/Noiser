@@ -36,6 +36,8 @@ pub struct MeshWorkspace {
     pub autorun: bool,
     /// The first mesh the last run wrote, for the view above the graph.
     preview: Option<Preview>,
+    /// The images the last run wrote, as thumbnails under the view.
+    thumbnails: Vec<(String, egui::TextureHandle)>,
     history: crate::history::History,
     yaw: f32,
     pitch: f32,
@@ -114,7 +116,7 @@ impl Default for MeshWorkspace {
         let mut editor = crate::editor::Editor::default();
         editor.mesh_mode = true;
         editor.frame_next = true;
-        MeshWorkspace { saved: graph.clone(), graph, editor, path: None, cache: Arc::new(Mutex::new(MeshCache::default())), job: None, log: Vec::new(), written: Vec::new(), seed: 0, autorun: false, preview: None, history: crate::history::History::new(&Graph::default()), yaw: 0.6, pitch: 0.35, zoom: 1.0 }
+        MeshWorkspace { saved: graph.clone(), graph, editor, path: None, cache: Arc::new(Mutex::new(MeshCache::default())), job: None, log: Vec::new(), written: Vec::new(), seed: 0, autorun: false, preview: None, thumbnails: Vec::new(), history: crate::history::History::new(&Graph::default()), yaw: 0.6, pitch: 0.35, zoom: 1.0 }
     }
 }
 
@@ -338,7 +340,18 @@ impl crate::App {
             match r {
                 Ok(files) => {
                     self.status = format!("Mesh graph: {} file(s) written", files.len());
-                    self.mesh_ws.preview = files.iter().find(|f| f.extension().is_some_and(|e| e == "obj")).and_then(|f| Preview::load(f).ok());
+                    self.mesh_ws.preview = files.iter().find(|f| f.extension().is_some_and(|e| e == "obj" || e == "ply")).and_then(|f| Preview::load(f).ok());
+                    self.mesh_ws.thumbnails = files
+                        .iter()
+                        .filter(|f| f.extension().is_some_and(|e| e == "png"))
+                        .take(8)
+                        .filter_map(|f| {
+                            let img = image::open(f).ok()?.thumbnail(256, 256).to_rgba8();
+                            let size = [img.width() as usize, img.height() as usize];
+                            let tex = ctx.load_texture(f.to_string_lossy(), egui::ColorImage::from_rgba_unmultiplied(size, img.as_raw()), egui::TextureOptions::LINEAR);
+                            Some((f.file_stem().map_or(String::new(), |s| s.to_string_lossy().into_owned()), tex))
+                        })
+                        .collect();
                     self.mesh_ws.written = files;
                 }
                 Err(e) => {
@@ -355,10 +368,16 @@ impl crate::App {
         let base = self.mesh_ws.base();
         crate::meshgraph_ui::set_base(base.clone());
         // A noise graph file that was just chosen gets its embedded copy right away.
-        for n in self.mesh_ws.graph.nodes.values_mut() {
+        for (id, n) in self.mesh_ws.graph.nodes.iter_mut() {
             if let NodeKind::NoiseGraph(p) = &mut n.kind {
                 if p.embedded.is_empty() && !p.file.is_empty() {
                     if let Ok(text) = std::fs::read_to_string(crate::meshgraph::resolve_in(&base, &p.file)) {
+                        // Not a change the user made: the saved copy gets it too, so the graph does not look edited.
+                        if let Some(NodeKind::NoiseGraph(saved)) = self.mesh_ws.saved.nodes.get_mut(id).map(|n| &mut n.kind) {
+                            if saved.file == p.file && saved.embedded.is_empty() {
+                                saved.embedded = text.clone();
+                            }
+                        }
                         p.embedded = text;
                     }
                 }
@@ -466,9 +485,22 @@ impl crate::App {
             }
             let painter = ui.painter_at(rect);
             painter.rect_filled(rect, 0.0, egui::Color32::from_gray(28));
+            // The maps the run wrote, in a strip along the bottom.
+            let mut view_rect = rect;
+            if !self.mesh_ws.thumbnails.is_empty() {
+                let strip = 120.0;
+                view_rect.max.y -= strip;
+                let mut x = rect.left() + 8.0;
+                for (name, tex) in &self.mesh_ws.thumbnails {
+                    let img = egui::Rect::from_min_size(egui::pos2(x, rect.bottom() - strip + 4.0), egui::vec2(96.0, 96.0));
+                    painter.image(tex.id(), img, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), egui::Color32::WHITE);
+                    painter.text(img.left_bottom() + egui::vec2(0.0, 2.0), egui::Align2::LEFT_TOP, name, egui::FontId::proportional(10.0), egui::Color32::from_gray(170));
+                    x += 104.0;
+                }
+            }
             match &self.mesh_ws.preview {
                 Some(p) => {
-                    p.paint(&painter, rect, self.mesh_ws.yaw, self.mesh_ws.pitch, self.mesh_ws.zoom);
+                    p.paint(&painter, view_rect, self.mesh_ws.yaw, self.mesh_ws.pitch, self.mesh_ws.zoom);
                     painter.text(rect.left_top() + egui::vec2(8.0, 6.0), egui::Align2::LEFT_TOP, format!("{}: {} triangles. Drag to turn, scroll to zoom, double-click to reset.", p.name, p.triangles.len()), egui::FontId::proportional(12.0), egui::Color32::from_gray(160));
                 }
                 None => _ = painter.text(rect.center(), egui::Align2::CENTER_CENTER, "Run the graph to see its mesh here", egui::FontId::proportional(14.0), egui::Color32::from_gray(120)),
