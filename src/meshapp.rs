@@ -433,6 +433,7 @@ impl App {
     /// The Displacement mask section: terms that vary how strongly the noise displaces the mesh.
     fn mask_ui(&mut self, ui: &mut egui::Ui) {
         use crate::meshmask::{MAX_TERMS, MaskKind, MaskTerm};
+        let has_colors = self.mesh.as_ref().is_some_and(|m| m.sdf.colors.is_some());
         egui::CollapsingHeader::new("Displacement mask").default_open(!self.mesh_mask.terms.is_empty()).show(ui, |ui| {
             ui.weak("Varies how strongly the noise displaces each part of the mesh. With no terms every part moves equally. Strength is the sum of weight × term; every term is measured on the mesh itself. Applies to the Mesh shape.");
             ui.add_enabled(!self.mesh_mask.terms.is_empty(), egui::Checkbox::new(&mut self.pv.show_mask, "Show mask on the mesh"))
@@ -464,6 +465,17 @@ impl App {
                             }
                         });
                         crate::row(ui, &mut t.negative, false, |ui, v| _ = ui.checkbox(v, "negative direction"));
+                    }
+                    if t.kind == MaskKind::VertexColor {
+                        crate::row(ui, &mut t.axis, 0, |ui, v| {
+                            ui.label("channel");
+                            for (a, name) in [(0, "R"), (1, "G"), (2, "B"), (3, "Luminance")] {
+                                ui.selectable_value(v, a, name);
+                            }
+                        });
+                        if !has_colors {
+                            ui.colored_label(crate::editor::ORANGE, "This mesh has no vertex colours, so this term is meaningless.");
+                        }
                     }
                     if t.kind != MaskKind::Constant {
                         let (dlo, dhi) = t.kind.default_range();

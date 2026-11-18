@@ -2,6 +2,22 @@
 // its many inlined distance-field lookups added about 0.65 s to every pipeline build. Needs noise.wgsl
 // (mesh_sdf_at, safe_normalize).
 
+// The vertex colour stored next to the distance (a mesh with colours uploads an RGBA grid: distance, r, g, b),
+// trilinear like `mesh_sdf_at`; without colours the grid is R only and this returns (0, 0, 1).
+fn mesh_color_at(t: texture_3d<f32>, p: vec3f, origin: vec3f, voxel: f32) -> vec3f {
+    let dims = vec3i(textureDimensions(t));
+    let g = (p - origin) / voxel - 0.5;
+    let gc = clamp(g, vec3f(0.0), vec3f(dims) - vec3f(1.0));
+    let i0 = vec3i(floor(gc));
+    let f = gc - vec3f(i0);
+    let i1 = min(i0 + vec3i(1), dims - vec3i(1));
+    let c00 = mix(textureLoad(t, vec3i(i0.x, i0.y, i0.z), 0).yzw, textureLoad(t, vec3i(i1.x, i0.y, i0.z), 0).yzw, f.x);
+    let c10 = mix(textureLoad(t, vec3i(i0.x, i1.y, i0.z), 0).yzw, textureLoad(t, vec3i(i1.x, i1.y, i0.z), 0).yzw, f.x);
+    let c01 = mix(textureLoad(t, vec3i(i0.x, i0.y, i1.z), 0).yzw, textureLoad(t, vec3i(i1.x, i0.y, i1.z), 0).yzw, f.x);
+    let c11 = mix(textureLoad(t, vec3i(i0.x, i1.y, i1.z), 0).yzw, textureLoad(t, vec3i(i1.x, i1.y, i1.z), 0).yzw, f.x);
+    return mix(mix(c00, c10, f.y), mix(c01, c11, f.y), f.z);
+}
+
 // Displacement strength at `p` (mesh space) from the mask terms (meshmask.rs); 1 with no terms.
 // `terms` holds two vec4 per term: (kind, weight, lo, hi) and (direction xyz, invert). Every term is
 // measured on the mesh's own distance field, at the nearest surface point, so the mask is a property
@@ -53,6 +69,9 @@ fn mesh_mask(t: texture_3d<f32>, p: vec3f, origin: vec3f, voxel: f32, blo: vec3f
                 q -= n * step;
             }
             raw = depth;
+        } else if (kind == 7u) {
+            // Painted: a vertex colour channel (the direction holds the channel weights) at the surface point.
+            raw = dot(mesh_color_at(t, s, origin, voxel), b.xyz);
         } else {
             raw = 0.5 * (xp + xm + yp + ym + zp + zm - 6.0 * d0) / (e * e); // mean curvature
         }

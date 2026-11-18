@@ -210,6 +210,7 @@ fn load_ply(path: &Path) -> Result<Mesh, String> {
     for el in &elements {
         for _ in 0..el.n {
             let mut xyz: [f64; 3] = [0.0; 3];
+            let mut rgb: [Option<f64>; 3] = [None; 3];
             let mut face: Option<Vec<u32>> = None;
             for p in &el.props {
                 if let Some(ct) = p.count {
@@ -220,16 +221,24 @@ fn load_ply(path: &Path) -> Result<Mesh, String> {
                     }
                 } else {
                     let v = body.next(p.ty)?;
+                    // Colours are stored as bytes (0 to 255) or as floats (0 to 1).
+                    let scaled = if matches!(p.ty, Ty::U8 | Ty::U16) { v / if matches!(p.ty, Ty::U8) { 255.0 } else { 65535.0 } } else { v };
                     match p.name.as_str() {
                         "x" => xyz[0] = v,
                         "y" => xyz[1] = v,
                         "z" => xyz[2] = v,
+                        "red" | "r" | "diffuse_red" => rgb[0] = Some(scaled),
+                        "green" | "g" | "diffuse_green" => rgb[1] = Some(scaled),
+                        "blue" | "b" | "diffuse_blue" => rgb[2] = Some(scaled),
                         _ => {}
                     }
                 }
             }
             if el.name == "vertex" {
                 mesh.positions.push([xyz[0] as f32, xyz[1] as f32, xyz[2] as f32] as V3);
+                if let [Some(r), Some(g), Some(b)] = rgb {
+                    mesh.colors.push([r as f32, g as f32, b as f32]);
+                }
             } else if let (true, Some(f)) = (el.name == "face", face) {
                 // Fan polygons into triangles.
                 for k in 1..f.len().saturating_sub(1) {
@@ -237,6 +246,9 @@ fn load_ply(path: &Path) -> Result<Mesh, String> {
                 }
             }
         }
+    }
+    if mesh.colors.len() != mesh.positions.len() {
+        mesh.colors.clear(); // not every vertex had a colour
     }
     if mesh.triangles.iter().any(|t| t.iter().any(|&i| i as usize >= mesh.positions.len())) {
         return Err("the PLY file has a face that points past its vertices".into());
@@ -263,6 +275,20 @@ mod tests {
         raw.write_ply(&path).unwrap();
         let back = load(&path).unwrap();
         assert_eq!((back.positions.len(), back.triangles.len()), (ico.positions.len(), ico.triangles.len()));
+    }
+
+    #[test]
+    fn ply_vertex_colours_are_read_and_scaled() {
+        let path = tmp("colour.ply");
+        std::fs::write(&path, "ply\nformat ascii 1.0\nelement vertex 3\nproperty float x\nproperty float y\nproperty float z\nproperty uchar red\nproperty uchar green\nproperty uchar blue\nelement face 1\nproperty list uchar int vertex_indices\nend_header\n0 0 0 255 0 0\n1 0 0 0 255 0\n0 1 0 0 0 128\n3 0 1 2\n").unwrap();
+        let m = load(&path).unwrap();
+        assert_eq!(m.colors.len(), 3);
+        assert_eq!(m.colors[0], [1.0, 0.0, 0.0]);
+        assert!((m.colors[2][2] - 128.0 / 255.0).abs() < 1e-6);
+        // A file without colours has none.
+        let plain = tmp("plain.ply");
+        std::fs::write(&plain, "ply\nformat ascii 1.0\nelement vertex 3\nproperty float x\nproperty float y\nproperty float z\nelement face 1\nproperty list uchar int vertex_indices\nend_header\n0 0 0\n1 0 0\n0 1 0\n3 0 1 2\n").unwrap();
+        assert!(load(&plain).unwrap().colors.is_empty());
     }
 
     #[test]

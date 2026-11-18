@@ -10,6 +10,8 @@ pub type V3 = [f32; 3];
 pub struct Mesh {
     pub positions: Vec<V3>,
     pub triangles: Vec<[u32; 3]>,
+    /// Per-vertex colours (0 to 1), parallel to `positions`; empty when the file has none.
+    pub colors: Vec<V3>,
 }
 
 /// Maps object space to the normalized space: `normalized = (object - center) / scale`.
@@ -37,6 +39,14 @@ impl Mesh {
         let mut mesh = Mesh::default();
         for model in models {
             let base = mesh.positions.len() as u32;
+            let count = model.mesh.positions.len() / 3;
+            // `v x y z r g b` lines: colours (zero for objects that have none, so the lists stay parallel).
+            if model.mesh.vertex_color.len() == count * 3 {
+                mesh.colors.resize(mesh.positions.len(), [0.0; 3]);
+                mesh.colors.extend(model.mesh.vertex_color.chunks_exact(3).map(|c| [c[0], c[1], c[2]]));
+            } else if !mesh.colors.is_empty() {
+                mesh.colors.resize(mesh.positions.len() + count, [0.0; 3]);
+            }
             mesh.positions.extend(model.mesh.positions.chunks_exact(3).map(|p| [p[0], p[1], p[2]]));
             mesh.triangles.extend(model.mesh.indices.chunks_exact(3).map(|t| [base + t[0], base + t[1], base + t[2]]));
         }
@@ -67,13 +77,18 @@ impl Mesh {
         let cell = 1e-5 * diagonal;
         let mut by_cell: HashMap<[i64; 3], u32> = HashMap::new();
         let mut positions = Vec::new();
+        let mut colors = Vec::new();
         let remap: Vec<u32> = self
             .positions
             .iter()
-            .map(|p| {
+            .enumerate()
+            .map(|(i, p)| {
                 let key = [(p[0] / cell).round() as i64, (p[1] / cell).round() as i64, (p[2] / cell).round() as i64];
                 *by_cell.entry(key).or_insert_with(|| {
                     positions.push(*p);
+                    if let Some(c) = self.colors.get(i) {
+                        colors.push(*c); // the first of the merged vertices keeps its colour
+                    }
                     positions.len() as u32 - 1
                 })
             })
@@ -86,7 +101,7 @@ impl Mesh {
             // A vertex with NaN or infinite coordinates would poison the bounds and the distance grid.
             .filter(|t| t.iter().all(|&i| positions[i as usize].iter().all(|x| x.is_finite())))
             .collect();
-        Mesh { positions, triangles }
+        Mesh { positions, triangles, colors }
     }
 
     /// The mesh moved and scaled so its bounding box is centred on the origin and its bounding
@@ -103,7 +118,7 @@ impl Mesh {
         }
         let norm = Normalization { center, scale: if radius > 0.0 { radius } else { 1.0 } };
         let positions = self.positions.iter().map(|p| [(p[0] - center[0]) / norm.scale, (p[1] - center[1]) / norm.scale, (p[2] - center[2]) / norm.scale]).collect();
-        (Mesh { positions, triangles: self.triangles.clone() }, norm)
+        (Mesh { positions, triangles: self.triangles.clone(), colors: self.colors.clone() }, norm)
     }
 }
 
@@ -177,13 +192,43 @@ pub mod shapes {
         for p in &mut positions {
             *p = [p[0] * radius, p[1] * radius, p[2] * radius];
         }
-        Mesh { positions, triangles }
+        Mesh { positions, triangles, colors: Vec::new() }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn obj_vertex_colours_are_kept_through_welding_and_normalizing() {
+        let dir = std::env::temp_dir().join("noiser-obj-colour-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("c.obj");
+        // A quad of two triangles; the shared corners are listed twice (a seam) and welded.
+        std::fs::write(&path, "v 0 0 0 1 0 0
+v 1 0 0 0 1 0
+v 1 1 0 0 0 1
+v 0 0 0 1 0 0
+v 1 1 0 0 0 1
+v 0 1 0 1 1 1
+f 1 2 3
+f 4 5 6
+").unwrap();
+        let m = Mesh::load_obj(&path).unwrap();
+        assert_eq!(m.positions.len(), 4);
+        assert_eq!(m.colors.len(), 4, "one colour per welded vertex");
+        let (n, _) = m.normalized();
+        assert_eq!(n.colors, m.colors);
+        // An OBJ without colours has none.
+        let plain = dir.join("p.obj");
+        std::fs::write(&plain, "v 0 0 0
+v 1 0 0
+v 0 1 0
+f 1 2 3
+").unwrap();
+        assert!(Mesh::load_obj(&plain).unwrap().colors.is_empty());
+    }
 
     #[test]
     fn triangles_with_non_finite_vertices_are_dropped() {

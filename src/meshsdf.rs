@@ -175,6 +175,9 @@ pub struct MeshQuery {
     open: bool,
     /// Smooth (angle-weighted) vertex normals of each triangle's corners, for the open sign.
     corner_normal: Vec<[V3; 3]>,
+    /// The mesh's vertex indices per triangle and its vertex colours (empty without colours), for `color_at`.
+    ids: Vec<[u32; 3]>,
+    colors: Vec<V3>,
 }
 
 /// Angle-weighted vertex normals, per triangle corner.
@@ -223,7 +226,7 @@ impl MeshQuery {
             build_bvh(&tri, &mut order, 0, &mut nodes);
             fill_far_field(&mut nodes, &tri, &order);
         }
-        let mut q = MeshQuery { tri, nodes, order, open: false, corner_normal: Vec::new() };
+        let mut q = MeshQuery { tri, nodes, order, open: false, corner_normal: Vec::new(), ids: mesh.triangles.clone(), colors: mesh.colors.clone() };
         q.open = q.looks_open(mesh);
         if q.open {
             q.corner_normal = corner_normals(mesh);
@@ -330,11 +333,35 @@ impl MeshQuery {
     }
 
     /// Distance to the surface, negative inside.
+    #[cfg(test)]
     pub fn signed_distance(&self, p: V3) -> f32 {
+        self.signed_distance_and_color(p).0
+    }
+
+    /// The vertex colour interpolated at the surface point nearest to `p`; black for a mesh without colours.
+    #[cfg(test)]
+    pub fn color_at(&self, p: V3) -> V3 {
+        self.signed_distance_and_color(p).1
+    }
+
+    /// Both at once, from a single closest-point search.
+    pub fn signed_distance_and_color(&self, p: V3) -> (f32, V3) {
         let (d2, ti, cp) = self.closest(p);
         if !d2.is_finite() {
-            return f32::INFINITY;
+            return (f32::INFINITY, [0.0; 3]);
         }
+        let color = if self.colors.is_empty() {
+            [0.0; 3]
+        } else {
+            let [a, b, c] = self.tri[ti];
+            let w = barycentric(cp, a, b, c);
+            let ids = self.ids[ti];
+            std::array::from_fn(|k| w[0] * self.colors[ids[0] as usize][k] + w[1] * self.colors[ids[1] as usize][k] + w[2] * self.colors[ids[2] as usize][k])
+        };
+        (self.sign_of(p, d2, ti, cp), color)
+    }
+
+    fn sign_of(&self, p: V3, d2: f32, ti: usize, cp: V3) -> f32 {
         if self.open {
             // Which side of the surface: the smooth normal at the closest point against the offset to it.
             let [a, b, c] = self.tri[ti];
@@ -355,6 +382,8 @@ pub struct MeshSdf {
     pub origin: V3,
     pub voxel: f32,
     pub data: Vec<f32>,
+    /// Vertex colours on the same grid (None when the mesh has none).
+    pub colors: Option<Vec<[f32; 3]>>,
     /// The mesh is an open surface (terrain, sheet): inside is the side opposite its normals.
     pub open: bool,
 }
@@ -371,16 +400,28 @@ impl MeshSdf {
         let query = MeshQuery::new(mesh);
         let (nx, ny) = (dims[0] as usize, dims[1] as usize);
         let mut data = vec![0.0f32; nx * ny * dims[2] as usize];
-        data.par_chunks_mut(nx * ny).enumerate().for_each(|(k, slab)| {
+        let has_colors = !mesh.colors.is_empty();
+        let mut colors = if has_colors { vec![[0.0f32; 3]; data.len()] } else { Vec::new() };
+        let bake = |k: usize, slab: &mut [f32], color_slab: Option<&mut [[f32; 3]]>| {
+            let mut color_slab = color_slab;
             for j in 0..ny {
                 for i in 0..nx {
                     let p = [origin[0] + (i as f32 + 0.5) * voxel, origin[1] + (j as f32 + 0.5) * voxel, origin[2] + (k as f32 + 0.5) * voxel];
-                    slab[j * nx + i] = query.signed_distance(p);
+                    let (d, c) = query.signed_distance_and_color(p);
+                    slab[j * nx + i] = d;
+                    if let Some(cs) = color_slab.as_deref_mut() {
+                        cs[j * nx + i] = c;
+                    }
                 }
             }
             progress.fetch_add(1, Ordering::Relaxed);
-        });
-        MeshSdf { dims, origin, voxel, data, open: query.open }
+        };
+        if has_colors {
+            data.par_chunks_mut(nx * ny).zip(colors.par_chunks_mut(nx * ny)).enumerate().for_each(|(k, (slab, cs))| bake(k, slab, Some(cs)));
+        } else {
+            data.par_chunks_mut(nx * ny).enumerate().for_each(|(k, slab)| bake(k, slab, None));
+        }
+        MeshSdf { dims, origin, voxel, data, colors: has_colors.then_some(colors), open: query.open }
     }
 
     /// Puts the grid on the GPU as an R32Float 3D texture.
@@ -394,14 +435,20 @@ impl MeshSdf {
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D3,
-            format: wgpu::TextureFormat::R32Float,
+            // With vertex colours the texture is RGBA: distance, then red, green and blue.
+            format: if self.colors.is_some() { wgpu::TextureFormat::Rgba32Float } else { wgpu::TextureFormat::R32Float },
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
+        let texels: Vec<f32> = match &self.colors {
+            Some(c) => self.data.iter().zip(c).flat_map(|(d, c)| [*d, c[0], c[1], c[2]]).collect(),
+            None => Vec::new(),
+        };
+        let (bytes, texel_size): (&[f32], u32) = if self.colors.is_some() { (&texels, 16) } else { (&self.data, 4) };
         queue.write_texture(
             wgpu::TexelCopyTextureInfo { texture: &texture, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
-            bytemuck::cast_slice(&self.data),
-            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(nx * 4), rows_per_image: Some(ny) },
+            bytemuck::cast_slice(bytes),
+            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(nx * texel_size), rows_per_image: Some(ny) },
             size,
         );
         let view = texture.create_view(&Default::default());
@@ -581,7 +628,7 @@ mod tests {
                 triangles.push([b, c, d]);
             }
         }
-        Mesh { positions, triangles }
+        Mesh { positions, triangles, colors: Vec::new() }
     }
 
     #[test]
@@ -598,6 +645,24 @@ mod tests {
         let mut hole = shapes::split_cube().welded();
         hole.triangles.truncate(hole.triangles.len() - 2);
         assert!(!MeshQuery::new(&hole).open, "a cube missing a face is still a solid");
+    }
+
+    #[test]
+    fn vertex_colours_are_interpolated_at_the_nearest_surface_point() {
+        let mut sphere = shapes::icosphere(1.0, 3);
+        sphere.colors = sphere.positions.iter().map(|p| [p[0] * 0.5 + 0.5, 0.0, 1.0]).collect();
+        let q = MeshQuery::new(&sphere);
+        for p in [[0.9, 0.0, 0.0], [1.4, 0.2, 0.1], [-0.7, 0.3, 0.0]] {
+            let n = length(p);
+            let on_surface = scale(p, 1.0 / n);
+            let want = on_surface[0] * 0.5 + 0.5;
+            let c = q.color_at(p);
+            assert!((c[0] - want).abs() < 0.06 && c[1] == 0.0 && (c[2] - 1.0).abs() < 1e-4, "{p:?}: {c:?} vs red {want}");
+        }
+        // The baked grid carries them too, and meshes without colours bake none.
+        let sdf = MeshSdf::build(&sphere, 24, 0.3, &AtomicU32::new(0));
+        assert_eq!(sdf.colors.as_ref().map(|c| c.len()), Some(sdf.data.len()));
+        assert!(MeshSdf::build(&shapes::icosphere(1.0, 1), 16, 0.3, &AtomicU32::new(0)).colors.is_none());
     }
 
     #[test]

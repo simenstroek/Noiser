@@ -875,7 +875,10 @@ mod mesh_export_tests {
 
     /// A radius-1 icosphere baked and uploaded, with an evaluator for `graph`.
     fn evaluator(gpu: &Gpu, graph: &Graph, seed: u32) -> (MeshSdf, MeshEvaluator, wgpu::Texture) {
-        let mesh = shapes::icosphere(1.0, 3);
+        evaluator_for(gpu, shapes::icosphere(1.0, 3), graph, seed)
+    }
+
+    fn evaluator_for(gpu: &Gpu, mesh: crate::mesh::Mesh, graph: &Graph, seed: u32) -> (MeshSdf, MeshEvaluator, wgpu::Texture) {
         let bounds = mesh.bounds();
         let sdf = MeshSdf::build(&mesh, 64, 0.6, &AtomicU32::new(0));
         let (texture, view) = sdf.upload(&gpu.device, &gpu.queue);
@@ -1048,6 +1051,35 @@ mod mesh_export_tests {
         let v = probe_mask(&gpu, vec![half, inv]);
         assert!((mean(&v.iter().filter(|(p, _)| p[1] < -0.8).map(|(p, m)| (*p, *m)).collect::<Vec<_>>()) - 1.0).abs() < 0.1);
         assert!((mean(&v.iter().filter(|(p, _)| p[1] > 0.8).map(|(p, m)| (*p, *m)).collect::<Vec<_>>()) - 0.5).abs() < 0.1);
+    }
+
+    /// A sphere painted red in its upper half: a vertex-colour mask displaces only that half.
+    #[test]
+    fn vertex_colour_masks_follow_the_painted_colours() {
+        use crate::meshmask::{MaskKind, MaskSettings, MaskTerm};
+        let Some(gpu) = gpu() else { return eprintln!("no GPU adapter; skipping") };
+        let mut sphere = shapes::icosphere(1.0, 3);
+        sphere.colors = sphere.positions.iter().map(|p| if p[1] > 0.0 { [1.0, 0.0, 0.25] } else { [0.0, 0.0, 0.25] }).collect();
+        let probe = |channel: u32| {
+            let mut term = MaskTerm::new(MaskKind::VertexColor);
+            term.axis = channel;
+            let mask = MaskSettings { terms: vec![term] }.pack();
+            let (sdf, ev, _tex) = evaluator_for(&gpu, sphere.clone(), &single_node_graph(NodeKind::Float(1.0)), 0);
+            assert!(sdf.colors.is_some());
+            let d = Displace { amount: 0.1, tile_size: 1.0, prim_size: 1.0, mask };
+            let m = job(&ev, d, 0.3, 80).extract(&Default::default());
+            let mean_of = |keep: &dyn Fn(f32) -> bool| {
+                let v: Vec<f32> = m.positions.iter().filter(|p| keep(p[1] / radius(**p))).map(|p| (radius(*p) - 1.0) / 0.1).collect();
+                v.iter().sum::<f32>() / v.len().max(1) as f32
+            };
+            (mean_of(&|y| y > 0.4), mean_of(&|y| y < -0.4))
+        };
+        let (top, bottom) = probe(0);
+        assert!(top > 0.85 && bottom < 0.1, "red channel: top {top}, bottom {bottom}");
+        let (top, bottom) = probe(2);
+        assert!((top - 0.25).abs() < 0.1 && (bottom - 0.25).abs() < 0.1, "blue channel is 0.25 everywhere: {top}, {bottom}");
+        let (top, bottom) = probe(3);
+        assert!(top > bottom + 0.15, "luminance follows the red: {top} vs {bottom}");
     }
 
     #[test]

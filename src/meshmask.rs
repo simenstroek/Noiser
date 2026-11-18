@@ -24,10 +24,12 @@ pub enum MaskKind {
     Thickness,
     /// Mean curvature, in 1 / mesh unit: positive where the surface is convex, negative where concave.
     Curvature,
+    /// A colour painted on the mesh's vertices (OBJ `v x y z r g b` or PLY red/green/blue): one channel, 0 to 1.
+    VertexColor,
 }
 
 impl MaskKind {
-    pub const ALL: [MaskKind; 6] = [MaskKind::Constant, MaskKind::Position, MaskKind::Normal, MaskKind::Occlusion, MaskKind::Thickness, MaskKind::Curvature];
+    pub const ALL: [MaskKind; 7] = [MaskKind::Constant, MaskKind::Position, MaskKind::Normal, MaskKind::Occlusion, MaskKind::Thickness, MaskKind::Curvature, MaskKind::VertexColor];
 
     pub fn name(self) -> &'static str {
         match self {
@@ -37,6 +39,7 @@ impl MaskKind {
             MaskKind::Occlusion => "Occlusion",
             MaskKind::Thickness => "Thickness",
             MaskKind::Curvature => "Curvature",
+            MaskKind::VertexColor => "Vertex colour",
         }
     }
 
@@ -54,6 +57,7 @@ impl MaskKind {
             MaskKind::Occlusion => "1 on open surface, towards 0 in creases and hollows.",
             MaskKind::Thickness => "Depth of solid behind the surface, in mesh units (the mesh is scaled to radius 1).",
             MaskKind::Curvature => "Mean curvature: positive on convex parts, negative in concave ones.",
+            MaskKind::VertexColor => "A colour channel painted on the mesh's vertices (0 to 1). The mesh file needs vertex colours.",
         }
     }
 
@@ -66,6 +70,7 @@ impl MaskKind {
             MaskKind::Occlusion => (0.0, 1.0),
             MaskKind::Thickness => (0.0, 0.5),
             MaskKind::Curvature => (-2.0, 2.0),
+            MaskKind::VertexColor => (0.0, 1.0),
         }
     }
 }
@@ -114,7 +119,12 @@ impl MaskSettings {
         let mut packed = PackedMask::NONE;
         for (i, t) in self.terms.iter().take(MAX_TERMS).enumerate() {
             let mut dir = [0.0; 3];
-            dir[(t.axis as usize).min(2)] = if t.negative { -1.0 } else { 1.0 };
+            if t.kind == MaskKind::VertexColor {
+                // The channel as weights on (r, g, b): red, green, blue or luminance.
+                dir = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [0.2126, 0.7152, 0.0722]][(t.axis as usize).min(3)];
+            } else {
+                dir[(t.axis as usize).min(2)] = if t.negative { -1.0 } else { 1.0 };
+            }
             packed.terms[2 * i] = [t.kind.code() as f32, t.weight, t.lo, t.hi];
             packed.terms[2 * i + 1] = [dir[0], dir[1], dir[2], if t.invert { 1.0 } else { 0.0 }];
         }

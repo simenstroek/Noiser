@@ -67,7 +67,8 @@ tiling 3D texture for the preview, and the nodes it covers get a green outline. 
 OBJ or PLY of the same surface (as many samples along the longest side as you ask for), with small floating
 bits removed and the mesh's own size and position restored. The mesh can be made of overlapping parts. A
 *displacement mask* varies how strongly the noise acts on each part of the mesh, as a weighted sum of terms: a ramp
-along an axis, which way the surface faces, occlusion, thickness and curvature. See `PLAN.md` for how it works and
+along an axis, which way the surface faces, occlusion, thickness, curvature, and a channel of the vertex colours
+painted on the mesh (OBJ `v x y z r g b` lines or PLY red/green/blue). See `PLAN.md` for how it works and
 its limits. *Show mask on the mesh* colours the preview by mask strength. Open surfaces (terrains, leaves, sheets)
 work too: the side the normals face is outside, the other side is inside.
 
@@ -109,5 +110,5 @@ quarter) and a march step limit; none of them affect exports.
 
 ## Roadmap
 
-Ideas: vertex-colour masks for meshes, exposed graph parameters for batch work, shader-code export of the density
+Ideas: exposed graph parameters for batch work, shader-code export of the density
 function. See `PLAN.md` for the details.
