@@ -1323,7 +1323,7 @@ impl eframe::App for App {
                 Err(std::sync::mpsc::TryRecvError::Empty) => ui.ctx().request_repaint_after(std::time::Duration::from_millis(50)),
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                     self.failed_build = Some(wgsl.clone());
-                    self.status = "The shader could not be built (see the log); change the graph to try again".into();
+                    self.status = "The shader could not be built (details in crash.log in Noiser's data folder); change the graph to try again".into();
                     self.compiling = None;
                 }
             }
@@ -1444,7 +1444,26 @@ value {v:.4} at ({tx:.3}, {ty:.3})");
 }
 
 
+/// Writes panics to `crash.log` in Noiser's data folder (the release build has no console, so they would
+/// otherwise vanish), then lets the normal handling run.
+fn install_crash_log() {
+    let Some(dir) = eframe::storage_dir("Noiser") else { return };
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        use std::io::Write;
+        let when = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+        let _ = std::fs::create_dir_all(&dir);
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(dir.join("crash.log")) {
+            let _ = writeln!(f, "[{when} unix seconds, Noiser {}] {info}
+{}
+", env!("CARGO_PKG_VERSION"), std::backtrace::Backtrace::force_capture());
+        }
+        previous(info);
+    }));
+}
+
 fn main() -> eframe::Result {
+    install_crash_log();
     if let Some(code) = headless::try_run() {
         std::process::exit(code);
     }
