@@ -1143,6 +1143,27 @@ mod tests {
         }
     }
 
+    /// Dragging from the Z pin of a Separate XYZ node to an input records output port 2 on the new wire.
+    #[test]
+    fn dragging_from_a_separate_output_pin_remembers_which_one() {
+        let mut g = Graph::default();
+        let pos = g.add(NodeKind::Position, [20.0, 20.0]);
+        let sep = g.add(NodeKind::Separate, [200.0, 20.0]);
+        let comb = g.add(NodeKind::Combine { vals: [0.0; 3] }, [500.0, 20.0]);
+        g.connect(pos, sep, 0);
+        let mut h = editor_harness(g);
+        h.run();
+        let (from, to) = {
+            let ed = &h.state().0;
+            let origin = ed.debug_origin;
+            let (ls, lc) = (ed.layout(origin, &NodeKind::Separate, [200.0, 20.0]), ed.layout(origin, &NodeKind::Combine { vals: [0.0; 3] }, [500.0, 20.0]));
+            (ls.outputs[2], lc.inputs[1])
+        };
+        drag(&mut h, from, to);
+        let g = &h.state().1;
+        assert_eq!(g.input_from(comb, 1), Some((sep, 2)), "{:?}", g.edges);
+    }
+
     /// A lone node dropped on a wire is spliced into it: source to the node, node to the old target.
     #[test]
     fn dropping_a_node_on_a_wire_splices_it_in() {
