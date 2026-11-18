@@ -10,7 +10,7 @@ use std::io::Write;
 use std::path::PathBuf;
 
 pub const USAGE: &str = "usage: noiser --headless GRAPH.noisegraph --batch-out DIR (--batch-file F.obj ... | --batch-dir SRC)
-  [--set 3.scale=8 ...] [--amount 0.25] [--amount-var 0.2] [--tile 1.0] [--size 1.0] [--seed 0] [--seed-mode same|increment|random]
+  [--export-noiser OUT.noiser] [--set 3.scale=8 ...] [--amount 0.25] [--amount-var 0.2] [--tile 1.0] [--size 1.0] [--seed 0] [--seed-mode same|increment|random]
   [--res 256] [--grid-res 128] [--format obj|ply] [--cull 0.01] [--mask KIND ...]";
 
 #[derive(Debug)]
@@ -24,6 +24,8 @@ struct Options {
     seed: u32,
     mode: SeedMode,
     amount_var: f32,
+    /// `--export-noiser FILE`: write the graph as a .noiser math function instead of displacing meshes.
+    export_noiser: Option<PathBuf>,
     /// `--set NODE.FIELD=VALUE` overrides of node settings in the graph file.
     sets: Vec<(String, String, serde_json::Value)>,
     settings: Settings,
@@ -42,6 +44,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
         seed: 0,
         mode: SeedMode::Same,
         amount_var: 0.0,
+        export_noiser: None,
         sets: Vec::new(),
         settings: Settings::default(),
         grid_res: 128,
@@ -69,6 +72,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
             "--amount" => o.amount = float(value("a number")?)?,
             "--tile" => o.tile = float(value("a number")?)?,
             "--size" => o.size = float(value("a number")?)?,
+            "--export-noiser" => o.export_noiser = Some(value("a file")?.into()),
             "--set" => {
                 let spec = value("NODE.FIELD=VALUE")?;
                 let (target, v) = spec.split_once('=').ok_or(format!("--set {spec}: expected NODE.FIELD=VALUE"))?;
@@ -108,6 +112,9 @@ fn parse(args: &[String]) -> Result<Options, String> {
     }
     if o.graph.as_os_str().is_empty() {
         return Err("no graph file given".into());
+    }
+    if o.export_noiser.is_some() {
+        return Ok(o);
     }
     if o.out.as_os_str().is_empty() {
         return Err("--batch-out is required".into());
@@ -165,6 +172,16 @@ fn run(args: &[String], log: &mut Log) -> Result<usize, String> {
     let o = parse(args)?;
     let text = std::fs::read_to_string(&o.graph).map_err(|e| format!("{}: {e}", o.graph.display()))?;
     let graph = Graph::from_json(&apply_sets(&text, &o.sets)?)?;
+    if let Some(path) = &o.export_noiser {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default())).map_err(|e| format!("no GPU adapter: {e}"))?;
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).map_err(|e| format!("no GPU device: {e}"))?;
+        let ev = crate::export::Evaluator::new(&device, &queue, &graph, o.seed)?;
+        let text = crate::noiser_file::file(&graph, o.seed, |pts| ev.eval_points(pts))?;
+        std::fs::write(path, text).map_err(|e| format!("{}: {e}", path.display()))?;
+        log.line(&format!("wrote {}", path.display()));
+        return Ok(0);
+    }
     std::fs::create_dir_all(&o.out).map_err(|e| format!("{}: {e}", o.out.display()))?;
     log.file = std::fs::OpenOptions::new().create(true).append(true).open(o.out.join("noiser-batch.log")).ok();
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());

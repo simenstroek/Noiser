@@ -875,6 +875,43 @@ fn the_noiser_format_document_matches_the_shader() {
     eprintln!("{checked} of {rounds} random graphs matched the interpreter");
 }
 
+/// Writes random `.noiser` files the Blender add-on can read (for `blender/check_file.py`):
+/// `NOISER_OUT_DIR=dir NOISER_FUZZ_ROUNDS=300 cargo test write_random_noiser_files -- --ignored --nocapture`.
+#[test]
+#[ignore = "writes files for the Blender check"]
+fn write_random_noiser_files() {
+    let Some(gpu) = gpu() else { return eprintln!("no GPU adapter; skipping") };
+    let dir = std::path::PathBuf::from(std::env::var("NOISER_OUT_DIR").expect("NOISER_OUT_DIR"));
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut state = 0xB10D_E7E5_7000_0001u64 ^ fuzz_seed();
+    let mut rnd = move |n: usize| {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        (state % n as u64) as usize
+    };
+    let rounds: usize = std::env::var("NOISER_FUZZ_ROUNDS").ok().and_then(|v| v.parse().ok()).unwrap_or(200);
+    let mut written = 0;
+    for _ in 0..rounds {
+        let g = codegen::random_graph(&mut rnd);
+        let file = crate::noiser_file::ops(&g, 1).unwrap();
+        // Only what the add-on builds: no patterns, grids, normals, curves, or noise other than Perlin.
+        let ok = file["ops"].as_array().unwrap().iter().all(|o| match o["op"].as_str().unwrap() {
+            "noise" => o["kind"] == "perlin",
+            "position" | "value" | "math" | "remap" | "mix" | "separate" | "combine" => true,
+            _ => false,
+        });
+        if !ok || file["outputs"]["density"].is_null() {
+            continue;
+        }
+        let ev = crate::export::Evaluator::new(&gpu.device, &gpu.queue, &g, 1).unwrap();
+        let text = crate::noiser_file::file(&g, 1, |pts| ev.eval_points(pts)).unwrap();
+        std::fs::write(dir.join(format!("random_{written:03}.noiser")), text).unwrap();
+        written += 1;
+    }
+    eprintln!("wrote {written} files to {}", dir.display());
+}
+
 #[test]
 fn separate_and_combine_move_components_around() {
     let Some(gpu) = gpu() else { return eprintln!("no GPU adapter; skipping") };

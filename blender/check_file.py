@@ -20,7 +20,11 @@ failed = False
 for path in sys.argv[sys.argv.index("--") + 1 :]:
     data = json.load(open(path, encoding="utf-8"))
     name = os.path.basename(path)
-    group = build.build(data, name)
+    try:
+        group = build.build(data, name)
+    except build.Unsupported as e:
+        print(f"check_file: {name}: skipped ({e})")
+        continue
 
     pts, want = data["tests"]["points"], data["tests"]["density"]
     mesh = bpy.data.meshes.new(name)

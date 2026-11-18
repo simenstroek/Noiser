@@ -1,8 +1,8 @@
 """Builds a node group from a `.noiser` file (docs/noiser-format.md) out of stock Blender nodes.
 
 Geometry Nodes only: the pcg3d hash needs Integer Math and Bit Math, and Blender has no Bit Math
-node in shader trees. Version 1 supports position, value, math and Perlin noise; other ops raise
-Unsupported, and the fallback for those (and for shaders) is Noiser's VDB or slice-grid export.
+node in shader trees. Version 1 supports position, value, math (all functions; some only on floats), remap, mix, separate, combine and
+Perlin noise; other ops raise Unsupported, and the fallback for those (and for shaders) is Noiser's VDB or slice-grid export.
 """
 
 import struct
@@ -63,8 +63,8 @@ class Builder:
             self.feed(n.inputs[1], b)
         return n.outputs[out]
 
-    def mix(self, a, b, t):
-        n = self.node("ShaderNodeMix", data_type="FLOAT", clamp_factor=False)
+    def mix(self, a, b, t, clamp=False):
+        n = self.node("ShaderNodeMix", data_type="FLOAT", clamp_factor=clamp)
         by_id = {s.identifier: s for s in n.inputs}
         self.feed(by_id["Factor_Float"], t)
         self.feed(by_id["A_Float"], a)
@@ -230,7 +230,43 @@ def noise(b, op, q):
     return v
 
 
-MATH_OPS = {"add": "ADD", "subtract": "SUBTRACT", "multiply": "MULTIPLY", "divide": "DIVIDE", "min": "MINIMUM", "max": "MAXIMUM"}
+MATH_OPS = {
+    "add": "ADD", "subtract": "SUBTRACT", "multiply": "MULTIPLY", "divide": "DIVIDE", "min": "MINIMUM", "max": "MAXIMUM",
+    "power": "POWER", "absolute": "ABSOLUTE", "floor": "FLOOR", "fract": "FRACT", "sine": "SINE", "sqrt": "SQRT",
+    "modulo": "FLOORED_MODULO", "greater": "GREATER_THAN",
+}
+# The same ops on vectors (Vector Math has fewer; the others are Unsupported for vectors).
+VECTOR_MATH_OPS = {
+    "add": "ADD", "subtract": "SUBTRACT", "multiply": "MULTIPLY", "divide": "DIVIDE", "min": "MINIMUM", "max": "MAXIMUM",
+    "absolute": "ABSOLUTE", "floor": "FLOOR", "fract": "FRACTION", "sine": "SINE",
+}
+
+
+def math_op(b, op, operand):
+    """One `math` op of the file as stock nodes (float or vector, as the op's type says)."""
+    fn, vector = op["fn"], op["type"] == "vector"
+    a, c = operand(op["a"]), operand(op["b"])
+    if fn == "dot":
+        # Both operands are vectors here; a float constant is repeated (linked floats convert on their own).
+        a, c = [(v, v, v) if isinstance(v, float) else v for v in (a, c)]
+        return b.vmath("DOT_PRODUCT", a, c, out=1)
+    if fn in ("smooth_min", "smooth_max"):
+        if vector:
+            raise Unsupported(f"{fn} on vectors")
+        n = b.node("ShaderNodeMath", operation="SMOOTH_MIN" if fn == "smooth_min" else "SMOOTH_MAX")
+        b.feed(n.inputs[0], a)
+        b.feed(n.inputs[1], c)
+        b.feed(n.inputs[2], operand(op["k"]))
+        return n.outputs[0]
+    if fn == "ridge":
+        if vector:
+            return b.vmath("SUBTRACT", (1.0, 1.0, 1.0), b.vmath("ABSOLUTE", a))
+        return b.math("SUBTRACT", 1.0, b.math("ABSOLUTE", a))
+    if vector:
+        if fn not in VECTOR_MATH_OPS:
+            raise Unsupported(f"{fn} on vectors")
+        return b.vmath(VECTOR_MATH_OPS[fn], a, c)
+    return b.math(MATH_OPS[fn], a, c)
 
 
 def build(data, name, tree_type=GN):
@@ -258,9 +294,25 @@ def build(data, name, tree_type=GN):
                 v = vn.outputs[0]
         elif kind == "math":
             operand = lambda x: out[x["node"]] if isinstance(x, dict) else (float(x),) * 3 if op["type"] == "vector" else float(x)
-            fn = MATH_OPS[op["fn"]]
             # Links convert like Blender's implicit conversions, which the format adopts.
-            v = (b.vmath if op["type"] == "vector" else b.math)(fn, operand(op["a"]), operand(op["b"]))
+            v = math_op(b, op, operand)
+        elif kind == "remap":
+            fl = lambda x: out[x["node"]] if isinstance(x, dict) else float(x)
+            n = b.node("ShaderNodeMapRange", data_type="FLOAT", interpolation_type="LINEAR", clamp=bool(op["clamp"]))
+            for name, key in [("Value", "value"), ("From Min", "from_min"), ("From Max", "from_max"), ("To Min", "to_min"), ("To Max", "to_max")]:
+                b.feed(n.inputs[name], fl(op[key]))
+            v = n.outputs[0]
+        elif kind == "mix":
+            fl = lambda x: out[x["node"]] if isinstance(x, dict) else float(x)
+            v = b.mix(fl(op["a"]), fl(op["b"]), fl(op["factor"]), clamp=bool(op["clamp"]))
+        elif kind == "separate":
+            n = b.node("ShaderNodeSeparateXYZ")
+            if op["vector"] is not None:
+                g.links.new(out[op["vector"]], n.inputs[0])
+            v = n.outputs["XYZ".index(op["component"].upper())]
+        elif kind == "combine":
+            fl = lambda x: out[x["node"]] if isinstance(x, dict) else float(x)
+            v = b.combine(fl(op["x"]), fl(op["y"]), fl(op["z"]))
         elif kind == "noise":
             q = gin.outputs["Position"] if op["position"] is None else out[op["position"]]
             v = noise(b, op, q)
