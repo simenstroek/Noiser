@@ -567,7 +567,7 @@ fn remap_matches_reference() {
 #[test]
 fn random_graphs_build_and_evaluate_on_the_gpu() {
     let Some(gpu) = gpu() else { return eprintln!("no GPU adapter; skipping") };
-    let mut state = 0x9E3779B97F4A7C15u64;
+    let mut state = 0x9E3779B97F4A7C15u64 ^ fuzz_seed();
     let mut rnd = move |n: usize| {
         state ^= state << 13;
         state ^= state >> 7;
@@ -618,10 +618,15 @@ fn slice_values_can_be_read_back_for_the_value_readout() {
 }
 
 /// Whenever the tiling analysis says a graph has no broken node, the density must repeat every tile.
+/// `NOISER_FUZZ_SEED=n` runs the property tests on a different sequence of random graphs.
+fn fuzz_seed() -> u64 {
+    std::env::var("NOISER_FUZZ_SEED").ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(0).wrapping_mul(0x9E37_79B9_7F4A_7C15)
+}
+
 #[test]
 fn graphs_the_analysis_accepts_really_tile() {
     let Some(gpu) = gpu() else { return eprintln!("no GPU adapter; skipping") };
-    let mut state = 0xA5A5_1234_5678_9ABCu64;
+    let mut state = 0xA5A5_1234_5678_9ABCu64 ^ fuzz_seed();
     let mut rnd = move |n: usize| {
         state ^= state << 13;
         state ^= state >> 7;
@@ -663,7 +668,7 @@ fn graphs_the_analysis_accepts_really_tile() {
 #[test]
 fn the_density_range_analysis_is_sound() {
     let Some(gpu) = gpu() else { return eprintln!("no GPU adapter; skipping") };
-    let mut state = 0x0F0F_1357_2468_ACE1u64;
+    let mut state = 0x0F0F_1357_2468_ACE1u64 ^ fuzz_seed();
     let mut rnd = move |n: usize| {
         state ^= state << 13;
         state ^= state >> 7;
@@ -842,7 +847,7 @@ mod noiser_interpreter {
 #[test]
 fn the_noiser_format_document_matches_the_shader() {
     let Some(gpu) = gpu() else { return eprintln!("no GPU adapter; skipping") };
-    let mut state = 0x5EED_0000_1111_2222u64;
+    let mut state = 0x5EED_0000_1111_2222u64 ^ fuzz_seed();
     let mut rnd = move |n: usize| {
         state ^= state << 13;
         state ^= state >> 7;
