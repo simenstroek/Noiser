@@ -558,6 +558,10 @@ pub enum NodeKind {
     /// Linear map of input 0 from [from min, from max] to [to min, to max]; the other four inputs
     /// are those bounds. `vals` holds the unconnected defaults of all five inputs.
     Remap { vals: [f32; 5], clamp: bool },
+    /// One component (0 X, 1 Y, 2 Z) of a vector input, as a float.
+    Separate { component: u32 },
+    /// A vector from three floats; `vals` holds the unconnected defaults of X, Y and Z.
+    Combine { vals: [f32; 3] },
     /// Blends A into B: `a + (b - a) * factor`, the factor limited to 0..1 when `clamp`. Inputs are
     /// factor, A and B; `vals` holds their unconnected defaults.
     Mix { vals: [f32; 3], clamp: bool },
@@ -594,7 +598,8 @@ impl NodeKind {
             NodeKind::Reroute => 1,
             NodeKind::Math { op, .. } => if op.is_smooth() { 3 } else if op.is_unary() { 1 } else { 2 },
             NodeKind::Remap { .. } => 5,
-            NodeKind::Mix { .. } => 3,
+            NodeKind::Mix { .. } | NodeKind::Combine { .. } => 3,
+            NodeKind::Separate { .. } => 1,
             NodeKind::Curve { .. } => 1,
             NodeKind::Normal { .. } | NodeKind::Noise(_) | NodeKind::Grid { .. } | NodeKind::Pattern(_) | NodeKind::OutDensity | NodeKind::OutNormal => 1,
         }
@@ -606,6 +611,7 @@ impl NodeKind {
             NodeKind::Math { a, b, c, .. } if port < self.input_count() => Some([*a, *b, *c][port]),
             NodeKind::Remap { vals, .. } => vals.get(port).copied(),
             NodeKind::Mix { vals, .. } => vals.get(port).copied(),
+            NodeKind::Combine { vals } => vals.get(port).copied(),
             _ => None,
         }
     }
@@ -623,6 +629,11 @@ impl NodeKind {
                 }
             }
             NodeKind::Mix { vals, .. } => {
+                if let Some(x) = vals.get_mut(port) {
+                    *x = v;
+                }
+            }
+            NodeKind::Combine { vals } => {
                 if let Some(x) = vals.get_mut(port) {
                     *x = v;
                 }
@@ -802,7 +813,7 @@ impl Graph {
 
     pub fn yields_vector(&self, id: NodeId) -> bool {
         match &self.nodes[&id].kind {
-            NodeKind::Vec3(_) | NodeKind::Position | NodeKind::Normal { .. } => true,
+            NodeKind::Vec3(_) | NodeKind::Position | NodeKind::Normal { .. } | NodeKind::Combine { .. } => true,
             NodeKind::Reroute => self.input(id, 0).is_some_and(|s| self.yields_vector(s)),
             NodeKind::Math { op, .. } => *op != MathOp::Dot && (0..2).any(|p| self.input(id, p).is_some_and(|s| self.yields_vector(s))),
             _ => false,
@@ -840,7 +851,7 @@ impl Graph {
 
     /// Position → Perlin → Density, plus an unconnected Normal output.
     /// Names of the example graphs offered by File > New from template.
-    pub const TEMPLATES: [&'static str; 5] = ["Clouds", "Ridged mountains", "Cracked rock", "Brick wall", "Gyroid foam"];
+    pub const TEMPLATES: [&'static str; 6] = ["Clouds", "Ridged mountains", "Cracked rock", "Brick wall", "Gyroid foam", "Warped cells"];
 
     /// An example graph, wired to both outputs. Unknown names give the default graph.
     pub fn template(name: &str) -> Self {
@@ -864,6 +875,25 @@ impl Graph {
             }
             "Brick wall" => g.add(NodeKind::Pattern(PatternParams::for_kind(PatternKind::Bricks)), [200.0, 0.0]),
             "Gyroid foam" => g.add(NodeKind::Pattern(PatternParams::for_kind(PatternKind::Gyroid)), [200.0, 0.0]),
+            "Warped cells" => {
+                // Domain warping: the position is pushed around by three noises before it feeds the cells.
+                let pos = g.add(NodeKind::Position, [0.0, 0.0]);
+                let warp: Vec<NodeId> = (0..3u32)
+                    .map(|i| g.add(NodeKind::Noise(NoiseParams { kind: NoiseKind::Perlin, scale: 2.0, octaves: 2, seed: Some(10 + i), ..NoiseParams::default() }), [200.0, i as f32 * 160.0]))
+                    .collect();
+                let combine = g.add(NodeKind::Combine { vals: [0.0; 3] }, [420.0, 160.0]);
+                for (port, n) in warp.iter().enumerate() {
+                    g.connect(*n, combine, port);
+                }
+                let scaled = g.add(NodeKind::Math { op: MathOp::Multiply, a: 0.0, b: 0.15, c: 0.5 }, [600.0, 160.0]);
+                g.connect(combine, scaled, 0);
+                let moved = g.add(NodeKind::Math { op: MathOp::Add, a: 0.0, b: 0.0, c: 0.5 }, [780.0, 80.0]);
+                g.connect(pos, moved, 0);
+                g.connect(scaled, moved, 1);
+                let cells = g.add(NodeKind::Noise(NoiseParams { kind: NoiseKind::Worley, feature: WorleyFeature::Edges, scale: 5.0, ..NoiseParams::default() }), [960.0, 80.0]);
+                g.connect(moved, cells, 0);
+                cells
+            }
             _ => return Graph::default_graph(),
         };
         let out = g.add(NodeKind::OutDensity, [600.0, 0.0]);
@@ -929,6 +959,17 @@ impl Graph {
             NodeKind::Float(_) | NodeKind::Vec3(_) => Const,
             NodeKind::Position => Coord,
             NodeKind::Reroute => input(0, memo, stack).unwrap_or(Const),
+            // One coordinate of a position is still position-like (it shifts by whole numbers with the tile).
+            NodeKind::Separate { .. } => input(0, memo, stack).unwrap_or(Const),
+            NodeKind::Combine { .. } => {
+                let ts: Vec<Tiling> = (0..3).filter_map(|p| input(p, memo, stack)).collect();
+                match ts.iter().find(|t| matches!(t, Broken(_))) {
+                    Some(Broken(r)) => Broken(r.clone()),
+                    _ if ts.iter().any(|t| *t == Coord) => Coord,
+                    _ if ts.iter().all(|t| *t == Const) => Const,
+                    _ => Periodic,
+                }
+            }
             NodeKind::Math { op, a, b, .. } => {
                 let ta = input(0, memo, stack).unwrap_or(Const);
                 let tb = input(1, memo, stack).unwrap_or(Const);
@@ -1065,7 +1106,7 @@ impl Graph {
     /// The type an input expects; for Math it follows what is connected.
     pub fn input_type(&self, id: NodeId, port: usize) -> PortType {
         match &self.nodes[&id].kind {
-            NodeKind::Noise(_) | NodeKind::Grid { .. } | NodeKind::Pattern(_) | NodeKind::OutNormal => PortType::Vector,
+            NodeKind::Noise(_) | NodeKind::Grid { .. } | NodeKind::Pattern(_) | NodeKind::OutNormal | NodeKind::Separate { .. } => PortType::Vector,
             NodeKind::Math { op, .. } if port < 2 => {
                 let vector = *op == MathOp::Dot || (0..2).any(|p| self.input(id, p).is_some_and(|s| self.yields_vector(s)));
                 if vector { PortType::Vector } else { PortType::Float }
@@ -1104,6 +1145,21 @@ impl Graph {
             NodeKind::Float(v) => (*v, *v),
             NodeKind::Vec3(v) => (v.iter().cloned().fold(f32::MAX, f32::min), v.iter().cloned().fold(f32::MIN, f32::max)),
             NodeKind::Position => UNBOUNDED,
+            NodeKind::Separate { .. } => match self.input(id, 0) {
+                Some(src) => self.range_of(src, stack),
+                None => (0.0, 0.0),
+            },
+            NodeKind::Combine { vals } => {
+                let mut r = (f32::MAX, f32::MIN);
+                for p in 0..3 {
+                    let (lo, hi) = match self.input(id, p) {
+                        Some(src) => self.range_of(src, stack),
+                        None => (vals[p], vals[p]),
+                    };
+                    r = (r.0.min(lo), r.1.max(hi));
+                }
+                r
+            }
             NodeKind::Reroute => match self.input(id, 0) {
                 Some(src) => self.range_of(src, stack),
                 None => (0.0, 0.0),

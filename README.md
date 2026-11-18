@@ -41,7 +41,7 @@ a node that breaks tiling gets an orange outline and says why in the details pan
 - **Math**: add, subtract, multiply, divide, min, max, power, smooth min and max, dot product, absolute, ridge. The
   operator is a dropdown on the node (the mouse wheel over it steps through them). A float with a vector
   gives a vector.
-- **Remap** (with optional clamp), **Mix** (blend A into B by a factor), **Curve** (a response curve through up to 16 points; linear, smooth, step or cubic), **Value**, **Position**, **Normal** (gradient of a field).
+- **Separate XYZ** and **Combine XYZ** (take a vector apart, build one; domain warping is Position + a Combine of noises), **Remap** (with optional clamp), **Mix** (blend A into B by a factor), **Curve** (a response curve through up to 16 points; linear, smooth, step or cubic), **Value**, **Position**, **Normal** (gradient of a field).
 - **Outputs**: Density and Normal.
 - Pins and wires are blue for floats and yellow for vectors.
 
@@ -87,7 +87,7 @@ folder; the exit code is 1 if any mesh failed. Without the .cmd, use `Start-Proc
 
 **Editing.** Undo and redo, copy and paste of nodes (also between two Noiser windows), duplicate, reroute nodes, mute (bypass) a
 node with M, frame the selection with F or everything with Home, search in the add menu, File > New from template
-(clouds, ridged mountains, cracked rock, brick wall, gyroid foam), Open recent, drag a `.noisegraph` or `.obj` file
+(clouds, ridged mountains, cracked rock, brick wall, gyroid foam, warped cells), Open recent, drag a `.noisegraph` or `.obj` file
 onto the window, and a prompt before closing with unsaved changes (the window title shows an asterisk).
 Edit > Preferences holds the interface scale and the backup switch; Help > Keyboard shortcuts lists the keys.
 The preview has material settings (colour, specular, roughness, soft shadows), a render resolution (full, half,

@@ -76,6 +76,14 @@ and `clamp`. With `t = (value − from_min) / (from_max − from_min)` (0 when t
 result is `to_min + t·(to_max − to_min)`, clamped between `min(to_min, to_max)` and `max(to_min, to_max)`
 when `clamp` is true. Type float.
 
+### `separate`
+`vector` (op id or `null`, converted to a vector; `null` is the zero vector) and `component` (`x`, `y` or `z`).
+The result is that component of the vector. Type float.
+
+### `combine`
+`x`, `y` and `z` (each a number or `{"node": id}`, converted to float). The result is the vector `(x, y, z)`.
+Type vector.
+
 ### `mix`
 `factor`, `a` and `b` (each a number or `{"node": id}`, floats) and `clamp`. The result is
 `a + (b − a)·t`, where `t` is `factor`, limited to 0..1 when `clamp` is true. Type float.

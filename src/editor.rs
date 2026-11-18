@@ -101,6 +101,8 @@ pub fn title(kind: &NodeKind) -> String {
         NodeKind::Math { .. } => "Math".into(), // the operator is the dropdown on the node
         NodeKind::Remap { .. } => "Remap".into(),
         NodeKind::Mix { .. } => "Mix".into(),
+        NodeKind::Separate { .. } => "Separate XYZ".into(),
+        NodeKind::Combine { .. } => "Combine XYZ".into(),
         NodeKind::Curve { .. } => "Curve".into(),
         NodeKind::Grid { .. } => "Grid".into(),
         NodeKind::Pattern(p) => p.kind.name().into(),
@@ -120,6 +122,10 @@ fn input_label(kind: &NodeKind, port: usize) -> &'static str {
         (NodeKind::Math { .. }, _) => "Blend",
         (NodeKind::Reroute, _) => "In",
         (NodeKind::Curve { .. }, _) => "Value",
+        (NodeKind::Separate { .. }, _) => "Vector",
+        (NodeKind::Combine { .. }, 0) => "X",
+        (NodeKind::Combine { .. }, 1) => "Y",
+        (NodeKind::Combine { .. }, _) => "Z",
         (NodeKind::Mix { .. }, 0) => "Factor",
         (NodeKind::Mix { .. }, 1) => "A",
         (NodeKind::Mix { .. }, _) => "B",
@@ -147,6 +153,7 @@ fn summary(kind: &NodeKind) -> String {
         NodeKind::Float(v) => format!("{v:.3}"),
         NodeKind::Vec3(v) => format!("{:.2}, {:.2}, {:.2}", v[0], v[1], v[2]),
         NodeKind::Position => "world position".into(),
+        NodeKind::Separate { component } => format!("{} of a vector", ["X", "Y", "Z"][(*component as usize).min(2)]),
         NodeKind::Reroute => "passes its input on".into(),
         _ => String::new(),
     }
@@ -161,6 +168,8 @@ fn palette() -> Vec<(&'static str, NodeKind)> {
             ("Value", NodeKind::Float(1.0)),
             ("Math", NodeKind::Math { op: MathOp::Add, a: 0.0, b: 0.0, c: 0.5 }),
             ("Remap", NodeKind::Remap { vals: [0.0, 0.0, 1.0, 0.0, 1.0], clamp: false }),
+            ("Separate XYZ", NodeKind::Separate { component: 1 }),
+            ("Combine XYZ", NodeKind::Combine { vals: [0.0; 3] }),
             ("Mix", NodeKind::Mix { vals: [0.5, 0.0, 1.0], clamp: true }),
             ("Reroute", NodeKind::Reroute),
             ("Curve", NodeKind::Curve { points: vec![[0.0, 0.0], [1.0, 1.0]], mode: crate::graph::CurveMode::Linear }),
@@ -428,7 +437,7 @@ impl Editor {
             let header = Rect::from_min_size(l.rect.min, Vec2::new(l.rect.width(), HEADER_H * z));
             let header_color = if node.muted { Color32::from_gray(60) } else if has_output(&node.kind) { Color32::from_rgb(55, 70, 95) } else { Color32::from_rgb(80, 60, 95) };
             painter.rect_filled(header, CornerRadius { nw: r.nw, ne: r.ne, sw: 0, se: 0 }, header_color);
-            let cacheable = matches!(node.kind, NodeKind::Noise(_) | NodeKind::Math { .. } | NodeKind::Remap { .. } | NodeKind::Mix { .. } | NodeKind::Curve { .. } | NodeKind::Grid { .. } | NodeKind::Pattern(_));
+            let cacheable = matches!(node.kind, NodeKind::Noise(_) | NodeKind::Math { .. } | NodeKind::Remap { .. } | NodeKind::Mix { .. } | NodeKind::Separate { .. } | NodeKind::Curve { .. } | NodeKind::Grid { .. } | NodeKind::Pattern(_));
             // Keep the title clear of the header buttons.
             let title_clip = header.with_max_x(header.right() - (if cacheable { 48.0 } else { 28.0 }) * z);
             painter.with_clip_rect(title_clip).text(header.left_center() + Vec2::new(8.0 * z, 0.0), egui::Align2::LEFT_CENTER, &if node.muted { format!("{} (muted)", title(&node.kind)) } else { title(&node.kind) }, font.clone(), if node.muted { Color32::from_gray(150) } else { Color32::WHITE });

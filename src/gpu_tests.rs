@@ -618,6 +618,39 @@ fn slice_values_can_be_read_back_for_the_value_readout() {
 }
 
 #[test]
+fn separate_and_combine_move_components_around() {
+    let Some(gpu) = gpu() else { return eprintln!("no GPU adapter; skipping") };
+    let at = [[0.3, 0.6, 0.9]];
+    // Position -> Separate Y is the y coordinate.
+    let mut g = Graph::default();
+    let p = g.add(NodeKind::Position, [0.0; 2]);
+    let s = g.add(NodeKind::Separate { component: 1 }, [0.0; 2]);
+    let o = g.add(NodeKind::OutDensity, [0.0; 2]);
+    g.connect(p, s, 0);
+    g.connect(s, o, 0);
+    near(eval(&gpu, &g, &at)[0], 0.6, "the y coordinate");
+    // Combine (x from the position, 2, z from the position) then Separate Z gives z.
+    let mut g = Graph::default();
+    let p = g.add(NodeKind::Position, [0.0; 2]);
+    let sx = g.add(NodeKind::Separate { component: 0 }, [0.0; 2]);
+    let sz = g.add(NodeKind::Separate { component: 2 }, [0.0; 2]);
+    let c = g.add(NodeKind::Combine { vals: [0.0, 2.0, 0.0] }, [0.0; 2]);
+    let back = g.add(NodeKind::Separate { component: 1 }, [0.0; 2]);
+    let o = g.add(NodeKind::OutDensity, [0.0; 2]);
+    g.connect(p, sx, 0);
+    g.connect(p, sz, 0);
+    g.connect(sx, c, 0);
+    g.connect(sz, c, 2);
+    g.connect(c, back, 0);
+    g.connect(back, o, 0);
+    near(eval(&gpu, &g, &at)[0], 2.0, "the unconnected Y of the Combine node");
+    // A rebuilt position still tiles when it feeds a noise.
+    let n = g.add(NodeKind::Noise(NoiseParams::default()), [0.0; 2]);
+    g.connect(c, n, 0);
+    assert!(!matches!(g.tiling()[&n], crate::graph::Tiling::Broken(_)), "{:?}", g.tiling()[&n]);
+}
+
+#[test]
 fn mix_matches_reference() {
     let Some(gpu) = gpu() else { return eprintln!("no GPU adapter; skipping") };
     let mix = |vals: [f32; 3], clamp: bool| {

@@ -826,6 +826,15 @@ fn node_props(ui: &mut egui::Ui, kind: &mut NodeKind) {
                 ui.weak("1 − |a|. Ridge of noise gives ridged noise; Absolute gives billow.");
             }
         }
+        NodeKind::Separate { component } => {
+            ui.horizontal(|ui| {
+                for (c, name) in [(0, "X"), (1, "Y"), (2, "Z")] {
+                    ui.selectable_value(component, c, name);
+                }
+            });
+            ui.weak("One component of the vector, as a float. An unconnected vector is 0.");
+        }
+        NodeKind::Combine { .. } => _ = ui.weak("A vector from three floats. Unconnected inputs use the values on the node."),
         NodeKind::Mix { clamp, .. } => {
             row(ui, clamp, true, |ui, c| _ = ui.checkbox(c, "limit the factor to 0..1"));
             ui.weak("A + (B - A) x Factor. The input values sit on the node.");

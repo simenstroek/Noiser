@@ -105,6 +105,8 @@ pub fn compile_with(g: &Graph, caches: &BTreeMap<NodeId, u32>) -> Result<Compile
                     params.extend(p.get(i).copied().unwrap_or(*p.last().unwrap()));
                 }
             }
+            NodeKind::Separate { component } => params.push(*component as f32),
+            NodeKind::Combine { vals } => params.extend(vals),
             NodeKind::Mix { vals, clamp } => {
                 params.extend(vals);
                 params.push(if *clamp { 1.0 } else { 0.0 });
@@ -335,8 +337,16 @@ impl Gen<'_> {
                 let x: Vec<String> = (0..5).map(|p| self.operand(id, p, Ty::F, &format!("P[{}]", s + p))).collect();
                 (Ty::F, format!("remap({}, {}, {}, {}, {}, P[{}] > 0.5)", x[0], x[1], x[2], x[3], x[4], s + 5))
             }
-            NodeKind::Mix { .. } => {
+            NodeKind::Separate { component } => {
+                let v = self.operand(id, 0, Ty::V, "vec3f(0.0)");
+                (Ty::F, format!("{v}.{}", ["x", "y", "z"][(*component as usize).min(2)]))
+            }
+            NodeKind::Combine { .. } => {
                 let x: Vec<String> = (0..3).map(|p| self.operand(id, p, Ty::F, &format!("P[{}]", s + p))).collect();
+                (Ty::V, format!("vec3f({}, {}, {})", x[0], x[1], x[2]))
+            }
+            NodeKind::Mix { .. } => {
+                let x: Vec<String>  = (0..3).map(|p| self.operand(id, p, Ty::F, &format!("P[{}]", s + p))).collect();
                 (Ty::F, format!("mix_ab({}, {}, {}, P[{}] > 0.5)", x[0], x[1], x[2], s + 3))
             }
             NodeKind::Curve { .. } => {
@@ -396,7 +406,7 @@ pub(crate) fn random_graph(rnd: &mut impl FnMut(usize) -> usize) -> Graph {
     let mut g = Graph::default();
     let count = 3 + rnd(6);
     for i in 0..count {
-        let kind = match rnd(12) {
+        let kind = match rnd(14) {
             0 => K::Float(rnd(5) as f32 - 2.0),
             1 => K::Vec3([rnd(3) as f32, 0.5, -1.0]),
             2 => K::Position,
@@ -408,6 +418,8 @@ pub(crate) fn random_graph(rnd: &mut impl FnMut(usize) -> usize) -> Graph {
             8 => K::Pattern(PatternParams::for_kind(PatternKind::ALL[rnd(8)])),
             9 => K::Normal { flip: rnd(2) == 0 },
             10 => K::Reroute,
+            11 => K::Separate { component: rnd(3) as u32 },
+            12 => K::Combine { vals: [0.5, 1.0, -1.0] },
             _ => K::Noise(NoiseParams {
                 kind: crate::graph::NoiseKind::ALL[rnd(5)],
                 feature: [WorleyFeature::F1, WorleyFeature::F2, WorleyFeature::F2MinusF1, WorleyFeature::CellValue, WorleyFeature::Edges][rnd(5)],
@@ -445,6 +457,7 @@ mod tests {
             let g = Graph::template(name);
             assert!(Graph::from_json(&g.to_json()).is_ok(), "{name}");
             validate(&compile(&g).unwrap());
+            assert!(g.tiling().values().all(|t| !matches!(t, crate::graph::Tiling::Broken(_))), "{name} should tile");
         }
     }
 
