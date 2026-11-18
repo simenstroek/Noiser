@@ -16,6 +16,7 @@ mod meshmask;
 mod meshexport;
 mod meshformats;
 mod meshsdf;
+mod shaderexport;
 mod surface;
 mod noiser_file;
 #[cfg(test)]
@@ -1303,6 +1304,18 @@ impl eframe::App for App {
                     }
                     if ui.add_enabled(self.export_job.is_none(), egui::Button::new("Export Math Function (.noiser)…")).clicked() {
                         self.export_function();
+                    }
+                    if ui.button("Export shader code (HLSL, GLSL, WGSL)…").clicked() {
+                        let name = self.path.as_ref().and_then(|p| p.file_stem()).map_or("noise".into(), |n| n.to_string_lossy().into_owned());
+                        if let Some(path) = rfd::FileDialog::new().add_filter("HLSL", &["hlsl"]).add_filter("GLSL", &["glsl"]).add_filter("WGSL", &["wgsl"]).set_file_name(format!("{name}.hlsl")).save_file() {
+                            self.status = match path.extension().and_then(|e| e.to_str()).and_then(shaderexport::Lang::from_extension) {
+                                Some(lang) => match shaderexport::export(&self.graph, self.pv.seed, lang).and_then(|code| std::fs::write(&path, code).map_err(|e| e.to_string())) {
+                                    Ok(()) => format!("Exported {}", path.display()),
+                                    Err(e) => format!("Shader export failed: {e}"),
+                                },
+                                None => "Pick a .hlsl, .glsl or .wgsl file name".into(),
+                            };
+                        }
                     }
                 });
                 ui.menu_button("Help", |ui| {

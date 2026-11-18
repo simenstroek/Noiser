@@ -10,7 +10,7 @@ use std::io::Write;
 use std::path::PathBuf;
 
 pub const USAGE: &str = "usage: noiser --headless GRAPH.noisegraph --batch-out DIR (--batch-file F.obj ... | --batch-dir SRC)
-  [--export-noiser OUT.noiser] [--manifest meshes.json] [--param name=value ...] [--set 3.scale=8 ...] [--amount 0.25] [--amount-var 0.2] [--tile 1.0] [--size 1.0] [--seed 0] [--seed-mode same|increment|random]
+  [--export-noiser OUT.noiser] [--export-shader OUT.hlsl|glsl|wgsl] [--manifest meshes.json] [--param name=value ...] [--set 3.scale=8 ...] [--amount 0.25] [--amount-var 0.2] [--tile 1.0] [--size 1.0] [--seed 0] [--seed-mode same|increment|random]
   [--res 256] [--grid-res 128] [--format obj|ply] [--cull 0.01] [--mask KIND ...]";
 
 /// One mesh of a `--manifest`: the file and any settings that differ from the command line for that mesh.
@@ -63,6 +63,8 @@ struct Options {
     amount_var: f32,
     /// `--export-noiser FILE`: write the graph as a .noiser math function instead of displacing meshes.
     export_noiser: Option<PathBuf>,
+    /// `--export-shader FILE.hlsl|glsl|wgsl`: write the graph as shader code instead of displacing meshes.
+    export_shader: Option<PathBuf>,
     /// `--param name=value`: overrides of the graph's exposed parameters.
     params: Vec<(String, serde_json::Value)>,
     /// `--set NODE.FIELD=VALUE` overrides of node settings in the graph file.
@@ -85,6 +87,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
         mode: SeedMode::Same,
         amount_var: 0.0,
         export_noiser: None,
+        export_shader: None,
         params: Vec::new(),
         sets: Vec::new(),
         settings: Settings::default(),
@@ -114,6 +117,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
             "--amount" => o.amount = float(value("a number")?)?,
             "--tile" => o.tile = float(value("a number")?)?,
             "--size" => o.size = float(value("a number")?)?,
+            "--export-shader" => o.export_shader = Some(value("a file")?.into()),
             "--export-noiser" => o.export_noiser = Some(value("a file")?.into()),
             "--param" => {
                 let spec = value("name=value")?;
@@ -160,7 +164,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
     if o.graph.as_os_str().is_empty() {
         return Err("no graph file given".into());
     }
-    if o.export_noiser.is_some() {
+    if o.export_noiser.is_some() || o.export_shader.is_some() {
         return Ok(o);
     }
     if o.out.as_os_str().is_empty() {
@@ -250,6 +254,12 @@ fn run(args: &[String], log: &mut Log) -> Result<usize, String> {
     let mut sets = o.sets.clone();
     sets.extend(resolve_params(&text, &o.params)?);
     let graph = Graph::from_json(&apply_sets(&text, &sets)?)?;
+    if let Some(path) = &o.export_shader {
+        let lang = path.extension().and_then(|e| e.to_str()).and_then(crate::shaderexport::Lang::from_extension).ok_or("--export-shader needs a .hlsl, .glsl or .wgsl file name")?;
+        std::fs::write(path, crate::shaderexport::export(&graph, o.seed, lang)?).map_err(|e| format!("{}: {e}", path.display()))?;
+        log.line(&format!("wrote {}", path.display()));
+        return Ok(0);
+    }
     if let Some(path) = &o.export_noiser {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default())).map_err(|e| format!("no GPU adapter: {e}"))?;
