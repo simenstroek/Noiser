@@ -274,6 +274,29 @@ impl MeshWorkspace {
         Ok(())
     }
 
+    /// A quick look: the shape the first Remesh gives, at most 6000 triangles, written to a temporary file and shown.
+    fn start_preview(&mut self, device: eframe::wgpu::Device, queue: eframe::wgpu::Queue) {
+        let progress = crate::meshexport::Progress::default();
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let (tx, rx) = mpsc::channel();
+        let (graph, cache, seed, p, l, base) = (self.graph.clone(), self.cache.clone(), self.seed, progress.clone(), log.clone(), self.base());
+        std::thread::spawn(move || {
+            let mut cache = cache.lock().unwrap();
+            let mut note = |s: &str| l.lock().unwrap().push(s.to_string());
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let mesh = Runner { device: &device, queue: &queue, cache: &mut cache, base, seed, progress: p, log: &mut note, batch_file: None, max_triangles: Some(6000) }.preview(&graph)?;
+                let path = std::env::temp_dir().join("noiser-mesh-preview.obj");
+                mesh.write_obj(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+                Ok(vec![path])
+            }));
+            let _ = tx.send(result.unwrap_or_else(|_| Err("the preview crashed".into())));
+        });
+        self.log.clear();
+        self.written.clear();
+        self.thumbnails.clear();
+        self.job = Some(RunJob { progress, log, done: rx });
+    }
+
     fn start(&mut self, device: eframe::wgpu::Device, queue: eframe::wgpu::Queue, files: Vec<Option<PathBuf>>) {
         let progress = crate::meshexport::Progress::default();
         let log = Arc::new(Mutex::new(Vec::new()));
@@ -287,7 +310,7 @@ impl MeshWorkspace {
             for (i, file) in files.into_iter().enumerate() {
                 let label = file.as_ref().map_or(String::new(), |f| format!("[{}/{total}] {}: ", i + 1, f.file_name().map_or(String::new(), |n| n.to_string_lossy().into_owned())));
                 let mut note = |s: &str| l.lock().unwrap().push(format!("{label}{s}"));
-                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| Runner { device: &device, queue: &queue, cache: &mut cache, base: base.clone(), seed, progress: p.clone(), log: &mut note, batch_file: file }.run(&graph)));
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| Runner { device: &device, queue: &queue, cache: &mut cache, base: base.clone(), seed, progress: p.clone(), log: &mut note, batch_file: file, max_triangles: None }.run(&graph)));
                 match result.unwrap_or_else(|_| Err("the run crashed".into())) {
                     Ok(f) => written.extend(f),
                     Err(e) => {
@@ -338,6 +361,10 @@ impl crate::App {
         if let Some(r) = finished {
             self.mesh_ws.job = None;
             match r {
+                Ok(files) if files.len() == 1 && files[0].file_name().is_some_and(|n| n == "noiser-mesh-preview.obj") => {
+                    self.status = "Mesh graph preview ready (nothing written to your folders)".into();
+                    self.mesh_ws.preview = Preview::load(&files[0]).ok();
+                }
                 Ok(files) => {
                     self.status = format!("Mesh graph: {} file(s) written", files.len());
                     self.mesh_ws.preview = files.iter().find(|f| f.extension().is_some_and(|e| e == "obj" || e == "ply")).and_then(|f| Preview::load(f).ok());
@@ -425,6 +452,10 @@ impl crate::App {
                 if ui.add_enabled(!running, egui::Button::new("Run")).on_hover_text("Runs every Remesh, Auto UVs and Bake that feeds an output node and writes the files.").clicked() {
                     let (d, q) = (self.rs.device.clone(), self.rs.queue.clone());
                     self.mesh_ws.start(d, q, vec![None]);
+                }
+                if ui.add_enabled(!running, egui::Button::new("Preview")).on_hover_text("A quick look at the shape the first Remesh makes (6,000 triangles at most), without UVs or maps: for tuning the noise graphs.").clicked() {
+                    let (d, q) = (self.rs.device.clone(), self.rs.queue.clone());
+                    self.mesh_ws.start_preview(d, q);
                 }
                 if ui.add_enabled(!running, egui::Button::new("Run on files…")).on_hover_text("Runs the graph once for each mesh file you pick: a Load Mesh node whose path is {batch} reads that file, and {name} in an output name becomes its name.").clicked() {
                     if let Some(files) = rfd::FileDialog::new().add_filter("Mesh", &["obj", "ply", "stl", "gltf", "glb"]).pick_files() {

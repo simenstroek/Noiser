@@ -199,6 +199,8 @@ pub struct Runner<'a> {
     pub log: &'a mut dyn FnMut(&str),
     /// Batch runs: the mesh file a Load Mesh node whose path is `{batch}` reads, and the `{name}` output names use.
     pub batch_file: Option<PathBuf>,
+    /// Quick previews: Remesh nodes make at most this many triangles.
+    pub max_triangles: Option<u32>,
 }
 
 impl Runner<'_> {
@@ -281,6 +283,27 @@ impl Runner<'_> {
         crate::meshapp::unique_path(&dir, &format!("{}{suffix}", o.name.replace("{name}", &stem)), ext)
     }
 
+    /// The first Remesh result upstream of the first mesh output, at the triangle limit: a quick look at the shape
+    /// while the noise graphs are being tuned.
+    pub fn preview(&mut self, graph: &Graph) -> Result<RawMesh, String> {
+        let lowered = lowered_mesh(graph, &self.base)?;
+        let Some(out) = graph.nodes.iter().find(|(_, n)| matches!(n.kind, NodeKind::OutMesh(_))).map(|(id, _)| *id) else { return Err("the graph has no Mesh output node".into()) };
+        // Walk back along mesh wires to the Remesh node.
+        let mut at = graph.input_from(out, 0).ok_or("the Mesh output has nothing connected")?.0;
+        for _ in 0..graph.nodes.len() {
+            if matches!(graph.nodes[&at].kind, NodeKind::Remesh { .. }) {
+                break;
+            }
+            at = graph.input_from(at, 0).ok_or("the chain before the Mesh output has no Remesh node")?.0;
+        }
+        let mut memo = BTreeMap::new();
+        let mut fields: Fields = BTreeMap::new();
+        match self.value(graph, &lowered, at, &mut memo, &mut fields)? {
+            Value::Mesh(m) => Ok(m),
+            _ => Err("no Remesh node found upstream of the Mesh output".into()),
+        }
+    }
+
     /// Runs the operation nodes upstream of every output node and writes the files; returns the files written.
     pub fn run(&mut self, graph: &Graph) -> Result<Vec<PathBuf>, String> {
         let lowered = lowered_mesh(graph, &self.base)?;
@@ -347,6 +370,7 @@ impl Runner<'_> {
         let input = |port: usize| original.input_from(id, port).ok_or_else(|| format!("node {id} has input {} unconnected", port + 1));
         let v = match &node.kind {
             NodeKind::Remesh { triangles, adaptivity } => {
+                let triangles = &self.max_triangles.map_or(*triangles, |m| (*triangles).min(m));
                 let field = self.field_for(original, lowered, input(0)?, true, fields)?;
                 (self.log)(&format!("remeshing to {triangles} triangles"));
                 let d = Displace { amount: 0.0, tile_size: 1.0, prim_size: 1.0, mask: crate::meshmask::PackedMask::NONE };

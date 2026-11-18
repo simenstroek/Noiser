@@ -1772,7 +1772,7 @@ fn a_mesh_graph_runs_from_a_mesh_file_to_files() {
     let mut cache = crate::meshgraph::MeshCache::default();
     let mut log = Vec::new();
     let mut note = |s: &str| log.push(s.to_string());
-    let mut runner = crate::meshgraph::Runner { device: &gpu.device, queue: &gpu.queue, cache: &mut cache, base: dir.clone(), seed: 0, progress: Default::default(), log: &mut note, batch_file: None };
+    let mut runner = crate::meshgraph::Runner { device: &gpu.device, queue: &gpu.queue, cache: &mut cache, base: dir.clone(), seed: 0, progress: Default::default(), log: &mut note, batch_file: None, max_triangles: None };
     let written = runner.run(&g).unwrap();
     assert_eq!(written.len(), 5, "{written:?}");
     let obj = std::fs::read_to_string(dir.join("out").join("ball.obj")).unwrap();
@@ -1798,6 +1798,30 @@ fn a_mesh_graph_runs_from_a_mesh_file_to_files() {
 format binary_little_endian") && ply.len() > 10_000);
     let packed = image::open(dir.join("out").join("packed_Combined.png")).unwrap();
     assert_eq!((packed.width(), packed.height(), packed.color()), (128, 128, image::ColorType::Rgba16));
+}
+
+/// The quick preview makes the first Remesh's shape at the triangle limit and writes nothing.
+#[test]
+fn a_mesh_graph_preview_is_the_remesh_at_a_triangle_limit() {
+    let Some(gpu) = gpu() else { return eprintln!("no GPU adapter; skipping") };
+    let dir = std::env::temp_dir().join("noiser-preview-test");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let sphere = crate::mesh::shapes::icosphere(1.0, 2);
+    crate::surface::RawMesh { normals: sphere.positions.clone(), positions: sphere.positions, triangles: sphere.triangles }.write_obj(&dir.join("ball.obj")).unwrap();
+    let mut g = Graph::default();
+    let mesh = g.add(NodeKind::LoadMesh(crate::meshgraph::LoadMeshParams { path: "ball.obj".into(), resolution: 48, ..Default::default() }), [0.0; 2]);
+    let remesh = g.add(NodeKind::Remesh { triangles: 50_000, adaptivity: 1.0 }, [0.0; 2]);
+    let uv = g.add(NodeKind::AutoUv(Default::default()), [0.0; 2]);
+    let out = g.add(NodeKind::OutMesh(Default::default()), [0.0; 2]);
+    g.connect(mesh, remesh, 0);
+    g.connect(remesh, uv, 0);
+    g.connect(uv, out, 0);
+    let mut cache = crate::meshgraph::MeshCache::default();
+    let mut note = |_: &str| {};
+    let m = crate::meshgraph::Runner { device: &gpu.device, queue: &gpu.queue, cache: &mut cache, base: dir.clone(), seed: 0, progress: Default::default(), log: &mut note, batch_file: None, max_triangles: Some(1500) }.preview(&g).unwrap();
+    assert!((1200..1800).contains(&m.triangles.len()), "{} triangles", m.triangles.len());
+    assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1, "only the input file is there: nothing was written");
 }
 
 /// A mesh with UVs, remeshed after a noise displacement, takes its own UVs back through Transfer UVs.
@@ -1835,7 +1859,7 @@ fn a_mesh_graph_transfers_the_uvs_of_its_mesh_to_the_remeshed_result() {
     let mut cache = crate::meshgraph::MeshCache::default();
     let mut log = Vec::new();
     let mut note = |s: &str| log.push(s.to_string());
-    let written = crate::meshgraph::Runner { device: &gpu.device, queue: &gpu.queue, cache: &mut cache, base: dir.clone(), seed: 0, progress: Default::default(), log: &mut note, batch_file: None }.run(&g).unwrap();
+    let written = crate::meshgraph::Runner { device: &gpu.device, queue: &gpu.queue, cache: &mut cache, base: dir.clone(), seed: 0, progress: Default::default(), log: &mut note, batch_file: None, max_triangles: None }.run(&g).unwrap();
     assert_eq!(written.len(), 1);
     let obj = std::fs::read_to_string(&written[0]).unwrap();
     let (vt, f) = (obj.lines().filter(|l| l.starts_with("vt ")).count(), obj.lines().filter(|l| l.starts_with("f ")).count());
