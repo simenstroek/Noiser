@@ -59,7 +59,9 @@ tiling 3D texture for the preview, and the nodes it covers get a green outline. 
 - 3D OpenVDB (a float grid, written by Noiser's own minimal writer).
 - 3D raw floats (`.raw`, 32-bit little-endian, x fastest; a `.raw.txt` note says the size), for tools that read volumes by hand.
 - `.noiser` math function: the graph as an op list plus test vectors, so a sampler in another host
-  can check itself. The format is specified in [`docs/noiser-format.md`](docs/noiser-format.md). A Blender
+  can check itself. The format is specified in [`docs/noiser-format.md`](docs/noiser-format.md), and
+  [`tools/noiser_reference.py`](tools/noiser_reference.py) is a Python implementation of every noise kind written from that
+  text (it matches the GPU to 1e-6), as a starting point for ports to other tools. A Blender
   extension that builds Geometry Nodes groups from it is in [`blender/`](blender) (math, remap, mix, linear curves,
   separate/combine, grid, Perlin and white noise so far; other nodes are reported as unsupported, and `blender/check_file.py`
   checks it against the file's own test vectors).
