@@ -57,20 +57,25 @@ pub struct Settings {
     /// Texels islands are extended outwards by.
     pub padding: u32,
     pub channels: Vec<Channel>,
+    /// Names of extra maps taken from fields wired into the Bake node (values 0 to 1), after the standard ones.
+    pub custom: Vec<String>,
     /// A normal map with green up (OpenGL: Blender, Unity, glTF) instead of down (DirectX: Unreal).
     pub green_up: bool,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { size: 2048, padding: 8, channels: vec![Channel::Normal, Channel::Occlusion, Channel::Curvature, Channel::Depth], green_up: false }
+        Settings { size: 2048, padding: 8, channels: vec![Channel::Normal, Channel::Occlusion, Channel::Curvature, Channel::Depth], custom: Vec::new(), green_up: false }
     }
 }
 
 /// One baked map: `size` by `size` texels, `components` values (0 to 1) per texel, the top row first.
 #[derive(Clone, Debug)]
 pub struct Image {
-    pub channel: Channel,
+    /// The standard map this is, if it is one (custom maps and processed images are not).
+    pub channel: Option<Channel>,
+    /// The name its file gets (`Normal`, `Normal_R`...).
+    pub label: String,
     pub size: u32,
     pub components: usize,
     pub data: Vec<f32>,
@@ -82,7 +87,9 @@ impl Image {
         let q = |v: f32| (v.clamp(0.0, 1.0) * 65535.0 + 0.5) as u16;
         let data: Vec<u16> = self.data.iter().map(|&v| q(v)).collect();
         let n = self.size;
-        let r = if self.components == 3 {
+        let r = if self.components == 4 {
+            image::ImageBuffer::<image::Rgba<u16>, _>::from_raw(n, n, data).ok_or("bad image size")?.save(path)
+        } else if self.components == 3 {
             image::ImageBuffer::<image::Rgb<u16>, _>::from_raw(n, n, data).ok_or("bad image size")?.save(path)
         } else {
             image::ImageBuffer::<image::Luma<u16>, _>::from_raw(n, n, data).ok_or("bad image size")?.save(path)
@@ -192,7 +199,7 @@ fn rasterize(mesh: &UvMesh, size: usize) -> Vec<Texel> {
 }
 
 /// Bakes `settings.channels` for `mesh` against `field`. `progress` is called with (done, total) texel counts.
-pub fn bake(mesh: &UvMesh, field: &mut dyn Field, settings: &Settings, progress: &dyn Fn(usize, usize)) -> Result<Vec<Image>, String> {
+pub fn bake(mesh: &UvMesh, field: &mut dyn Field, customs: &mut [&mut dyn Field], settings: &Settings, progress: &dyn Fn(usize, usize)) -> Result<Vec<Image>, String> {
     let size = settings.size.max(16) as usize;
     if mesh.triangles.is_empty() {
         return Err("nothing to bake: the mesh has no triangles".into());
@@ -214,6 +221,7 @@ pub fn bake(mesh: &UvMesh, field: &mut dyn Field, settings: &Settings, progress:
     let channels: Vec<Channel> = Channel::ALL.into_iter().filter(|c| settings.channels.contains(c)).collect();
     let mut images: Vec<Vec<f32>> = channels.iter().map(|c| vec![0.0; size * size * c.components()]).collect();
     let mut valid = vec![false; size * size];
+    let mut custom_images: Vec<Vec<f32>> = customs.iter().map(|_| vec![0.0; size * size]).collect();
     // The height map is scaled by its largest value once all texels are known.
     let mut heights: Vec<f32> = Vec::new();
     let mut curvatures: Vec<f32> = Vec::new();
@@ -318,6 +326,13 @@ pub fn bake(mesh: &UvMesh, field: &mut dyn Field, settings: &Settings, progress:
         } else {
             Vec::new()
         };
+        // Custom maps: each wired-in field read at the point on the surface.
+        for (k, f) in customs.iter_mut().enumerate() {
+            let values = f.distance(&p);
+            for (t, v) in chunk.iter().zip(values) {
+                custom_images[k][t.index as usize] = v.clamp(0.0, 1.0);
+            }
+        }
         for (i, t) in chunk.iter().enumerate() {
             valid[t.index as usize] = true;
             let (n_low, tt, bb) = frame[i];
@@ -374,7 +389,11 @@ pub fn bake(mesh: &UvMesh, field: &mut dyn Field, settings: &Settings, progress:
     for (k, &c) in channels.iter().enumerate() {
         let mut data = std::mem::take(&mut images[k]);
         dilate(&mut data, valid.clone(), size, c.components(), settings.padding as usize);
-        out.push(Image { channel: c, size: size as u32, components: c.components(), data });
+        out.push(Image { channel: Some(c), label: c.name().to_string(), size: size as u32, components: c.components(), data });
+    }
+    for (k, mut data) in custom_images.into_iter().enumerate() {
+        dilate(&mut data, valid.clone(), size, 1, settings.padding as usize);
+        out.push(Image { channel: None, label: settings.custom.get(k).cloned().unwrap_or_else(|| format!("Custom{}", k + 1)), size: size as u32, components: 1, data });
     }
     Ok(out)
 }
@@ -463,9 +482,9 @@ mod tests {
     #[test]
     fn a_smooth_sphere_bakes_a_flat_normal_map_and_open_occlusion() {
         let mesh = sphere_uv(3);
-        let settings = Settings { size: 128, padding: 4, channels: vec![Channel::Normal, Channel::Occlusion, Channel::Position, Channel::Thickness, Channel::Curvature], green_up: false };
-        let images = bake(&mesh, &mut Bumpy(0.0), &settings, &|_, _| {}).unwrap();
-        let get = |c: Channel| images.iter().find(|i| i.channel == c).unwrap();
+        let settings = Settings { size: 128, padding: 4, channels: vec![Channel::Normal, Channel::Occlusion, Channel::Position, Channel::Thickness, Channel::Curvature], custom: Vec::new(), green_up: false };
+        let images = bake(&mesh, &mut Bumpy(0.0), &mut [], &settings, &|_, _| {}).unwrap();
+        let get = |c: Channel| images.iter().find(|i| i.channel == Some(c)).unwrap();
         // Normal map: tangent-space z (blue) near 1 on a sphere sampled by a fine low-poly one.
         let n = get(Channel::Normal);
         let valid = n.data.chunks(3).filter(|p| p[2] > 0.0).count();
@@ -496,14 +515,14 @@ mod tests {
     #[test]
     fn bumps_show_up_in_the_normal_map_and_the_height() {
         let mesh = sphere_uv(2);
-        let settings = Settings { size: 128, padding: 4, channels: vec![Channel::Normal, Channel::Depth], green_up: false };
-        let images = bake(&mesh, &mut Bumpy(0.05), &settings, &|_, _| {}).unwrap();
-        let n = images.iter().find(|i| i.channel == Channel::Normal).unwrap();
+        let settings = Settings { size: 128, padding: 4, channels: vec![Channel::Normal, Channel::Depth], custom: Vec::new(), green_up: false };
+        let images = bake(&mesh, &mut Bumpy(0.05), &mut [], &settings, &|_, _| {}).unwrap();
+        let n = images.iter().find(|i| i.channel == Some(Channel::Normal)).unwrap();
         let blues: Vec<f32> = n.data.chunks(3).map(|p| p[2]).filter(|b| *b > 0.0).collect();
         let mean = blues.iter().sum::<f32>() / blues.len() as f32;
         let steepest = blues.iter().cloned().fold(1.0, f32::min);
         assert!(mean < 0.998 && steepest < 0.985, "the bumps tilt the normals: blue mean {mean}, lowest {steepest}");
-        let h = images.iter().find(|i| i.channel == Channel::Depth).unwrap();
+        let h = images.iter().find(|i| i.channel == Some(Channel::Depth)).unwrap();
         let (lo, hi) = (h.data.iter().cloned().fold(1.0, f32::min), h.data.iter().cloned().fold(0.0, f32::max));
         assert!(lo < 0.35 && hi > 0.65, "height spans {lo}..{hi}");
     }

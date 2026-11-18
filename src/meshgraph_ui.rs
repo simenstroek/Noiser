@@ -102,6 +102,38 @@ pub fn props(ui: &mut egui::Ui, kind: &mut NodeKind) -> bool {
                 }
             }
             ui.checkbox(&mut b.green_up, "normal map green up (Blender, Unity, glTF)");
+            ui.separator();
+            ui.weak("Custom maps: a field wired into an extra input is baked as a map (values 0 to 1), for example a mask you blend surfaces with.");
+            let mut remove = None;
+            for (i, name) in b.custom.iter_mut().enumerate() {
+                ui.horizontal(|ui| {
+                    ui.add(egui::TextEdit::singleline(name).desired_width(120.0));
+                    if ui.small_button("×").on_hover_text("Remove this custom map").clicked() {
+                        remove = Some(i);
+                    }
+                });
+            }
+            if let Some(i) = remove {
+                b.custom.remove(i);
+            }
+            if b.custom.len() < 6 && ui.button("Add custom map").clicked() {
+                b.custom.push(format!("Custom{}", b.custom.len() + 1));
+            }
+            true
+        }
+        NodeKind::ImageSplit => {
+            ui.weak("Splits an image into four grey images: red, green, blue and alpha (1 when the image has none).");
+            true
+        }
+        NodeKind::ImageCombine => {
+            ui.weak("Makes one image from four grey images. Unconnected channels are 0 (alpha 1). For example: a normal map's red and green, then occlusion in blue and a mask in alpha, with the blue of the normal rebuilt in the shader.");
+            true
+        }
+        NodeKind::ImageLevels { scale, offset, invert } => {
+            ui.weak("value × scale + offset, then inverted if ticked, limited to 0 to 1.");
+            crate::row(ui, scale, 1.0, |ui, v| _ = ui.add(egui::DragValue::new(v).speed(0.01).prefix("scale ")));
+            crate::row(ui, offset, 0.0, |ui, v| _ = ui.add(egui::DragValue::new(v).speed(0.01).prefix("offset ")));
+            crate::row(ui, invert, false, |ui, v| _ = ui.checkbox(v, "invert"));
             true
         }
         NodeKind::OutMesh(o) | NodeKind::OutImage(o) => {

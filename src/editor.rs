@@ -141,6 +141,9 @@ pub fn title(kind: &NodeKind) -> String {
         NodeKind::Bake(_) => "Bake".into(),
         NodeKind::OutMesh(p) => format!("Mesh: {}", p.name),
         NodeKind::OutImage(p) => format!("Image: {}", p.name),
+        NodeKind::ImageSplit => "Split channels".into(),
+        NodeKind::ImageCombine => "Combine channels".into(),
+        NodeKind::ImageLevels { .. } => "Image levels".into(),
     }
 }
 
@@ -174,8 +177,13 @@ fn input_label(kind: &NodeKind, port: usize) -> &'static str {
         (NodeKind::Remesh { .. }, _) => "Field",
         (NodeKind::AutoUv(_) | NodeKind::OutMesh(_), _) => "Mesh",
         (NodeKind::Bake(_), 0) => "Mesh",
-        (NodeKind::Bake(_), _) => "Field",
-        (NodeKind::OutImage(_), _) => "Image",
+        (NodeKind::Bake(_), 1) => "Field",
+        (NodeKind::OutImage(_) | NodeKind::ImageSplit | NodeKind::ImageLevels { .. }, _) => "Image",
+        (NodeKind::ImageCombine, 0) => "R",
+        (NodeKind::ImageCombine, 1) => "G",
+        (NodeKind::ImageCombine, 2) => "B",
+        (NodeKind::ImageCombine, _) => "A",
+        (NodeKind::Bake(_), _) => "Custom",
         _ => "",
     }
 }
@@ -188,7 +196,7 @@ fn header_tint(kind: &NodeKind) -> Color32 {
         NodeKind::Math { .. } | NodeKind::Remap { .. } | NodeKind::Mix { .. } | NodeKind::Curve { .. } | NodeKind::Normal { .. } => Color32::from_rgb(55, 70, 110),
         NodeKind::OutDensity | NodeKind::OutNormal | NodeKind::OutMesh(_) | NodeKind::OutImage(_) => Color32::from_rgb(80, 60, 95),
         NodeKind::LoadMesh(_) | NodeKind::NoiseGraph(_) => Color32::from_rgb(50, 95, 70),
-        NodeKind::Remesh { .. } | NodeKind::AutoUv(_) | NodeKind::Bake(_) => Color32::from_rgb(50, 100, 110),
+        NodeKind::Remesh { .. } | NodeKind::AutoUv(_) | NodeKind::Bake(_) | NodeKind::ImageSplit | NodeKind::ImageCombine | NodeKind::ImageLevels { .. } => Color32::from_rgb(50, 100, 110),
         _ => Color32::from_rgb(78, 78, 84),
     }
 }
@@ -233,6 +241,9 @@ fn palette() -> Vec<(&'static str, NodeKind)> {
             ("Bake", NodeKind::Bake(Default::default())),
             ("Mesh Output", NodeKind::OutMesh(Default::default())),
             ("Image Output", NodeKind::OutImage(Default::default())),
+            ("Split channels", NodeKind::ImageSplit),
+            ("Combine channels", NodeKind::ImageCombine),
+            ("Image levels", NodeKind::ImageLevels { scale: 1.0, offset: 0.0, invert: false }),
         ]);
     }
     all
@@ -689,7 +700,8 @@ impl Editor {
                 painter.circle(p, PORT_R * z, color, Stroke::new(1.0, Color32::from_gray(220)));
                 if split {
                     let name = match &node.kind {
-                        NodeKind::Bake(b) => b.channels.get(k).map_or("", |c| c.name()),
+                        NodeKind::Bake(b) => b.channels.get(k).map(|c| c.name()).or_else(|| b.custom.get(k - b.channels.len()).map(|s| s.as_str())).unwrap_or(""),
+                        NodeKind::ImageSplit => ["R", "G", "B", "A"][k.min(3)],
                         _ => ["X", "Y", "Z"][k.min(2)],
                     };
                     painter.text(p - Vec2::new(10.0 * z, 0.0), egui::Align2::RIGHT_CENTER, name, small.clone(), Color32::from_gray(210));

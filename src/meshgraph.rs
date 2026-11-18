@@ -208,7 +208,7 @@ impl Runner<'_> {
     }
 
     /// The evaluator of the field that feeds `source`, and the bounds and reach extraction needs.
-    fn field(&mut self, original: &Graph, lowered: &Graph, source: (NodeId, usize)) -> Result<FieldSource, String> {
+    fn field(&mut self, original: &Graph, lowered: &Graph, source: (NodeId, usize), require_mesh: bool) -> Result<FieldSource, String> {
         // The cone of the source with an output node on it: that is all the compiler looks at.
         let mut g = lowered.clone();
         g.nodes.retain(|_, n| !matches!(n.kind, NodeKind::OutDensity | NodeKind::OutNormal));
@@ -225,11 +225,11 @@ impl Runner<'_> {
             graph_meshes.push(GraphMesh { view: m.view.clone(), origin: m.origin, voxel: m.voxel, centre: m.norm.center, scale: m.norm.scale });
             loaded.push(m);
         }
-        if loaded.is_empty() {
+        if loaded.is_empty() && require_mesh {
             return Err("the field has no Load Mesh node, so there is no surface to extract".into());
         }
         let ev = MeshEvaluator::new_graph(self.device, self.queue, &g, self.seed, graph_meshes)?;
-        let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
+        let (mut lo, mut hi) = if loaded.is_empty() { ([0.0; 3], [0.0; 3]) } else { ([f32::MAX; 3], [f32::MIN; 3]) };
         for m in &loaded {
             for a in 0..3 {
                 lo[a] = lo[a].min(m.lo[a]);
@@ -265,7 +265,7 @@ impl Runner<'_> {
             return Err("the graph has no Mesh or Image output node".into());
         }
         let mut memo: BTreeMap<NodeId, Value> = BTreeMap::new();
-        let mut fields: BTreeMap<(NodeId, usize), std::rc::Rc<FieldSource>> = BTreeMap::new();
+        let mut fields: Fields = BTreeMap::new();
         let mut written = Vec::new();
         for out in outputs {
             let Some((src, port)) = graph.input_from(out, 0) else { return Err(format!("output node {out} has nothing connected")) };
@@ -285,7 +285,7 @@ impl Runner<'_> {
                 }
                 (NodeKind::OutImage(o), Value::Images(images)) => {
                     let Some(image) = images.get(port) else { return Err(format!("output node {out} reads image {port}, which the Bake node does not produce")) };
-                    let path = self.output_path(o, &format!("_{}", image.channel.name()), "png");
+                    let path = self.output_path(o, &format!("_{}", image.label), "png");
                     image.write_png(&path)?;
                     (self.log)(&format!("wrote {}", path.display()));
                     written.push(path);
@@ -297,16 +297,25 @@ impl Runner<'_> {
         Ok(written)
     }
 
-    fn field_for(&mut self, original: &Graph, lowered: &Graph, src: (NodeId, usize), fields: &mut BTreeMap<(NodeId, usize), std::rc::Rc<FieldSource>>) -> Result<std::rc::Rc<FieldSource>, String> {
-        if let Some(f) = fields.get(&src) {
+    fn field_for(&mut self, original: &Graph, lowered: &Graph, src: (NodeId, usize), require_mesh: bool, fields: &mut Fields) -> Result<std::rc::Rc<FieldSource>, String> {
+        if let Some(f) = fields.get(&(src.0, src.1, require_mesh)) {
             return Ok(f.clone());
         }
-        let f = std::rc::Rc::new(self.field(original, lowered, src)?);
-        fields.insert(src, f.clone());
+        let f = std::rc::Rc::new(self.field(original, lowered, src, require_mesh)?);
+        fields.insert((src.0, src.1, require_mesh), f.clone());
         Ok(f)
     }
 
-    fn value(&mut self, original: &Graph, lowered: &Graph, id: NodeId, memo: &mut BTreeMap<NodeId, Value>, fields: &mut BTreeMap<(NodeId, usize), std::rc::Rc<FieldSource>>) -> Result<Value, String> {
+    /// The image on input `port` of node `id`: the output of a Bake or image node it is wired to.
+    fn image_in(&mut self, original: &Graph, lowered: &Graph, id: NodeId, port: usize, memo: &mut BTreeMap<NodeId, Value>, fields: &mut Fields) -> Result<Option<crate::bake::Image>, String> {
+        let Some((src, sport)) = original.input_from(id, port) else { return Ok(None) };
+        match self.value(original, lowered, src, memo, fields)? {
+            Value::Images(images) => images.get(sport).cloned().map(Some).ok_or_else(|| format!("node {id} reads image {sport} of node {src}, which has no such output")),
+            _ => Err(format!("node {id} input {} needs an image", port + 1)),
+        }
+    }
+
+    fn value(&mut self, original: &Graph, lowered: &Graph, id: NodeId, memo: &mut BTreeMap<NodeId, Value>, fields: &mut Fields) -> Result<Value, String> {
         if let Some(v) = memo.get(&id) {
             return Ok(v.clone());
         }
@@ -314,7 +323,7 @@ impl Runner<'_> {
         let input = |port: usize| original.input_from(id, port).ok_or_else(|| format!("node {id} has input {} unconnected", port + 1));
         let v = match &node.kind {
             NodeKind::Remesh { triangles } => {
-                let field = self.field_for(original, lowered, input(0)?, fields)?;
+                let field = self.field_for(original, lowered, input(0)?, true, fields)?;
                 (self.log)(&format!("remeshing to {triangles} triangles"));
                 let d = Displace { amount: 0.0, tile_size: 1.0, prim_size: 1.0, mask: crate::meshmask::PackedMask::NONE };
                 let norm = Normalization { center: [0.0; 3], scale: 1.0 };
@@ -334,15 +343,66 @@ impl Runner<'_> {
                 let (mesh_src, _) = input(0)?;
                 let field_src = input(1)?;
                 let Value::Uv(uv) = self.value(original, lowered, mesh_src, memo, fields)? else { return Err(format!("node {id} (Bake) needs a mesh with UVs: put Auto UVs before it")) };
-                let field = self.field_for(original, lowered, field_src, fields)?;
+                let field = self.field_for(original, lowered, field_src, true, fields)?;
+                // Custom maps: the fields wired into the extra inputs.
+                let mut custom_fields = Vec::new();
+                for j in 0..settings.custom.len() {
+                    let src = input(2 + j)?;
+                    custom_fields.push(self.field_for(original, lowered, src, false, fields)?);
+                }
                 (self.log)("baking");
                 let (lo, hi) = (field.lo, field.hi);
                 let diagonal = (0..3).map(|a| (hi[a] - lo[a]).powi(2)).sum::<f32>().sqrt();
                 let d = Displace { amount: 0.0, tile_size: 1.0, prim_size: 1.0, mask: crate::meshmask::PackedMask::NONE };
                 let mut source = crate::meshexport::EvalField::new(&field.ev, d, 0.0005 * diagonal);
                 let progress = self.progress.clone();
-                let images = crate::bake::bake(&uv, &mut source, settings, &|done, total| progress.store((done * 1000 / total.max(1)) as u32, std::sync::atomic::Ordering::Relaxed))?;
+                let mut custom_sources: Vec<crate::meshexport::EvalField> = custom_fields.iter().map(|f| crate::meshexport::EvalField::new(&f.ev, d, 0.0005 * diagonal)).collect();
+                let mut custom_refs: Vec<&mut dyn crate::bake::Field> = custom_sources.iter_mut().map(|f| f as &mut dyn crate::bake::Field).collect();
+                let images = crate::bake::bake(&uv, &mut source, &mut custom_refs, settings, &|done: usize, total: usize| progress.store((done * 1000 / total.max(1)) as u32, std::sync::atomic::Ordering::Relaxed))?;
                 Value::Images(images)
+            }
+            NodeKind::ImageSplit => {
+                let Some(image) = self.image_in(original, lowered, id, 0, memo, fields)? else { return Err(format!("node {id} (Split channels) has no image connected")) };
+                let n = (image.size * image.size) as usize;
+                let c = image.components;
+                let names = ["R", "G", "B", "A"];
+                let split = (0..4)
+                    .map(|k| {
+                        let data: Vec<f32> = (0..n).map(|i| if k < c { image.data[i * c + k] } else if k == 3 { 1.0 } else { image.data[i * c] }).collect();
+                        crate::bake::Image { channel: None, label: format!("{}_{}", image.label, names[k]), size: image.size, components: 1, data }
+                    })
+                    .collect();
+                Value::Images(split)
+            }
+            NodeKind::ImageCombine => {
+                let mut parts = Vec::new();
+                for port in 0..4 {
+                    parts.push(self.image_in(original, lowered, id, port, memo, fields)?);
+                }
+                let Some(size) = parts.iter().flatten().map(|i| i.size).next() else { return Err(format!("node {id} (Combine channels) has no image connected")) };
+                if parts.iter().flatten().any(|i| i.size != size) {
+                    return Err(format!("node {id} (Combine channels): the images differ in size"));
+                }
+                let n = (size * size) as usize;
+                let mut data = vec![0.0f32; n * 4];
+                for (k, part) in parts.iter().enumerate() {
+                    for i in 0..n {
+                        data[i * 4 + k] = match part {
+                            Some(img) => img.data[i * img.components],
+                            None if k == 3 => 1.0,
+                            None => 0.0,
+                        };
+                    }
+                }
+                Value::Images(vec![crate::bake::Image { channel: None, label: "Combined".into(), size, components: 4, data }])
+            }
+            NodeKind::ImageLevels { scale, offset, invert } => {
+                let Some(mut image) = self.image_in(original, lowered, id, 0, memo, fields)? else { return Err(format!("node {id} (Image levels) has no image connected")) };
+                for v in &mut image.data {
+                    let x = (*v * scale + offset).clamp(0.0, 1.0);
+                    *v = if *invert { 1.0 - x } else { x };
+                }
+                Value::Images(vec![image])
             }
             _ => return Err(format!("node {id} cannot be run: it is not an operation (Remesh, Auto UVs or Bake)")),
         };
@@ -350,6 +410,9 @@ impl Runner<'_> {
         Ok(v)
     }
 }
+
+/// The field sources built so far in a run, by source node and output, and whether they need a mesh.
+type Fields = BTreeMap<(NodeId, usize, bool), std::rc::Rc<FieldSource>>;
 
 struct FieldSource {
     ev: MeshEvaluator,

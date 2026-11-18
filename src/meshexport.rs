@@ -609,11 +609,11 @@ impl Job<'_> {
                 let (lo, hi) = u.positions.iter().fold(([f32::MAX; 3], [f32::MIN; 3]), |(lo, hi), p| ([0, 1, 2].map(|a| lo[a].min(p[a])), [0, 1, 2].map(|a| hi[a].max(p[a]))));
                 let diagonal = (0..3).map(|a| (hi[a] - lo[a]).powi(2)).sum::<f32>().sqrt();
                 let mut field = EvalField { ev: self.ev, d: self.d, eps: 0.0005 * diagonal };
-                let images = crate::bake::bake(&u, &mut field, bake, &|done, total| progress.store(900 + (done * 100 / total.max(1)) as u32, Ordering::Relaxed))?;
+                let images = crate::bake::bake(&u, &mut field, &mut [], bake, &|done, total| progress.store(900 + (done * 100 / total.max(1)) as u32, Ordering::Relaxed))?;
                 let stem = path.file_stem().map_or("mesh".into(), |s| s.to_string_lossy().into_owned());
                 let dir = path.parent().unwrap_or(Path::new("."));
                 for image in &images {
-                    let file = dir.join(format!("{stem}_{}.png", image.channel.name()));
+                    let file = dir.join(format!("{stem}_{}.png", image.label));
                     image.write_png(&file)?;
                 }
                 baked = format!(", {} map(s) of {} texels", images.len(), bake.size);
