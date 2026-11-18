@@ -152,6 +152,35 @@ impl MeshWorkspace {
         self.editor.frame_next = true;
     }
 
+    /// A file dropped on the window: a mesh becomes a Load Mesh node, a noise graph a Noise Graph node, a mesh graph is
+    /// opened (after asking when there are unsaved changes).
+    pub fn drop_file(&mut self, path: PathBuf) {
+        let ext = path.extension().map_or(String::new(), |e| e.to_string_lossy().to_lowercase());
+        let at = {
+            // Below the lowest node, at the left, so it does not land on top of anything.
+            let y = self.graph.nodes.values().map(|n| n.pos[1]).fold(0.0, f32::max);
+            [0.0, y + 120.0]
+        };
+        let text = path.to_string_lossy().into_owned();
+        match ext.as_str() {
+            "meshgraph" => {
+                if self.may_discard() {
+                    if let Ok(g) = std::fs::read_to_string(&path).map_err(|e| e.to_string()).and_then(|s| Graph::from_json(&s)) {
+                        self.set(g, Some(path));
+                    }
+                }
+            }
+            "noisegraph" => {
+                let embedded = std::fs::read_to_string(&path).unwrap_or_default();
+                self.graph.add(NodeKind::NoiseGraph(crate::meshgraph::NoiseGraphParams { file: text, embedded, ..Default::default() }), at);
+            }
+            _ if crate::meshformats::is_mesh_file(&path) => {
+                self.graph.add(NodeKind::LoadMesh(crate::meshgraph::LoadMeshParams { path: text, ..Default::default() }), at);
+            }
+            _ => {}
+        }
+    }
+
     pub fn dirty(&self) -> bool {
         self.graph != self.saved
     }
@@ -323,7 +352,18 @@ impl crate::App {
             let (d, q) = (self.rs.device.clone(), self.rs.queue.clone());
             self.mesh_ws.start(d, q, vec![None]);
         }
-        crate::meshgraph_ui::set_base(self.mesh_ws.base());
+        let base = self.mesh_ws.base();
+        crate::meshgraph_ui::set_base(base.clone());
+        // A noise graph file that was just chosen gets its embedded copy right away.
+        for n in self.mesh_ws.graph.nodes.values_mut() {
+            if let NodeKind::NoiseGraph(p) = &mut n.kind {
+                if p.embedded.is_empty() && !p.file.is_empty() {
+                    if let Ok(text) = std::fs::read_to_string(crate::meshgraph::resolve_in(&base, &p.file)) {
+                        p.embedded = text;
+                    }
+                }
+            }
+        }
         // Ctrl+Z and Ctrl+Y (or Ctrl+Shift+Z) act on this graph here, unless a text field has the keyboard.
         if !ctx.egui_wants_keyboard_input() {
             let (z, y, shift) = ui.input(|i| (i.modifiers.command && i.key_pressed(egui::Key::Z), i.modifiers.command && i.key_pressed(egui::Key::Y), i.modifiers.shift));
@@ -450,6 +490,25 @@ impl crate::App {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    #[test]
+    fn dropped_files_become_nodes() {
+        let dir = std::env::temp_dir().join("noiser-drop-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("rock.noisegraph"), Graph::default_graph().to_json()).unwrap();
+        let mut ws = MeshWorkspace::default();
+        let before = ws.graph.nodes.len();
+        ws.drop_file(dir.join("rock.noisegraph"));
+        ws.drop_file(dir.join("ball.obj"));
+        ws.drop_file(dir.join("notes.txt")); // ignored
+        assert_eq!(ws.graph.nodes.len(), before + 2);
+        let kinds: Vec<_> = ws.graph.nodes.values().rev().take(2).map(|n| n.kind.clone()).collect();
+        assert!(matches!(&kinds[0], NodeKind::LoadMesh(p) if p.path.ends_with("ball.obj")));
+        assert!(matches!(&kinds[1], NodeKind::NoiseGraph(p) if p.file.ends_with("rock.noisegraph") && !p.embedded.is_empty()));
+    }
+
     #[test]
     fn saving_over_a_graph_file_keeps_the_old_version_in_a_history_folder() {
         let dir = std::env::temp_dir().join("noiser-history-test");

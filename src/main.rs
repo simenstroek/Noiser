@@ -387,6 +387,9 @@ impl App {
         if let Some(a) = amount_arg {
             app.pv.amount = a;
         }
+        if let Some(n) = select_arg.filter(|n| app.workspace == meshworkspace::Workspace::Mesh && app.mesh_ws.graph.nodes.contains_key(n)) {
+            app.mesh_ws.editor.selected.insert(n);
+        }
         if let Some(n) = select_arg.filter(|n| app.graph.nodes.contains_key(n)) {
             app.editor.selected.insert(n);
         }
@@ -1191,7 +1194,9 @@ impl eframe::App for App {
         // Files dropped on the window: .obj becomes the mesh, anything else is opened as a graph.
         for f in ctx.input(|i| i.raw.dropped_files.clone()) {
             { let p = f.path().to_path_buf();
-                if meshformats::is_mesh_file(&p) {
+                if self.workspace == meshworkspace::Workspace::Mesh {
+                    self.mesh_ws.drop_file(p);
+                } else if meshformats::is_mesh_file(&p) {
                     self.start_mesh_load(p);
                 } else {
                     self.request(Pending::Path(p));
