@@ -32,6 +32,79 @@ pub struct MeshWorkspace {
     log: Vec<String>,
     written: Vec<PathBuf>,
     pub seed: u32,
+    /// Start a run on the first frame (for `--run-mesh-graph`).
+    pub autorun: bool,
+    /// The first mesh the last run wrote, for the view above the graph.
+    preview: Option<Preview>,
+    yaw: f32,
+    pitch: f32,
+    zoom: f32,
+}
+
+/// A mesh to look at: positions centred and scaled to a unit radius, with triangles.
+struct Preview {
+    positions: Vec<[f32; 3]>,
+    triangles: Vec<[u32; 3]>,
+    name: String,
+}
+
+impl Preview {
+    fn load(path: &std::path::Path) -> Result<Preview, String> {
+        let mesh = crate::meshformats::load(path)?;
+        let (lo, hi) = mesh.bounds();
+        let centre = [0, 1, 2].map(|a| 0.5 * (lo[a] + hi[a]));
+        let radius = (0..3).map(|a| hi[a] - lo[a]).fold(0.0, f32::max).max(1e-9) * 0.5;
+        let positions = mesh.positions.iter().map(|p| [0, 1, 2].map(|a| (p[a] - centre[a]) / radius)).collect();
+        Ok(Preview { positions, triangles: mesh.triangles, name: path.file_name().map_or(String::new(), |n| n.to_string_lossy().into_owned()) })
+    }
+
+    /// Flat-shaded triangles, far ones first, as one egui mesh in `rect`.
+    fn paint(&self, painter: &egui::Painter, rect: egui::Rect, yaw: f32, pitch: f32, zoom: f32) {
+        const LIMIT: usize = 150_000;
+        if self.triangles.len() > LIMIT {
+            painter.text(rect.center(), egui::Align2::CENTER_CENTER, format!("{} triangles: too many to preview here", self.triangles.len()), egui::FontId::proportional(14.0), egui::Color32::GRAY);
+            return;
+        }
+        let (cy, sy, cp, sp) = (yaw.cos(), yaw.sin(), pitch.cos(), pitch.sin());
+        // Rotate about the vertical axis, then tilt; the camera looks down -z, z points at the viewer.
+        let view = |p: [f32; 3]| {
+            let x = cy * p[0] + sy * p[2];
+            let z = -sy * p[0] + cy * p[2];
+            [x, cp * p[1] - sp * z, sp * p[1] + cp * z]
+        };
+        let v: Vec<[f32; 3]> = self.positions.iter().map(|p| view(*p)).collect();
+        let scale = 0.45 * rect.width().min(rect.height()) * zoom;
+        let to_screen = |p: [f32; 3]| egui::pos2(rect.center().x + p[0] * scale, rect.center().y - p[1] * scale);
+        let light = {
+            let l = [0.35f32, 0.55, 0.75];
+            let n = (l[0] * l[0] + l[1] * l[1] + l[2] * l[2]).sqrt();
+            [l[0] / n, l[1] / n, l[2] / n]
+        };
+        let mut order: Vec<(f32, usize)> = self.triangles.iter().enumerate().map(|(i, t)| (t.iter().map(|&k| v[k as usize][2]).sum::<f32>(), i)).collect();
+        order.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let mut mesh = egui::epaint::Mesh::default();
+        for (_, i) in order {
+            let t = self.triangles[i];
+            let [a, b, c] = t.map(|k| v[k as usize]);
+            let (e1, e2) = ([b[0] - a[0], b[1] - a[1], b[2] - a[2]], [c[0] - a[0], c[1] - a[1], c[2] - a[2]]);
+            let n = [e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2], e1[0] * e2[1] - e1[1] * e2[0]];
+            let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt().max(1e-20);
+            let facing = (n[0] * light[0] + n[1] * light[1] + n[2] * light[2]) / len;
+            // Faces turned away show dark red, which also exposes inside-out or folded triangles.
+            let colour = if n[2] < 0.0 {
+                egui::Color32::from_rgb(110, 25, 25)
+            } else {
+                let k = 0.2 + 0.8 * facing.max(0.0);
+                egui::Color32::from_rgb((205.0 * k) as u8, (195.0 * k) as u8, (175.0 * k) as u8)
+            };
+            let base = mesh.vertices.len() as u32;
+            for p in [a, b, c] {
+                mesh.vertices.push(egui::epaint::Vertex { pos: to_screen(p), uv: egui::epaint::WHITE_UV, color: colour });
+            }
+            mesh.indices.extend([base, base + 1, base + 2]);
+        }
+        painter.add(egui::Shape::mesh(mesh));
+    }
 }
 
 impl Default for MeshWorkspace {
@@ -40,7 +113,7 @@ impl Default for MeshWorkspace {
         let mut editor = crate::editor::Editor::default();
         editor.mesh_mode = true;
         editor.frame_next = true;
-        MeshWorkspace { saved: graph.clone(), graph, editor, path: None, cache: Arc::new(Mutex::new(MeshCache::default())), job: None, log: Vec::new(), written: Vec::new(), seed: 0 }
+        MeshWorkspace { saved: graph.clone(), graph, editor, path: None, cache: Arc::new(Mutex::new(MeshCache::default())), job: None, log: Vec::new(), written: Vec::new(), seed: 0, autorun: false, preview: None, yaw: 0.6, pitch: 0.35, zoom: 1.0 }
     }
 }
 
@@ -93,6 +166,10 @@ impl MeshWorkspace {
         self.editor.frame_next = true;
     }
 
+    pub fn open_graph(&mut self, graph: Graph, path: PathBuf) {
+        self.set(graph, Some(path));
+    }
+
     /// Writes the graph, first refreshing every noise graph node's embedded copy from its file, so the mesh graph
     /// carries what it was saved with (the file stays the source of truth).
     pub fn save(&mut self, ask: bool) -> Result<(), String> {
@@ -103,9 +180,10 @@ impl MeshWorkspace {
                 None => return Ok(()),
             },
         };
+        let base = path.parent().map_or(PathBuf::from("."), |p| p.to_path_buf());
         for n in self.graph.nodes.values_mut() {
             if let NodeKind::NoiseGraph(p) = &mut n.kind {
-                if let Ok(text) = std::fs::read_to_string(&p.file) {
+                if let Ok(text) = std::fs::read_to_string(crate::meshgraph::resolve_in(&base, &p.file)) {
                     p.embedded = text;
                 }
             }
@@ -177,6 +255,7 @@ impl crate::App {
             match r {
                 Ok(files) => {
                     self.status = format!("Mesh graph: {} file(s) written", files.len());
+                    self.mesh_ws.preview = files.iter().find(|f| f.extension().is_some_and(|e| e == "obj")).and_then(|f| Preview::load(f).ok());
                     self.mesh_ws.written = files;
                 }
                 Err(e) => {
@@ -184,6 +263,11 @@ impl crate::App {
                     self.status = format!("Mesh graph failed: {e}");
                 }
             }
+        }
+        if self.mesh_ws.autorun && !self.mesh_ws.running() {
+            self.mesh_ws.autorun = false;
+            let (d, q) = (self.rs.device.clone(), self.rs.queue.clone());
+            self.mesh_ws.start(d, q);
         }
         // Ctrl+S and Ctrl+O act on this graph here.
         let (ctrl_s, ctrl_shift) = ui.input(|i| (i.modifiers.command && i.key_pressed(egui::Key::S), i.modifiers.shift));
@@ -215,7 +299,7 @@ impl crate::App {
             ui.separator();
             ui.horizontal(|ui| {
                 let running = self.mesh_ws.running();
-                if ui.add_enabled(!running, egui::Button::new("▶ Run")).on_hover_text("Runs every Remesh, Auto UVs and Bake that feeds an output node and writes the files.").clicked() {
+                if ui.add_enabled(!running, egui::Button::new("Run")).on_hover_text("Runs every Remesh, Auto UVs and Bake that feeds an output node and writes the files.").clicked() {
                     let (d, q) = (self.rs.device.clone(), self.rs.queue.clone());
                     self.mesh_ws.start(d, q);
                 }
@@ -229,9 +313,6 @@ impl crate::App {
                 egui::ScrollArea::vertical().max_height(140.0).stick_to_bottom(true).show(ui, |ui| {
                     for l in &self.mesh_ws.log {
                         ui.weak(l);
-                    }
-                    for f in &self.mesh_ws.written {
-                        ui.label(format!("wrote {}", f.display()));
                     }
                 });
             });
@@ -255,8 +336,31 @@ impl crate::App {
             });
         });
         self.mesh_ws.graph.prune_edges();
-        egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| {
+        egui::Panel::bottom("mesh graph editor").resizable(true).default_size(330.0).show(ui, |ui| {
             self.mesh_ws.editor.show(ui, &mut self.mesh_ws.graph, &Default::default());
+        });
+        egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| {
+            let rect = ui.available_rect_before_wrap();
+            let resp = ui.interact(rect, ui.scope_id().with("mesh preview"), egui::Sense::click_and_drag());
+            let d = resp.drag_delta();
+            self.mesh_ws.yaw -= d.x * 0.01;
+            self.mesh_ws.pitch = (self.mesh_ws.pitch + d.y * 0.01).clamp(-1.5, 1.5);
+            if resp.hovered() {
+                let scroll = ui.input(|i| i.smooth_scroll_delta.y);
+                self.mesh_ws.zoom = (self.mesh_ws.zoom * (1.0 + scroll * 0.002)).clamp(0.2, 8.0);
+            }
+            if resp.double_clicked() {
+                (self.mesh_ws.yaw, self.mesh_ws.pitch, self.mesh_ws.zoom) = (0.6, 0.35, 1.0);
+            }
+            let painter = ui.painter_at(rect);
+            painter.rect_filled(rect, 0.0, egui::Color32::from_gray(28));
+            match &self.mesh_ws.preview {
+                Some(p) => {
+                    p.paint(&painter, rect, self.mesh_ws.yaw, self.mesh_ws.pitch, self.mesh_ws.zoom);
+                    painter.text(rect.left_top() + egui::vec2(8.0, 6.0), egui::Align2::LEFT_TOP, format!("{}: {} triangles. Drag to turn, scroll to zoom, double-click to reset.", p.name, p.triangles.len()), egui::FontId::proportional(12.0), egui::Color32::from_gray(160));
+                }
+                None => _ = painter.text(rect.center(), egui::Align2::CENTER_CENTER, "Run the graph to see its mesh here", egui::FontId::proportional(14.0), egui::Color32::from_gray(120)),
+            }
         });
         // Double-clicking a Noise Graph node goes to that graph.
         if let Some(id) = self.mesh_ws.editor.opened.take() {

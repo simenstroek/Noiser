@@ -224,6 +224,8 @@ impl App {
         // `noiser [graph.noisegraph] [--mesh file.obj] [--open-mesh-export] [--batch-out DIR --batch-file FILE ...] [--mask KIND ...]`
         let mut args = std::env::args().skip(1);
         let (mut graph_arg, mut mesh_arg, mut open_mesh_export) = (None, None, false);
+        let mut mesh_tab = false;
+        let (mut mesh_graph_arg, mut run_mesh_graph): (Option<std::path::PathBuf>, bool) = (None, false);
         let (mut batch_dir, mut batch_files): (Option<std::path::PathBuf>, Vec<std::path::PathBuf>) = (None, Vec::new());
         let mut mask_terms = Vec::new();
         let mut show_mask = false;
@@ -250,6 +252,14 @@ impl App {
                 show_mask = true;
             } else if a == "--open-mesh-export" {
                 open_mesh_export = true;
+            } else if a == "--mesh-tab" {
+                mesh_tab = true;
+            } else if a == "--window" {
+                args.next(); // read below
+            } else if a == "--mesh-graph" {
+                mesh_graph_arg = args.next().map(std::path::PathBuf::from);
+            } else if a == "--run-mesh-graph" {
+                run_mesh_graph = true;
             } else if a == "--mask" {
                 // A displacement-mask term of the named kind with its default settings.
                 let name = args.next().unwrap_or_default().to_lowercase();
@@ -349,6 +359,16 @@ impl App {
             close_ok: false,
             recent: cc.storage.and_then(|s| s.get_string(RECENT_KEY)).and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default(),
         };
+        if mesh_tab || mesh_graph_arg.is_some() {
+            app.workspace = meshworkspace::Workspace::Mesh;
+        }
+        if let Some(p) = mesh_graph_arg {
+            match std::fs::read_to_string(&p).map_err(|e| e.to_string()).and_then(|s| Graph::from_json(&s)) {
+                Ok(g) => app.mesh_ws.open_graph(g, p),
+                Err(e) => app.status = format!("Could not open {}: {e}", p.display()),
+            }
+        }
+        app.mesh_ws.autorun = run_mesh_graph;
         if let Some(p) = mesh_arg {
             app.start_mesh_load(p);
         }

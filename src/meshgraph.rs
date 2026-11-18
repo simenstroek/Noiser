@@ -58,9 +58,15 @@ impl Default for OutParams {
     }
 }
 
+/// A path from a graph: relative ones are relative to the folder of the graph file.
+pub fn resolve_in(base: &Path, p: &str) -> PathBuf {
+    let path = Path::new(p);
+    if path.is_absolute() { path.to_path_buf() } else { base.join(path) }
+}
+
 /// The noise graph a Noise Graph node refers to: the file when it can be read, else the embedded copy.
-pub fn noise_graph_source(p: &NoiseGraphParams) -> Result<Graph, String> {
-    let from_file = if p.file.is_empty() { None } else { std::fs::read_to_string(&p.file).ok() };
+pub fn noise_graph_source(p: &NoiseGraphParams, base: &Path) -> Result<Graph, String> {
+    let from_file = if p.file.is_empty() { None } else { std::fs::read_to_string(resolve_in(base, &p.file)).ok() };
     let text = from_file.as_deref().or(if p.embedded.is_empty() { None } else { Some(p.embedded.as_str()) }).ok_or_else(|| format!("the noise graph {} cannot be read and has no embedded copy", if p.file.is_empty() { "(none chosen)" } else { &p.file }))?;
     Graph::from_json(text)
 }
@@ -68,13 +74,13 @@ pub fn noise_graph_source(p: &NoiseGraphParams) -> Result<Graph, String> {
 /// The field part of a mesh graph as one plain graph: every Noise Graph node becomes a copy of the graph it names.
 /// The copy's Position nodes read the Noise Graph node's position input times `frequency`; its density output times
 /// `amplitude` takes the node's place (and id), so everything downstream and the node's preview keep working.
-pub fn lowered_mesh(g: &Graph) -> Result<Graph, String> {
+pub fn lowered_mesh(g: &Graph, base: &Path) -> Result<Graph, String> {
     use crate::graph::MathOp;
     let mut out = g.clone();
     let ids: Vec<_> = g.nodes.iter().filter(|(_, n)| matches!(n.kind, NodeKind::NoiseGraph(_)) && !n.muted).map(|(id, _)| *id).collect();
     for id in ids {
         let NodeKind::NoiseGraph(p) = g.nodes[&id].kind.clone() else { continue };
-        let sub = noise_graph_source(&p)?;
+        let sub = noise_graph_source(&p, base)?;
         let Some(out_id) = sub.nodes.iter().find(|(_, n)| matches!(n.kind, NodeKind::OutDensity)).map(|(i, _)| *i) else { return Err("the noise graph has no Density Output".into()) };
         // The position the sub graph sees: the node's input (or the world position) times the frequency.
         let world = out.add(NodeKind::Position, [0.0; 2]);
@@ -184,8 +190,7 @@ pub struct Runner<'a> {
 
 impl Runner<'_> {
     fn resolve(&self, p: &str) -> PathBuf {
-        let path = Path::new(p);
-        if path.is_absolute() { path.to_path_buf() } else { self.base.join(path) }
+        resolve_in(&self.base, p)
     }
 
     fn mesh(&mut self, p: &LoadMeshParams) -> Result<std::sync::Arc<LoadedMesh>, String> {
@@ -241,7 +246,7 @@ impl Runner<'_> {
         let mut reach = 0.05 * radius;
         for n in original.nodes.values() {
             if let NodeKind::NoiseGraph(p) = &n.kind {
-                if let Ok(sub) = noise_graph_source(p) {
+                if let Ok(sub) = noise_graph_source(p, &self.base) {
                     let (a, b) = sub.density_range();
                     let size = if a.is_finite() && b.is_finite() { a.abs().max(b.abs()) } else { 1.0 };
                     reach += p.amplitude.abs() * size;
@@ -259,7 +264,7 @@ impl Runner<'_> {
 
     /// Runs the operation nodes upstream of every output node and writes the files; returns the files written.
     pub fn run(&mut self, graph: &Graph) -> Result<Vec<PathBuf>, String> {
-        let lowered = lowered_mesh(graph)?;
+        let lowered = lowered_mesh(graph, &self.base)?;
         let outputs: Vec<NodeId> = graph.nodes.iter().filter(|(_, n)| matches!(n.kind, NodeKind::OutMesh(_) | NodeKind::OutImage(_)) && !n.muted).map(|(id, _)| *id).collect();
         if outputs.is_empty() {
             return Err("the graph has no Mesh or Image output node".into());

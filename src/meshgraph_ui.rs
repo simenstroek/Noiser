@@ -52,7 +52,7 @@ pub fn props(ui: &mut egui::Ui, kind: &mut NodeKind) -> bool {
             let d = crate::meshgraph::NoiseGraphParams::default();
             crate::row(ui, &mut p.frequency, d.frequency, |ui, v| _ = ui.add(egui::DragValue::new(v).speed(0.01).prefix("frequency × ")).on_hover_text("The noise graph sees the position times this: tiles per unit of the mesh file."));
             crate::row(ui, &mut p.amplitude, d.amplitude, |ui, v| _ = ui.add(egui::DragValue::new(v).speed(0.001).prefix("amplitude × ")).on_hover_text("The graph's density output times this: its size in units of the mesh file."));
-            match crate::meshgraph::noise_graph_source(p) {
+            match crate::meshgraph::noise_graph_source(p, std::path::Path::new(".")) {
                 Ok(_) if !p.file.is_empty() && std::fs::metadata(&p.file).is_ok() => {
                     if ui.button("Refresh embedded copy").on_hover_text("Saving the mesh graph does this too.").clicked() {
                         if let Ok(text) = std::fs::read_to_string(&p.file) {

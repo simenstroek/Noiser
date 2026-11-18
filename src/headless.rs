@@ -286,6 +286,7 @@ pub fn try_run() -> Option<i32> {
 fn run_mesh_graph(args: &[String], log: &mut Log) -> Result<usize, String> {
     let at = args.iter().position(|a| a == "--mesh-graph").unwrap();
     let file = PathBuf::from(args.get(at + 1).ok_or("--mesh-graph needs a file")?);
+    log.file = std::fs::OpenOptions::new().create(true).append(true).open(file.with_extension("log")).ok();
     let seed = args.iter().position(|a| a == "--seed").and_then(|i| args.get(i + 1)).map_or(Ok(0), |v| v.parse::<u32>().map_err(|_| format!("--seed {v}: not a whole number")))?;
     let text = std::fs::read_to_string(&file).map_err(|e| format!("{}: {e}", file.display()))?;
     let graph = Graph::from_json(&text)?;

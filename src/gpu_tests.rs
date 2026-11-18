@@ -1694,7 +1694,7 @@ fn a_mesh_graph_of_two_noise_graphs_matches_the_standalone_graphs() {
     g.connect(n1, add, 0);
     g.connect(n2, add, 1);
     g.connect(add, out, 0);
-    let lowered = crate::meshgraph::lowered_mesh(&g).unwrap();
+    let lowered = crate::meshgraph::lowered_mesh(&g, std::path::Path::new(".")).unwrap();
     assert!(lowered.nodes.len() > g.nodes.len(), "the noise graphs were copied in");
     let pts = points(64, 5);
     let combined = crate::export::Evaluator::new(&gpu.device, &gpu.queue, &lowered, 0).unwrap().eval_points(&pts);
@@ -1706,7 +1706,7 @@ fn a_mesh_graph_of_two_noise_graphs_matches_the_standalone_graphs() {
     // A graph that cannot be read is an error that names the file.
     let mut bad = Graph::default();
     bad.add(NodeKind::NoiseGraph(crate::meshgraph::NoiseGraphParams { file: "no/such/file.noisegraph".into(), ..Default::default() }), [0.0; 2]);
-    assert!(crate::meshgraph::lowered_mesh(&bad).unwrap_err().contains("no/such/file"));
+    assert!(crate::meshgraph::lowered_mesh(&bad, std::path::Path::new(".")).unwrap_err().contains("no/such/file"));
 }
 
 /// A mesh graph shaped like the one in the design: a mesh, two noise graphs blended by how much the surface faces up,
@@ -1789,6 +1789,54 @@ fn a_mesh_graph_runs_from_a_mesh_file_to_files() {
     assert!(dir.join("out").join("ball_Normal.png").exists());
     let packed = image::open(dir.join("out").join("packed_Combined.png")).unwrap();
     assert_eq!((packed.width(), packed.height(), packed.color()), (128, 128, image::ColorType::Rgba16));
+}
+
+/// Writes a demo mesh graph for a real mesh: `NOISER_TEST_MESH=mesh.obj NOISER_TEST_OUT=dir cargo test write_demo_mesh_graph -- --ignored`.
+/// The graph blends two of the repository's noise graphs by how much the surface faces up.
+#[test]
+#[ignore = "writes files; needs NOISER_TEST_MESH and NOISER_TEST_OUT"]
+fn write_demo_mesh_graph() {
+    use crate::graph::MathOp;
+    let env = |k: &str| std::env::var(k).ok();
+    let mesh = env("NOISER_TEST_MESH").expect("set NOISER_TEST_MESH");
+    let out = std::path::PathBuf::from(env("NOISER_TEST_OUT").expect("set NOISER_TEST_OUT"));
+    std::fs::create_dir_all(&out).unwrap();
+    let rough = noise_graph(NoiseParams { kind: NoiseKind::Perlin, scale: 8.0, octaves: 5, roughness: 0.6, seed: Some(2), ..Default::default() });
+    let smooth = noise_graph(NoiseParams { kind: NoiseKind::Perlin, scale: 3.0, octaves: 2, seed: Some(5), ..Default::default() });
+    std::fs::write(out.join("rough.noisegraph"), rough.to_json()).unwrap();
+    std::fs::write(out.join("smooth.noisegraph"), smooth.to_json()).unwrap();
+    let mut g = Graph::default();
+    let m = g.add(NodeKind::LoadMesh(crate::meshgraph::LoadMeshParams { path: mesh, resolution: 128, ..Default::default() }), [0.0, 0.0]);
+    let normal = g.add(NodeKind::Normal { flip: false }, [160.0, 0.0]);
+    let up = g.add(NodeKind::Vec3([0.0, 1.0, 0.0]), [160.0, 80.0]);
+    let facing = g.add(NodeKind::Math { op: MathOp::Dot, a: 0.0, b: 0.0, c: 0.5 }, [320.0, 40.0]);
+    let remap = g.add(NodeKind::Remap { vals: [0.0, -0.3, 0.7, 0.0, 1.0], clamp: true }, [480.0, 40.0]);
+    let a = g.add(NodeKind::NoiseGraph(crate::meshgraph::NoiseGraphParams { file: "rough.noisegraph".into(), frequency: 0.25, amplitude: 0.15, ..Default::default() }), [480.0, 160.0]);
+    let b = g.add(NodeKind::NoiseGraph(crate::meshgraph::NoiseGraphParams { file: "smooth.noisegraph".into(), frequency: 0.25, amplitude: 0.08, ..Default::default() }), [480.0, 260.0]);
+    let blend = g.add(NodeKind::Math { op: MathOp::Lerp, a: 0.0, b: 0.0, c: 0.5 }, [660.0, 160.0]);
+    let sum = g.add(NodeKind::Math { op: MathOp::Add, a: 0.0, b: 0.0, c: 0.5 }, [820.0, 80.0]);
+    let remesh = g.add(NodeKind::Remesh { triangles: 20_000 }, [980.0, 80.0]);
+    let uv = g.add(NodeKind::AutoUv(Default::default()), [1140.0, 80.0]);
+    let bake = g.add(NodeKind::Bake(crate::bake::Settings { size: 1024, channels: vec![crate::bake::Channel::Normal, crate::bake::Channel::Occlusion], custom: vec!["Mask".into()], ..Default::default() }), [1300.0, 120.0]);
+    let out_mesh = g.add(NodeKind::OutMesh(crate::meshgraph::OutParams { folder: "out".into(), name: "rock".into() }), [1480.0, 40.0]);
+    let out_normal = g.add(NodeKind::OutImage(crate::meshgraph::OutParams { folder: "out".into(), name: "rock".into() }), [1480.0, 140.0]);
+    g.connect(m, normal, 0);
+    g.connect(normal, facing, 0);
+    g.connect(up, facing, 1);
+    g.connect(facing, remap, 0);
+    g.connect(a, blend, 0);
+    g.connect(b, blend, 1);
+    g.connect(remap, blend, 2);
+    g.connect(m, sum, 0);
+    g.connect(blend, sum, 1);
+    g.connect(sum, remesh, 0);
+    g.connect(remesh, uv, 0);
+    g.connect(uv, bake, 0);
+    g.connect(sum, bake, 1);
+    g.connect(remap, bake, 2);
+    g.connect(uv, out_mesh, 0);
+    g.connect_from(bake, 0, out_normal, 0);
+    std::fs::write(out.join("rock.meshgraph"), g.to_json()).unwrap();
 }
 
 // ---- batch pipeline ---------------------------------------------------------------
