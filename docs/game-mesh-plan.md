@@ -91,3 +91,8 @@ Built: the Mesh graph tab, a second `Graph` with extra node kinds (Load Mesh wit
 Not built: a live raymarched preview of the field in the tab, a relax step for transferred UVs, a better answer to tiny UV islands on bumpy meshes, a pass at very large noise amplitudes where the remesher degrades. The window was checked by screenshots (`tools/screenshot.ps1`), never clicked through.
 
 Checked in Blender 4.5 (Cycles, from the command line): the 4,000-triangle monkey with its baked normal map (`--green-up`, tangent space, Non-Color) renders with the detail of a 100,000-triangle reference, where the same mesh without the map is smooth. So the green-up convention, the tangent frame and the UV orientation of the OBJ are right for Blender; the default green-down map is the same image with the green channel inverted (Unreal).
+
+### Where the UV coverage goes (measured 2026-11-19)
+
+Rock, 20k triangles, 351 islands (299 tiny): coverage 64.1% in 10 s. Padding is not the lever: 2 texels gives 63.4%, 4 texels 64.1%, 4096 px 65.9%. Packing efficiency is: xatlas best packing (`brute_force`) gives 70.6% (69.6% with 2 texels) in 35 s, so it is now on by default up to 50k triangles. At 100k triangles (1218 islands) it did not help (64.8% plain, 60.9% best packing, 25 s longer), so it is skipped above 50k. Transfer UVs now relaxes each island's interior (cotan Laplacian, borders pinned, flip-safe): rock mean stretch 1.18 to 1.13, 0 flipped.
+

@@ -103,7 +103,7 @@ pub fn props(ui: &mut egui::Ui, kind: &mut NodeKind) -> bool {
             crate::row(ui, &mut uv.padding, d.padding, |ui, v| _ = ui.add(egui::DragValue::new(v).range(0..=64).prefix("padding ").suffix(" px")));
             crate::row(ui, &mut uv.smoothing, d.smoothing, |ui, v| _ = ui.add(egui::DragValue::new(v).range(0..=60).prefix("chart smoothing ")).on_hover_text("Rounds of smoothing of the surface the islands are cut from; the UVs still map the true surface."));
             crate::row(ui, &mut uv.absorb_tiny, d.absorb_tiny, |ui, v| _ = ui.checkbox(v, "fold tiny islands into neighbours"));
-            crate::row(ui, &mut uv.brute_force, d.brute_force, |ui, v| _ = ui.checkbox(v, "best packing (slower)"));
+            crate::row(ui, &mut uv.brute_force, d.brute_force, |ui, v| _ = ui.checkbox(v, "best packing (slower; up to 50k triangles)"));
             true
         }
         NodeKind::Bake(b) => {

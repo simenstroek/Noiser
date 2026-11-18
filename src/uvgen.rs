@@ -84,7 +84,7 @@ pub struct UvParams {
 
 impl Default for UvParams {
     fn default() -> Self {
-        UvParams { resolution: 2048, padding: 4, max_cost: 4.0, normal_deviation: 2.0, brute_force: false, smoothing: 10, merge_rounds: 0, absorb_tiny: true }
+        UvParams { resolution: 2048, padding: 4, max_cost: 4.0, normal_deviation: 2.0, brute_force: true, smoothing: 10, merge_rounds: 0, absorb_tiny: true }
     }
 }
 
@@ -137,7 +137,7 @@ fn run(mesh: &RawMesh, base: &[V3], material: Option<&[u32]>, params: &UvParams,
     let mut atlas = xatlas::Xatlas::new();
     atlas.add_mesh(&decl).map_err(|e| format!("UV generation: {e:?}"))?;
     let chart = xatlas::ChartOptions { max_cost, normal_deviation_weight: params.normal_deviation, ..Default::default() };
-    let pack = xatlas::PackOptions { resolution: params.resolution, padding: params.padding, bilinear: true, brute_force: params.brute_force, rotate_charts: true, rotate_charts_to_axis: true, ..Default::default() };
+    let pack = xatlas::PackOptions { resolution: params.resolution, padding: params.padding, bilinear: true, brute_force: params.brute_force && mesh.triangles.len() <= 50_000, rotate_charts: true, rotate_charts_to_axis: true, ..Default::default() };
     atlas.generate(&chart, &pack);
     let (w, h) = (atlas.width().max(1) as f32, atlas.height().max(1) as f32);
     if std::env::var_os("NOISER_REMESH_DEBUG").is_some() {
