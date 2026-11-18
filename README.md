@@ -59,7 +59,9 @@ tiling 3D texture for the preview, and the nodes it covers get a green outline. 
 - 3D raw floats (`.raw`, 32-bit little-endian, x fastest; a `.raw.txt` note says the size), for tools that read volumes by hand.
 - `.noiser` math function: the graph as an op list plus test vectors, so a sampler in another host
   can check itself. The format is specified in [`docs/noiser-format.md`](docs/noiser-format.md). A Blender
-  extension that builds Geometry Nodes groups from it is in [`blender/`](blender).
+  extension that builds Geometry Nodes groups from it is in [`blender/`](blender) (math, remap, mix, linear curves,
+  separate/combine, grid and Perlin noise so far; other nodes are reported as unsupported, and `blender/check_file.py`
+  checks it against the file's own test vectors).
 
 **Crash recovery.** Rolling backups; after a crash you are offered the last one on the next start. A panic is also written to `crash.log` in Noiser's data folder (`%APPDATA%\Noiser\data` on Windows); please attach it to bug reports.
 
