@@ -240,7 +240,10 @@ Host notes:
 
 ## Lattice and tiling
 
-Noises work in lattice units `x = q · scale`, where `q` is the noise's position input.
+Noises work in lattice units `x = q · scale`, where `q` is the noise's position input. The product is
+computed in float32 like everything else here: a point on a cell seam (for example `q = 7/12` at scale 24) falls
+on one side or the other depending on that rounding, so a port must round the same way to reproduce the test
+vectors exactly.
 
 A noise **tiles** when `scale` is a whole number and, if `octaves > 1`, `lacunarity` is too.
 Then each octave has a `period` (cells per tile): `scale` for octave 0, times `lacunarity` for
@@ -289,7 +292,7 @@ blue(x, period, seed):
   result = table_t[c.x + t (c.y + t c.z)] · 2 − 1
 ```
 
-No octaves. The table generator is `src/bluenoise.rs`'s companion tool; the shipped file is the definition.
+No octaves. The shipped file is the definition of the tables.
 
 ## Worley (Euclidean, jitter 1, default features)
 

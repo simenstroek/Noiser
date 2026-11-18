@@ -1,4 +1,4 @@
-"""Reference implementations of the white, worley and simplex noises, written only from docs/noiser-format.md.
+"""Reference implementations of the white, blue, worley and simplex noises, written only from docs/noiser-format.md.
 
 Usage: python tools/noiser_reference.py file.noiser [...]
 Each file must be a graph of one noise node (whole scale, one octave, no distortion); the script evaluates the noise
@@ -92,12 +92,36 @@ def simplex(x, period, seed):
     return max(-1.0, min(1.0, 90.0 * total))
 
 
+_BLUE = None
+
+
+def blue(x, period, seed):
+    global _BLUE
+    if _BLUE is None:
+        data = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "assets", "bluenoise.bin"), "rb").read()
+        _BLUE, at = {}, 0
+        for n in (4, 8, 16, 32):
+            _BLUE[n] = np.frombuffer(data[at:at + 2 * n ** 3], dtype="<u2").astype(np.float64) / (n ** 3 - 1)
+            at += 2 * n ** 3
+    t = 32
+    if period > 0:
+        if period % 32 != 0: t = 16
+        if period % 16 != 0: t = 8
+        if period % 8 != 0: t = 4
+    shift = [int(math.floor(float(h) * t)) for h in hash3((0, 0, 0), seed)]
+    c = [(math.floor(x[k]) + shift[k]) % t for k in range(3)]
+    return float(_BLUE[t][c[0] + t * (c[1] + t * c[2])]) * 2 - 1
+
+
 def noise_op(op, q):
     scale = op["scale"]
-    x = [v * scale for v in q]
+    # The GPU multiplies in float32: points on cell seams (k / 12 at scale 24) land on either side of the seam
+    # depending on that rounding, so the reference rounds the same way.
+    x = [float(np.float32(v) * np.float32(scale)) for v in q]
     period = int(scale)  # the test graphs use whole scales
     kind = op["kind"]
     if kind == "white": base = lambda x, p, s: white(x, p, s)
+    elif kind == "blue": base = blue
     elif kind == "worley": base = lambda x, p, s: worley(x, p, s, op["feature"])
     else: base = simplex
     total = amp = 1.0
