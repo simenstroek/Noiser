@@ -34,30 +34,55 @@ def white(x, period, seed):
     return float(hash3(wrap([math.floor(v) for v in x], period), seed)[0]) * 2 - 1
 
 
-def worley(x, period, seed, feature):
+K = {"euclidean": ((0.866, 1.0, 0.95, 0.5), (1.0, 1.4, 1.0, 0.5)),
+     "manhattan": ((1.45, 1.5, 0.95, 0.5), (1.5, 1.65, 1.2, 0.5)),
+     "chebyshev": ((0.5, 0.95, 0.95, 0.5), (0.81, 0.91, 0.66, 0.5))}
+
+
+def worley(x, period, seed, feature, metric="euclidean", jitter=1.0):
     fl = [math.floor(v) for v in x]
     i = wrap(fl, period)
     f = [x[k] - fl[k] for k in range(3)]
-    best = [(1e9, None), (1e9, None)]
-    for oz in (-1, 0, 1):
-        for oy in (-1, 0, 1):
-            for ox in (-1, 0, 1):
-                o = (ox, oy, oz)
-                c = tuple(i[k] + o[k] for k in range(3))
-                if period > 0:
-                    c = tuple(c[k] - period if c[k] >= period else (c[k] + period if c[k] < 0 else c[k]) for k in range(3))
-                h = hash3(c, seed)
-                d = [o[k] + float(h[k]) - f[k] for k in range(3)]
-                d2 = sum(v * v for v in d)
-                if d2 < best[0][0]:
-                    best = [(d2, c), best[0]]
-                elif d2 < best[1][0]:
-                    best[1] = (d2, c)
-    f1, f2 = math.sqrt(best[0][0]), math.sqrt(best[1][0])
+
+    def point(o):
+        c = tuple(i[k] + o[k] for k in range(3))
+        if period > 0:
+            c = tuple(c[k] - period if c[k] >= period else (c[k] + period if c[k] < 0 else c[k]) for k in range(3))
+        h = hash3(c, seed)
+        return c, [o[k] + 0.5 + (float(h[k]) - 0.5) * jitter for k in range(3)]
+
+    def measure(d):
+        if metric == "manhattan": return sum(abs(v) for v in d)
+        if metric == "chebyshev": return max(abs(v) for v in d)
+        return sum(v * v for v in d)
+
+    offsets = [(ox, oy, oz) for oz in (-1, 0, 1) for oy in (-1, 0, 1) for ox in (-1, 0, 1)]
+    k = [a + (b - a) * jitter for a, b in zip(*K[metric])]
     clamp = lambda v: max(-1.0, min(1.0, v))
-    if feature == "f1": return clamp(f1 * 2 - 1)
-    if feature == "f2": return clamp(f2 / 1.4 * 2 - 1)
-    if feature == "f2_minus_f1": return clamp((f2 - f1) * 2 - 1)
+    if feature == "edges":
+        pts = [point(o)[1] for o in offsets]
+        a = min(pts, key=lambda p: sum((p[j] - f[j]) ** 2 for j in range(3)))
+        wall = 1e9
+        for b in pts:
+            ab = [b[j] - a[j] for j in range(3)]
+            if sum(v * v for v in ab) < 1e-12: continue
+            n = normalize(ab)
+            wall = min(wall, sum((0.5 * (a[j] + b[j]) - f[j]) * n[j] for j in range(3)))
+        return clamp(wall / k[3] * 2 - 1)
+    best = [(1e9, None), (1e9, None)]
+    for o in offsets:
+        c, p = point(o)
+        d2 = measure([p[j] - f[j] for j in range(3)])
+        if d2 < best[0][0]:
+            best = [(d2, c), best[0]]
+        elif d2 < best[1][0]:
+            best[1] = (d2, c)
+    f1, f2 = best[0][0], best[1][0]
+    if metric == "euclidean":
+        f1, f2 = math.sqrt(f1), math.sqrt(f2)
+    if feature == "f1": return clamp(f1 / k[0] * 2 - 1)
+    if feature == "f2": return clamp(f2 / k[1] * 2 - 1)
+    if feature == "f2_minus_f1": return clamp((f2 - f1) / k[2] * 2 - 1)
     return float(hash3(best[0][1], seed + 0x51ED27)[0]) * 2 - 1
 
 
@@ -142,7 +167,7 @@ def noise_op(op, q):
     if kind == "white": base = white
     elif kind == "blue": base = blue
     elif kind == "perlin": base = perlin
-    elif kind == "worley": base = lambda x, p, s: worley(x, p, s, op["feature"])
+    elif kind == "worley": base = lambda x, p, s: worley(x, p, s, op["feature"], op.get("metric", "euclidean"), op.get("jitter", 1.0))
     else: base = simplex
     if op["distortion"] != 0:
         d = [perlin(x, period, op["seed"] + 1 + c) for c in range(3)]

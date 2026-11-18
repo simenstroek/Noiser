@@ -317,6 +317,33 @@ worley(x, period, seed, feature):
 
 `worley` is fractal (the fBm wrapper below) only when `octaves` > 1.
 
+### Worley with another metric, jitter or the `edges` feature
+
+The file adds `metric` (`euclidean`, `manhattan`, `chebyshev`) and `jitter` (0 to 1) to the noise op, and the
+feature may be `edges`; they are written only when they are not the defaults above. The loop is the same with
+two changes: the feature point of cell `c` is `mix(0.5, hash3(c, seed), jitter)` (jitter 1 is the random point
+above, 0 the middle of the cell), and cells are ranked by `m(d)` with `m = |d|²` (Euclidean, square root taken at
+the end), `|d.x| + |d.y| + |d.z|` (Manhattan) or `max(|d.x|, |d.y|, |d.z|)` (Chebyshev); F1 and F2 are then the
+smallest two values of `m` (square-rooted only for Euclidean). With `k = (k1, k2, k3, k4)` interpolated linearly in
+`jitter` between its jitter 0 ("lattice") and jitter 1 ("random") rows,
+
+```
+metric        jitter 0                    jitter 1
+euclidean     (0.866, 1.0,  0.95, 0.5)    (1.0,  1.4,  1.0,  0.5)
+manhattan     (1.45,  1.5,  0.95, 0.5)    (1.5,  1.65, 1.2,  0.5)
+chebyshev     (0.5,   0.95, 0.95, 0.5)    (0.81, 0.91, 0.66, 0.5)
+```
+
+the features are `f1: clamp(F1/k1·2 − 1, −1, 1)`, `f2: clamp(F2/k2·2 − 1, −1, 1)`,
+`f2_minus_f1: clamp((F2 − F1)/k3·2 − 1, −1, 1)` and `cell_value` as above. The `edges` feature is the exact
+Euclidean distance to the nearest cell wall, `clamp(wall/k4·2 − 1, −1, 1)`:
+
+```
+a = the feature point (offset o included, in the cell's own coordinates) nearest to f, among the 27 offsets
+wall = min over the 27 feature points b ≠ a of  dot((a + b)/2 − f, normalize(b − a))
+       (points with |b − a|² < 1e-12 are skipped)
+```
+
 ## Simplex
 
 Gustavson and McEwan's tiling simplex noise (psrdnoise, JCGT 2022) with Noiser's own hash for the gradients.
