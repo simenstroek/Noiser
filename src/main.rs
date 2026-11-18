@@ -211,9 +211,12 @@ impl App {
         let mut show_mask = false;
         let mut lighting_arg: Option<String> = None;
         let mut select_arg: Option<u32> = None;
+        let mut template_arg: Option<String> = None;
         while let Some(a) = args.next() {
             if a == "--mesh" {
                 mesh_arg = args.next().map(std::path::PathBuf::from);
+            } else if a == "--template" {
+                template_arg = args.next();
             } else if a == "--select" {
                 select_arg = args.next().and_then(|n| n.parse::<u32>().ok());
             } else if a == "--lighting" {
@@ -234,12 +237,13 @@ impl App {
                 graph_arg = Some(std::path::PathBuf::from(a));
             }
         }
+        let template = template_arg.as_deref().and_then(|n| Graph::TEMPLATES.iter().find(|t| t.eq_ignore_ascii_case(n)));
         let (graph, path, status) = match graph_arg {
             Some(p) => match std::fs::read_to_string(&p).map_err(|e| e.to_string()).and_then(|s| Graph::from_json(&s)) {
                 Ok(g) => (g, Some(p.clone()), format!("Opened {}", p.display())),
                 Err(e) => (Graph::default_graph(), None, format!("Could not open {}: {e}", p.display())),
             },
-            None => (Graph::default_graph(), None, String::new()),
+            None => (template.map_or_else(Graph::default_graph, |t| Graph::template(t)), None, String::new()),
         };
         let prefs: Prefs = cc.storage.and_then(|s| s.get_string(PREFS_KEY)).and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
         let prefs = prefs.sane();

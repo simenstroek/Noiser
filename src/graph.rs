@@ -899,8 +899,10 @@ impl Graph {
             }
             _ => return Graph::default_graph(),
         };
-        let out = g.add(NodeKind::OutDensity, [600.0, 0.0]);
-        g.add(NodeKind::OutNormal, [600.0, 120.0]);
+        // The outputs go to the right of everything else.
+        let x = g.nodes.values().map(|n| n.pos[0]).fold(0.0, f32::max) + 220.0;
+        let out = g.add(NodeKind::OutDensity, [x, 0.0]);
+        g.add(NodeKind::OutNormal, [x, 120.0]);
         g.connect(last, out, 0);
         g
     }
