@@ -967,12 +967,19 @@ impl Graph {
             // One coordinate of a position is still position-like (it shifts by whole numbers with the tile).
             NodeKind::Separate { .. } => input(0, memo, stack).unwrap_or(Const),
             NodeKind::Combine { .. } => {
+                // A whole position feeding one of the float inputs is averaged to a single number, which shifts by
+                // a third per tile: not a coordinate any more (Separate XYZ takes one exact component).
+                let averaged = (0..3).any(|p| self.input(id, p).is_some_and(|src| self.yields_vector(src)) && input(p, memo, stack) == Some(Coord));
                 let ts: Vec<Tiling> = (0..3).filter_map(|p| input(p, memo, stack)).collect();
-                match ts.iter().find(|t| matches!(t, Broken(_))) {
-                    Some(Broken(r)) => Broken(r.clone()),
-                    _ if ts.iter().any(|t| *t == Coord) => Coord,
-                    _ if ts.iter().all(|t| *t == Const) => Const,
-                    _ => Periodic,
+                if averaged {
+                    Broken("a position is averaged into one number here (use Separate XYZ to take a component)".into())
+                } else {
+                    match ts.iter().find(|t| matches!(t, Broken(_))) {
+                        Some(Broken(r)) => Broken(r.clone()),
+                        _ if ts.iter().any(|t| *t == Coord) => Coord,
+                        _ if ts.iter().all(|t| *t == Const) => Const,
+                        _ => Periodic,
+                    }
                 }
             }
             NodeKind::Math { op, a, b, .. } => {
