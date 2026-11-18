@@ -10,6 +10,11 @@ stays a function, and exports sample it at whatever resolution you ask for.
 
 ![A low-poly rock and the same rock displaced by a Noiser graph](docs/mesh-example.png)
 
+![Eroded rock graph with a baked warp and named reroutes, on a sphere](docs/screenshots/rock-sphere.png)
+![Sponge graph on a box](docs/screenshots/sponge-box.png)
+![Clouds in cloud mode](docs/screenshots/clouds-cloud.png)
+![Coral graph displacing a monkey mesh](docs/screenshots/coral-monkey.png)
+
 > **Status: early and moving fast.** Windows only for now (a Vulkan or DX12 GPU is required).
 > Releases are builds of whatever state the project is in at the time; see
 > [Releases](../../releases) and the notes there.
@@ -92,7 +97,7 @@ reported and the rest continue; nothing is ever overwritten. Without a window, s
 `--format obj|ply`, `--cull`, `--mask KIND`, `--manifest meshes.json` for per-mesh settings (a list of `{"file": ..., "amount": ..., "tile": ..., "size": ..., "seed": ..., "res": ..., "grid-res": ..., "cull": ..., "mask": [...], "params": {...}}`), `--set 3.scale=8` to override a node setting in the graph file, `--param name=value` to set a setting you named in Edit > Exposed parameters). Progress goes to the console and to `noiser-batch.log` in the output
 folder; the exit code is 1 if any mesh failed. Without the .cmd, use `Start-Process -Wait -PassThru` in PowerShell.
 
-**Editing.** Undo and redo, copy and paste of nodes (also between two Noiser windows), duplicate, reroute nodes, mute (bypass) a
+**Editing.** Undo and redo, copy and paste of nodes (also between two Noiser windows), duplicate, reroute nodes (plain, and named ones that carry a value across the graph without a wire), mute (bypass) a
 node with M, frame the selection with F or everything with Home, search in the add menu, Ctrl + right-drag to cut wires, Edit > Arrange nodes (a tidy left-to-right layout), File > New from template
 (clouds, ridged mountains, cracked rock, brick wall, gyroid foam, warped cells), Open recent, drag a `.noisegraph` or `.obj` file
 onto the window, comment frames, node labels, snap-to-grid, and a prompt before closing or replacing a graph with unsaved changes with unsaved changes (the window title shows an asterisk).

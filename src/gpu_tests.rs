@@ -2123,3 +2123,175 @@ fn worley_legacy(x: vec3f, period: i32, seed: u32, feature: u32) -> f32 {
         }
     }
 }
+
+/// Writes the example graphs used for screenshots: `NOISER_OUT_DIR=dir cargo test write_showcase_graphs -- --ignored`.
+#[test]
+#[ignore = "writes example graphs"]
+fn write_showcase_graphs() {
+    use crate::graph::{CurveMode, Frame, MathOp, NodeId, PatternKind, PatternOutput, PatternParams, WorleyFeature};
+    let dir = std::path::PathBuf::from(std::env::var("NOISER_OUT_DIR").expect("NOISER_OUT_DIR"));
+    std::fs::create_dir_all(&dir).unwrap();
+    let noise = |kind, scale: f32, octaves, seed: u32| NodeKind::Noise(NoiseParams { kind, scale, octaves, seed: Some(seed), ..Default::default() });
+    let math = |op, b: f32| NodeKind::Math { op, a: 0.0, b, c: 0.5 };
+    let save = |name: &str, g: &Graph| std::fs::write(dir.join(format!("{name}.noisegraph")), g.to_json()).unwrap();
+    let label = |g: &mut Graph, id: NodeId, text: &str| g.nodes.get_mut(&id).unwrap().label = Some(text.into());
+    let bake = |g: &mut Graph, id: NodeId| g.nodes.get_mut(&id).unwrap().cache = Some(0);
+    let finish = |g: &mut Graph, last: NodeId, x: f32| {
+        let o = g.add(NodeKind::OutDensity, [x, 40.0]);
+        g.add(NodeKind::OutNormal, [x, 180.0]);
+        g.connect(last, o, 0);
+    };
+
+    // 1. Eroded rock: warped cells, ridged detail, baked warp, a named reroute.
+    let mut g = Graph::default();
+    let pos = g.add(NodeKind::Position, [0.0, 120.0]);
+    let warp_n: Vec<NodeId> = (0..3u32).map(|i| g.add(noise(NoiseKind::Perlin, 2.0, 3, 10 + i), [220.0, i as f32 * 150.0])).collect();
+    let comb = g.add(NodeKind::Combine { vals: [0.0; 3] }, [440.0, 150.0]);
+    for (p, n) in warp_n.iter().enumerate() {
+        g.connect(*n, comb, p);
+    }
+    let amt = g.add(math(MathOp::Multiply, 0.18), [620.0, 150.0]);
+    g.connect(comb, amt, 0);
+    let moved = g.add(math(MathOp::Add, 0.0), [800.0, 100.0]);
+    g.connect(pos, moved, 0);
+    g.connect(amt, moved, 1);
+    bake(&mut g, amt);
+    let decl = g.add(NodeKind::NamedReroute { name: "warped position".into() }, [980.0, 100.0]);
+    g.connect(moved, decl, 0);
+    let use1 = g.add(NodeKind::NamedRerouteUse { name: "warped position".into() }, [980.0, 260.0]);
+    let cells = g.add(NodeKind::Noise(NoiseParams { kind: NoiseKind::Worley, feature: WorleyFeature::Edges, scale: 5.0, seed: Some(4), ..Default::default() }), [1180.0, 60.0]);
+    g.connect(decl, cells, 0);
+    let grain = g.add(noise(NoiseKind::Simplex, 8.0, 3, 8), [1180.0, 300.0]);
+    g.connect(use1, grain, 0);
+    let ridge = g.add(math(MathOp::Ridge, 0.0), [1380.0, 300.0]);
+    g.connect(grain, ridge, 0);
+    let mix = g.add(NodeKind::Mix { vals: [0.3, 0.0, 1.0], clamp: true }, [1560.0, 160.0]);
+    g.connect(ridge, mix, 0);
+    g.connect(cells, mix, 1);
+    g.connect(grain, mix, 2);
+    bake(&mut g, cells);
+    label(&mut g, cells, "Cracks");
+    label(&mut g, grain, "Grain");
+    label(&mut g, amt, "Warp (baked)");
+    g.frames.push(Frame { title: "Domain warp".into(), pos: [200.0, -30.0], size: [650.0, 470.0] });
+    finish(&mut g, mix, 1760.0);
+    save("rock", &g);
+
+    // 2. Coral: gyroid displaced by noise, smooth blending, a response curve.
+    let mut g = Graph::default();
+    let gy = g.add(NodeKind::Pattern(PatternParams::for_kind(PatternKind::Gyroid)), [0.0, 0.0]);
+    let n1 = g.add(noise(NoiseKind::Perlin, 3.0, 4, 2), [0.0, 220.0]);
+    let abs = g.add(math(MathOp::Absolute, 0.0), [220.0, 220.0]);
+    g.connect(n1, abs, 0);
+    let curve = g.add(NodeKind::Curve { points: vec![[0.0, 0.0], [0.35, 0.1], [0.7, 0.8], [1.0, 1.0]], mode: CurveMode::Cubic }, [420.0, 220.0]);
+    g.connect(abs, curve, 0);
+    let sm = g.add(NodeKind::Math { op: MathOp::SmoothMax, a: 0.0, b: 0.0, c: 0.35 }, [640.0, 100.0]);
+    g.connect(gy, sm, 0);
+    g.connect(curve, sm, 1);
+    let fine = g.add(noise(NoiseKind::Worley, 9.0, 1, 6), [640.0, 330.0]);
+    let sub = g.add(math(MathOp::Subtract, 0.0), [860.0, 200.0]);
+    g.connect(sm, sub, 0);
+    g.connect(fine, sub, 1);
+    let rm = g.add(NodeKind::Remap { vals: [0.0, -1.0, 1.0, -0.8, 0.8], clamp: true }, [1060.0, 200.0]);
+    g.connect(sub, rm, 0);
+    bake(&mut g, sm);
+    label(&mut g, gy, "Gyroid");
+    label(&mut g, curve, "Contrast");
+    g.frames.push(Frame { title: "Base form".into(), pos: [-20.0, -40.0], size: [940.0, 520.0] });
+    finish(&mut g, rm, 1260.0);
+    save("coral", &g);
+
+    // 3. Brick wall with weathering.
+    let mut g = Graph::default();
+    let mut bp = PatternParams::for_kind(PatternKind::Bricks);
+    bp.output = PatternOutput::Shape;
+    bp.counts = [8.0, 16.0, 8.0];
+    let bricks = g.add(NodeKind::Pattern(bp), [0.0, 0.0]);
+    let mut vp = PatternParams::for_kind(PatternKind::Bricks);
+    vp.output = PatternOutput::CellValue;
+    vp.counts = [8.0, 16.0, 8.0];
+    let shade = g.add(NodeKind::Pattern(vp), [0.0, 200.0]);
+    let wear = g.add(noise(NoiseKind::Perlin, 6.0, 5, 3), [0.0, 400.0]);
+    let sh2 = g.add(math(MathOp::Multiply, 0.25), [240.0, 200.0]);
+    g.connect(shade, sh2, 0);
+    let wr2 = g.add(math(MathOp::Multiply, 0.12), [240.0, 400.0]);
+    g.connect(wear, wr2, 0);
+    let a1 = g.add(math(MathOp::Add, 0.0), [480.0, 100.0]);
+    g.connect(bricks, a1, 0);
+    g.connect(sh2, a1, 1);
+    let a2 = g.add(math(MathOp::Add, 0.0), [680.0, 200.0]);
+    g.connect(a1, a2, 0);
+    g.connect(wr2, a2, 1);
+    bake(&mut g, a1);
+    label(&mut g, bricks, "Brick shape");
+    label(&mut g, shade, "Per-brick height");
+    label(&mut g, wear, "Weathering");
+    g.frames.push(Frame { title: "Wall".into(), pos: [-20.0, -40.0], size: [940.0, 520.0] });
+    finish(&mut g, a2, 900.0);
+    save("bricks", &g);
+
+    // 4. Clouds (viewport in cloud mode).
+    let mut g = Graph::default();
+    let pos = g.add(NodeKind::Position, [0.0, 100.0]);
+    let w = g.add(noise(NoiseKind::Simplex, 2.0, 2, 5), [200.0, 300.0]);
+    let wc = g.add(NodeKind::Combine { vals: [0.0; 3] }, [400.0, 300.0]);
+    g.connect(w, wc, 0);
+    g.connect(w, wc, 2);
+    let ws = g.add(math(MathOp::Multiply, 0.2), [580.0, 300.0]);
+    g.connect(wc, ws, 0);
+    let moved = g.add(math(MathOp::Add, 0.0), [760.0, 120.0]);
+    g.connect(pos, moved, 0);
+    g.connect(ws, moved, 1);
+    let base = g.add(noise(NoiseKind::Perlin, 3.0, 6, 1), [960.0, 120.0]);
+    g.connect(moved, base, 0);
+    let cv = g.add(NodeKind::Curve { points: vec![[-0.6, -1.0], [0.0, -0.4], [0.3, 0.5], [0.9, 1.0]], mode: CurveMode::Smooth }, [1160.0, 120.0]);
+    g.connect(base, cv, 0);
+    bake(&mut g, ws);
+    label(&mut g, base, "Billows");
+    label(&mut g, cv, "Shape");
+    finish(&mut g, cv, 1380.0);
+    save("clouds", &g);
+
+    // 5. Honeycomb armour.
+    let mut g = Graph::default();
+    let mut hp = PatternParams::for_kind(PatternKind::Honeycomb);
+    hp.output = PatternOutput::Distance;
+    let hc = g.add(NodeKind::Pattern(hp), [0.0, 0.0]);
+    let mut tp = PatternParams::for_kind(PatternKind::Truchet);
+    tp.output = PatternOutput::Distance;
+    let tr = g.add(NodeKind::Pattern(tp), [0.0, 200.0]);
+    let rough = g.add(noise(NoiseKind::Worley, 11.0, 3, 9), [0.0, 400.0]);
+    let r2 = g.add(math(MathOp::Multiply, 0.15), [240.0, 400.0]);
+    g.connect(rough, r2, 0);
+    let t2 = g.add(math(MathOp::Multiply, 0.35), [240.0, 200.0]);
+    g.connect(tr, t2, 0);
+    let s1 = g.add(math(MathOp::Add, 0.0), [460.0, 100.0]);
+    g.connect(hc, s1, 0);
+    g.connect(t2, s1, 1);
+    let s2 = g.add(math(MathOp::Add, 0.0), [660.0, 220.0]);
+    g.connect(s1, s2, 0);
+    g.connect(r2, s2, 1);
+    bake(&mut g, s1);
+    label(&mut g, hc, "Plates");
+    label(&mut g, tr, "Etched lines");
+    label(&mut g, rough, "Pitting");
+    finish(&mut g, s2, 880.0);
+    save("armour", &g);
+
+    // 6. Fractal sponge with simplex erosion.
+    let mut g = Graph::default();
+    let mut fp = PatternParams::for_kind(PatternKind::Fractal);
+    fp.output = PatternOutput::Distance;
+    let fr = g.add(NodeKind::Pattern(fp), [0.0, 0.0]);
+    let er = g.add(noise(NoiseKind::Simplex, 6.0, 4, 12), [0.0, 220.0]);
+    let er2 = g.add(math(MathOp::Multiply, 0.18), [220.0, 220.0]);
+    g.connect(er, er2, 0);
+    let sub = g.add(math(MathOp::Subtract, 0.0), [440.0, 100.0]);
+    g.connect(fr, sub, 0);
+    g.connect(er2, sub, 1);
+    bake(&mut g, fr);
+    label(&mut g, fr, "Menger sponge");
+    label(&mut g, er, "Erosion");
+    finish(&mut g, sub, 660.0);
+    save("sponge", &g);
+}

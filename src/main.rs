@@ -215,6 +215,7 @@ impl App {
         let mut show_mask = false;
         let mut lighting_arg: Option<String> = None;
         let mut select_arg: Option<u32> = None;
+        let (mut shape_arg, mut cloud_arg, mut amount_arg): (Option<String>, bool, Option<f32>) = (None, false, None);
         let mut template_arg: Option<String> = None;
         while let Some(a) = args.next() {
             if a == "--mesh" {
@@ -223,6 +224,12 @@ impl App {
                 template_arg = args.next();
             } else if a == "--select" {
                 select_arg = args.next().and_then(|n| n.parse::<u32>().ok());
+            } else if a == "--shape" {
+                shape_arg = args.next();
+            } else if a == "--cloud" {
+                cloud_arg = true;
+            } else if a == "--amount" {
+                amount_arg = args.next().and_then(|v| v.parse().ok());
             } else if a == "--lighting" {
                 lighting_arg = args.next();
             } else if a == "--show-mask" {
@@ -244,7 +251,7 @@ impl App {
         let template = template_arg.as_deref().and_then(|n| Graph::TEMPLATES.iter().find(|t| t.eq_ignore_ascii_case(n)));
         let (graph, path, status) = match graph_arg {
             Some(p) => match std::fs::read_to_string(&p).map_err(|e| e.to_string()).and_then(|s| Graph::from_json(&s)) {
-                Ok(g) => (g, Some(p.clone()), format!("Opened {}", p.display())),
+                Ok(g) => (g, Some(p.clone()), format!("Opened {}", p.file_name().map_or(String::new(), |n| n.to_string_lossy().into_owned()))),
                 Err(e) => (Graph::default_graph(), None, format!("Could not open {}: {e}", p.display())),
             },
             None => (template.map_or_else(Graph::default_graph, |t| Graph::template(t)), None, String::new()),
@@ -329,6 +336,13 @@ impl App {
         }
         app.mesh_mask.terms = mask_terms;
         app.pv.show_mask = show_mask;
+        if let Some(i) = shape_arg.and_then(|n| PRIMS.iter().position(|p| p.eq_ignore_ascii_case(&n))) {
+            app.pv.prim = i as u32;
+        }
+        app.pv.cloud = cloud_arg;
+        if let Some(a) = amount_arg {
+            app.pv.amount = a;
+        }
         if let Some(n) = select_arg.filter(|n| app.graph.nodes.contains_key(n)) {
             app.editor.selected.insert(n);
         }
@@ -1568,13 +1582,16 @@ fn install_crash_log() {
 
 fn main() -> eframe::Result {
     install_crash_log();
+    // `--window 1600x1000` sets the window size (for screenshots).
+    let args: Vec<String> = std::env::args().collect();
+    let window = args.iter().position(|a| a == "--window").and_then(|i| args.get(i + 1)).and_then(|v| v.split_once('x')).and_then(|(w, h)| Some([w.parse::<f32>().ok()?, h.parse::<f32>().ok()?])).unwrap_or([1280.0, 800.0]);
     if let Some(code) = headless::try_run() {
         std::process::exit(code);
     }
     let options = eframe::NativeOptions {
         renderer: eframe::Renderer::Wgpu,
         wgpu_options: view::request_timestamps(Default::default()),
-        viewport: egui::ViewportBuilder::default().with_inner_size([1280.0, 800.0]).with_title("Noiser"),
+        viewport: egui::ViewportBuilder::default().with_inner_size(window).with_title("Noiser"),
         ..Default::default()
     };
     eframe::run_native("Noiser", options, Box::new(|cc| Ok(Box::new(App::new(cc)))))
