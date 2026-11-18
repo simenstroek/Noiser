@@ -18,6 +18,25 @@ pub struct UvMesh {
 }
 
 impl UvMesh {
+    /// Binary little-endian PLY with normals and texture coordinates (s, t).
+    pub fn write_ply(&self, path: &std::path::Path) -> std::io::Result<()> {
+        use std::io::Write;
+        let mut w = std::io::BufWriter::with_capacity(1 << 20, std::fs::File::create(path)?);
+        write!(w, "ply\nformat binary_little_endian 1.0\ncomment Noiser\nelement vertex {}\nproperty float x\nproperty float y\nproperty float z\nproperty float nx\nproperty float ny\nproperty float nz\nproperty float s\nproperty float t\nelement face {}\nproperty list uchar uint vertex_indices\nend_header\n", self.positions.len(), self.triangles.len())?;
+        for i in 0..self.positions.len() {
+            for v in self.positions[i].iter().chain(&self.normals[i]).chain(&[self.uvs[i][0], 1.0 - self.uvs[i][1]]) {
+                w.write_all(&v.to_le_bytes())?;
+            }
+        }
+        for t in &self.triangles {
+            w.write_all(&[3u8])?;
+            for i in t {
+                w.write_all(&i.to_le_bytes())?;
+            }
+        }
+        w.flush()
+    }
+
     /// Wavefront OBJ with vertex normals and texture coordinates (one UV per vertex, so `f v/v/v`).
     pub fn write_obj(&self, path: &std::path::Path) -> std::io::Result<()> {
         use std::io::Write;

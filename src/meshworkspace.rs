@@ -36,6 +36,7 @@ pub struct MeshWorkspace {
     pub autorun: bool,
     /// The first mesh the last run wrote, for the view above the graph.
     preview: Option<Preview>,
+    history: crate::history::History,
     yaw: f32,
     pitch: f32,
     zoom: f32,
@@ -113,7 +114,7 @@ impl Default for MeshWorkspace {
         let mut editor = crate::editor::Editor::default();
         editor.mesh_mode = true;
         editor.frame_next = true;
-        MeshWorkspace { saved: graph.clone(), graph, editor, path: None, cache: Arc::new(Mutex::new(MeshCache::default())), job: None, log: Vec::new(), written: Vec::new(), seed: 0, autorun: false, preview: None, yaw: 0.6, pitch: 0.35, zoom: 1.0 }
+        MeshWorkspace { saved: graph.clone(), graph, editor, path: None, cache: Arc::new(Mutex::new(MeshCache::default())), job: None, log: Vec::new(), written: Vec::new(), seed: 0, autorun: false, preview: None, history: crate::history::History::new(&Graph::default()), yaw: 0.6, pitch: 0.35, zoom: 1.0 }
     }
 }
 
@@ -147,6 +148,7 @@ impl MeshWorkspace {
         self.graph = graph;
         self.saved = saved.unwrap_or_else(|| self.graph.clone());
         self.path = path;
+        self.history = crate::history::History::new(&self.graph);
         self.editor.frame_next = true;
     }
 
@@ -160,10 +162,48 @@ impl MeshWorkspace {
 
     fn set(&mut self, graph: Graph, path: Option<PathBuf>) {
         self.saved = graph.clone();
+        self.history = crate::history::History::new(&graph);
         self.graph = graph;
         self.path = path;
         self.editor.selected.clear();
         self.editor.frame_next = true;
+    }
+
+    /// Whether replacing the graph may go ahead: nothing unsaved, or the user agrees to discard it.
+    fn may_discard(&self) -> bool {
+        !self.dirty()
+            || rfd::MessageDialog::new()
+                .set_level(rfd::MessageLevel::Warning)
+                .set_title("Discard changes?")
+                .set_description("The mesh graph has unsaved changes. Discard them?")
+                .set_buttons(rfd::MessageButtons::YesNo)
+                .show()
+                == rfd::MessageDialogResult::Yes
+    }
+
+    /// The folder relative paths in the graph belong to: the graph file's, or the working folder.
+    pub fn base(&self) -> PathBuf {
+        if let Some(dir) = self.path.as_ref().and_then(|p| p.parent()) {
+            return dir.to_path_buf();
+        }
+        // An unsaved graph: next to its first mesh file, so results do not land in whatever folder the app started in.
+        self.graph
+            .nodes
+            .values()
+            .find_map(|n| match &n.kind {
+                NodeKind::LoadMesh(p) if !p.path.is_empty() && p.path != "{batch}" => std::path::Path::new(&p.path).parent().map(|d| d.to_path_buf()),
+                _ => None,
+            })
+            .filter(|d| d.is_dir())
+            .unwrap_or_else(|| PathBuf::from("."))
+    }
+
+    fn undo(&mut self, redo: bool) {
+        let g = if redo { self.history.redo(&self.graph) } else { self.history.undo(&self.graph) };
+        if let Some(g) = g {
+            self.graph = g;
+            self.editor.selected.retain(|id| self.graph.nodes.contains_key(id));
+        }
     }
 
     pub fn open_graph(&mut self, graph: Graph, path: PathBuf) {
@@ -208,7 +248,7 @@ impl MeshWorkspace {
         let log = Arc::new(Mutex::new(Vec::new()));
         let (tx, rx) = mpsc::channel();
         let (graph, cache, seed, p, l) = (self.graph.clone(), self.cache.clone(), self.seed, progress.clone(), log.clone());
-        let base = self.path.as_ref().and_then(|p| p.parent()).map_or(std::env::current_dir().unwrap_or_default(), |p| p.to_path_buf());
+        let base = self.base();
         std::thread::spawn(move || {
             let mut note = |s: &str| l.lock().unwrap().push(s.to_string());
             let mut cache = cache.lock().unwrap();
@@ -226,7 +266,9 @@ impl crate::App {
     /// uses, is saved first, so the copy embedded in the mesh graph is the one just edited.
     fn save_mesh_graph(&mut self, ask: bool) {
         let uses_open = self.path.as_ref().is_some_and(|open| {
-            self.mesh_ws.graph.nodes.values().any(|n| matches!(&n.kind, NodeKind::NoiseGraph(p) if std::path::Path::new(&p.file) == open.as_path()))
+            let base = self.mesh_ws.base();
+            let same = |a: &std::path::Path, b: &std::path::Path| a == b || matches!((std::fs::canonicalize(a), std::fs::canonicalize(b)), (Ok(x), Ok(y)) if x == y);
+            self.mesh_ws.graph.nodes.values().any(|n| matches!(&n.kind, NodeKind::NoiseGraph(p) if !p.file.is_empty() && same(&crate::meshgraph::resolve_in(&base, &p.file), open)))
         });
         if uses_open && self.graph != self.saved {
             self.save(false);
@@ -269,6 +311,16 @@ impl crate::App {
             let (d, q) = (self.rs.device.clone(), self.rs.queue.clone());
             self.mesh_ws.start(d, q);
         }
+        crate::meshgraph_ui::set_base(self.mesh_ws.base());
+        // Ctrl+Z and Ctrl+Y (or Ctrl+Shift+Z) act on this graph here, unless a text field has the keyboard.
+        if !ctx.egui_wants_keyboard_input() {
+            let (z, y, shift) = ui.input(|i| (i.modifiers.command && i.key_pressed(egui::Key::Z), i.modifiers.command && i.key_pressed(egui::Key::Y), i.modifiers.shift));
+            if y || (z && shift) {
+                self.mesh_ws.undo(true);
+            } else if z {
+                self.mesh_ws.undo(false);
+            }
+        }
         // Ctrl+S and Ctrl+O act on this graph here.
         let (ctrl_s, ctrl_shift) = ui.input(|i| (i.modifiers.command && i.key_pressed(egui::Key::S), i.modifiers.shift));
         if ctrl_s {
@@ -276,10 +328,10 @@ impl crate::App {
         }
         egui::Panel::right("mesh props").default_size(340.0).show(ui, |ui| {
             ui.horizontal_wrapped(|ui| {
-                if ui.button("New").clicked() {
+                if ui.button("New").clicked() && self.mesh_ws.may_discard() {
                     self.mesh_ws.set(MeshWorkspace::example(), None);
                 }
-                if ui.button("Open…").clicked() {
+                if ui.button("Open…").clicked() && self.mesh_ws.may_discard() {
                     if let Err(e) = self.mesh_ws.open() {
                         self.status = e;
                     }
@@ -336,6 +388,8 @@ impl crate::App {
             });
         });
         self.mesh_ws.graph.prune_edges();
+        let settled = !ui.input(|i| i.pointer.any_down());
+        self.mesh_ws.history.commit(&self.mesh_ws.graph, settled);
         egui::Panel::bottom("mesh graph editor").resizable(true).default_size(330.0).show(ui, |ui| {
             self.mesh_ws.editor.show(ui, &mut self.mesh_ws.graph, &Default::default());
         });
@@ -369,7 +423,7 @@ impl crate::App {
                     self.status = "This Noise Graph node has no file chosen yet".into();
                 } else {
                     self.workspace = Workspace::Noise;
-                    self.request(crate::Pending::Path(PathBuf::from(p.file)));
+                    self.request(crate::Pending::Path(crate::meshgraph::resolve_in(&self.mesh_ws.base(), &p.file)));
                 }
             }
         }

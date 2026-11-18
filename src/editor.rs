@@ -563,7 +563,7 @@ impl Editor {
             let header = Rect::from_min_size(l.rect.min, Vec2::new(l.rect.width(), HEADER_H * z));
             let header_color = if node.muted { Color32::from_gray(60) } else { header_tint(&node.kind) };
             painter.rect_filled(header, CornerRadius { nw: r.nw, ne: r.ne, sw: 0, se: 0 }, header_color);
-            let cacheable = matches!(node.kind, NodeKind::Noise(_) | NodeKind::Math { .. } | NodeKind::Remap { .. } | NodeKind::Mix { .. } | NodeKind::Separate | NodeKind::Curve { .. } | NodeKind::Grid { .. } | NodeKind::Pattern(_));
+            let cacheable = !self.mesh_mode && matches!(node.kind, NodeKind::Noise(_) | NodeKind::Math { .. } | NodeKind::Remap { .. } | NodeKind::Mix { .. } | NodeKind::Separate | NodeKind::Curve { .. } | NodeKind::Grid { .. } | NodeKind::Pattern(_));
             // Keep the title clear of the header buttons.
             let title_clip = header.with_max_x(header.right() - (if cacheable { 48.0 } else { 28.0 }) * z);
             painter.with_clip_rect(title_clip).text(header.left_center() + Vec2::new(8.0 * z, 0.0), egui::Align2::LEFT_CENTER, &{ let name = node.label.clone().filter(|l| !l.is_empty()).unwrap_or_else(|| title(&node.kind)); if node.muted { format!("{name} (muted)") } else { name } }, font.clone(), if node.muted { Color32::from_gray(150) } else { Color32::WHITE });
@@ -619,7 +619,7 @@ impl Editor {
             }
 
             // Preview eye (registered after the body so it wins the hit test). Outputs are the normal view.
-            if has_output(&node.kind) {
+            if has_output(&node.kind) && !self.mesh_mode {
                 let eye = Rect::from_center_size(Pos2::new(header.right() - 18.0 * z, header.center().y), Vec2::splat(14.0 * z));
                 // Also senses drags so a drag that starts on the eye doesn't move the node.
                 let er = ui.interact(eye.expand(2.0 * z), ui.scope_id().with(("eye", id)), Sense::click_and_drag());

@@ -52,11 +52,15 @@ impl Default for NoiseGraphParams {
 pub struct OutParams {
     pub folder: String,
     pub name: String,
+    /// Image outputs: the file format.
+    pub image: crate::bake::ImageFormat,
+    /// Mesh outputs: PLY instead of OBJ.
+    pub ply: bool,
 }
 
 impl Default for OutParams {
     fn default() -> Self {
-        OutParams { folder: String::new(), name: "output".into() }
+        OutParams { folder: String::new(), name: "output".into(), image: Default::default(), ply: false }
     }
 }
 
@@ -286,21 +290,21 @@ impl Runner<'_> {
             let value = self.value(graph, &lowered, src, &mut memo, &mut fields)?;
             match (&graph.nodes[&out].kind, value) {
                 (NodeKind::OutMesh(o), Value::Uv(uv)) => {
-                    let path = self.output_path(o, "", "obj");
-                    uv.write_obj(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+                    let path = self.output_path(o, "", if o.ply { "ply" } else { "obj" });
+                    (if o.ply { uv.write_ply(&path) } else { uv.write_obj(&path) }).map_err(|e| format!("{}: {e}", path.display()))?;
                     (self.log)(&format!("wrote {}", path.display()));
                     written.push(path);
                 }
                 (NodeKind::OutMesh(o), Value::Mesh(mesh)) => {
-                    let path = self.output_path(o, "", "obj");
-                    mesh.write_obj(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+                    let path = self.output_path(o, "", if o.ply { "ply" } else { "obj" });
+                    (if o.ply { mesh.write_ply(&path) } else { mesh.write_obj(&path) }).map_err(|e| format!("{}: {e}", path.display()))?;
                     (self.log)(&format!("wrote {}", path.display()));
                     written.push(path);
                 }
                 (NodeKind::OutImage(o), Value::Images(images)) => {
                     let Some(image) = images.get(port) else { return Err(format!("output node {out} reads image {port}, which the Bake node does not produce")) };
-                    let path = self.output_path(o, &format!("_{}", image.label), "png");
-                    image.write_png(&path)?;
+                    let path = self.output_path(o, &format!("_{}", image.label), o.image.extension());
+                    image.write(&path, o.image)?;
                     (self.log)(&format!("wrote {}", path.display()));
                     written.push(path);
                 }

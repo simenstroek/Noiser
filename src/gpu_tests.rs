@@ -1745,8 +1745,8 @@ fn a_mesh_graph_runs_from_a_mesh_file_to_files() {
     let remesh = g.add(NodeKind::Remesh { triangles: 3000 }, [0.0; 2]);
     let uv = g.add(NodeKind::AutoUv(crate::uvgen::UvParams { resolution: 512, ..Default::default() }), [0.0; 2]);
     let bake = g.add(NodeKind::Bake(crate::bake::Settings { size: 128, padding: 2, channels: vec![crate::bake::Channel::Normal, crate::bake::Channel::Occlusion], custom: vec!["Mask".into()], green_up: false }), [0.0; 2]);
-    let out_mesh = g.add(NodeKind::OutMesh(crate::meshgraph::OutParams { folder: "out".into(), name: "ball".into() }), [0.0; 2]);
-    let out_normal = g.add(NodeKind::OutImage(crate::meshgraph::OutParams { folder: "out".into(), name: "ball".into() }), [0.0; 2]);
+    let out_mesh = g.add(NodeKind::OutMesh(crate::meshgraph::OutParams { folder: "out".into(), name: "ball".into(), ..Default::default() }), [0.0; 2]);
+    let out_normal = g.add(NodeKind::OutImage(crate::meshgraph::OutParams { folder: "out".into(), name: "ball".into(), ..Default::default() }), [0.0; 2]);
     g.connect(sum, remesh, 0);
     g.connect(remesh, uv, 0);
     g.connect(uv, bake, 0);
@@ -1757,19 +1757,24 @@ fn a_mesh_graph_runs_from_a_mesh_file_to_files() {
     g.connect(facing, bake, 2);
     let split = g.add(NodeKind::ImageSplit, [0.0; 2]);
     let combine = g.add(NodeKind::ImageCombine, [0.0; 2]);
-    let packed = g.add(NodeKind::OutImage(crate::meshgraph::OutParams { folder: "out".into(), name: "packed".into() }), [0.0; 2]);
+    let packed = g.add(NodeKind::OutImage(crate::meshgraph::OutParams { folder: "out".into(), name: "packed".into(), ..Default::default() }), [0.0; 2]);
     g.connect_from(bake, 0, split, 0);
     g.connect_from(split, 0, combine, 0);
     g.connect_from(split, 1, combine, 1);
     g.connect_from(bake, 2, combine, 2);
     g.connect(combine, packed, 0);
+    // The same image as OpenEXR and the mesh as PLY: the other output formats.
+    let packed_exr = g.add(NodeKind::OutImage(crate::meshgraph::OutParams { folder: "out".into(), name: "packedexr".into(), image: crate::bake::ImageFormat::Exr, ..Default::default() }), [0.0; 2]);
+    let ply_out = g.add(NodeKind::OutMesh(crate::meshgraph::OutParams { folder: "out".into(), name: "ballply".into(), ply: true, ..Default::default() }), [0.0; 2]);
+    g.connect(combine, packed_exr, 0);
+    g.connect(uv, ply_out, 0);
 
     let mut cache = crate::meshgraph::MeshCache::default();
     let mut log = Vec::new();
     let mut note = |s: &str| log.push(s.to_string());
     let mut runner = crate::meshgraph::Runner { device: &gpu.device, queue: &gpu.queue, cache: &mut cache, base: dir.clone(), seed: 0, progress: Default::default(), log: &mut note, batch_file: None };
     let written = runner.run(&g).unwrap();
-    assert_eq!(written.len(), 3, "{written:?}");
+    assert_eq!(written.len(), 5, "{written:?}");
     let obj = std::fs::read_to_string(dir.join("out").join("ball.obj")).unwrap();
     let (mut radii, mut tris, mut uvs) = (Vec::new(), 0, 0);
     for line in obj.lines() {
@@ -1787,6 +1792,10 @@ fn a_mesh_graph_runs_from_a_mesh_file_to_files() {
     let (lo, hi) = (radii.iter().cloned().fold(9.0, f32::min), radii.iter().cloned().fold(0.0, f32::max));
     assert!(lo > 0.8 && hi < 1.2 && hi - lo > 0.03, "radii {lo}..{hi}");
     assert!(dir.join("out").join("ball_Normal.png").exists());
+    assert!(std::fs::metadata(dir.join("out").join("packedexr_Combined.exr")).unwrap().len() > 1000);
+    let ply = std::fs::read(dir.join("out").join("ballply.ply")).unwrap();
+    assert!(ply.starts_with(b"ply
+format binary_little_endian") && ply.len() > 10_000);
     let packed = image::open(dir.join("out").join("packed_Combined.png")).unwrap();
     assert_eq!((packed.width(), packed.height(), packed.color()), (128, 128, image::ColorType::Rgba16));
 }
@@ -1818,8 +1827,8 @@ fn write_demo_mesh_graph() {
     let remesh = g.add(NodeKind::Remesh { triangles: 20_000 }, [980.0, 80.0]);
     let uv = g.add(NodeKind::AutoUv(Default::default()), [1140.0, 80.0]);
     let bake = g.add(NodeKind::Bake(crate::bake::Settings { size: 1024, channels: vec![crate::bake::Channel::Normal, crate::bake::Channel::Occlusion], custom: vec!["Mask".into()], ..Default::default() }), [1300.0, 120.0]);
-    let out_mesh = g.add(NodeKind::OutMesh(crate::meshgraph::OutParams { folder: "out".into(), name: "rock".into() }), [1480.0, 40.0]);
-    let out_normal = g.add(NodeKind::OutImage(crate::meshgraph::OutParams { folder: "out".into(), name: "rock".into() }), [1480.0, 140.0]);
+    let out_mesh = g.add(NodeKind::OutMesh(crate::meshgraph::OutParams { folder: "out".into(), name: "rock".into(), ..Default::default() }), [1480.0, 40.0]);
+    let out_normal = g.add(NodeKind::OutImage(crate::meshgraph::OutParams { folder: "out".into(), name: "rock".into(), ..Default::default() }), [1480.0, 140.0]);
     g.connect(m, normal, 0);
     g.connect(normal, facing, 0);
     g.connect(up, facing, 1);

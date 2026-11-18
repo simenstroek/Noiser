@@ -69,6 +69,31 @@ impl Default for Settings {
     }
 }
 
+/// How an image output node writes its image.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum ImageFormat {
+    #[default]
+    Png16,
+    Png8,
+    Exr,
+}
+
+impl ImageFormat {
+    pub const ALL: [ImageFormat; 3] = [ImageFormat::Png16, ImageFormat::Png8, ImageFormat::Exr];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            ImageFormat::Png16 => "PNG 16-bit",
+            ImageFormat::Png8 => "PNG 8-bit",
+            ImageFormat::Exr => "OpenEXR 32-bit float",
+        }
+    }
+
+    pub fn extension(self) -> &'static str {
+        if self == ImageFormat::Exr { "exr" } else { "png" }
+    }
+}
+
 /// One baked map: `size` by `size` texels, `components` values (0 to 1) per texel, the top row first.
 #[derive(Clone, Debug)]
 pub struct Image {
@@ -82,7 +107,36 @@ pub struct Image {
 }
 
 impl Image {
-    /// Writes a 16-bit PNG (grey or RGB).
+    /// Writes the image as `format` (PNG 8 or 16 bit, or a 32-bit float OpenEXR) by its extension.
+    pub fn write(&self, path: &std::path::Path, format: ImageFormat) -> Result<(), String> {
+        match format {
+            ImageFormat::Png16 => self.write_png(path),
+            ImageFormat::Png8 => {
+                let data: Vec<u8> = self.data.iter().map(|&v| (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8).collect();
+                let n = self.size;
+                let r = match self.components {
+                    4 => image::ImageBuffer::<image::Rgba<u8>, _>::from_raw(n, n, data).ok_or("bad image size")?.save(path),
+                    3 => image::ImageBuffer::<image::Rgb<u8>, _>::from_raw(n, n, data).ok_or("bad image size")?.save(path),
+                    _ => image::ImageBuffer::<image::Luma<u8>, _>::from_raw(n, n, data).ok_or("bad image size")?.save(path),
+                };
+                r.map_err(|e| format!("{}: {e}", path.display()))
+            }
+            ImageFormat::Exr => {
+                use exr::prelude::*;
+                let c = self.components;
+                let names: &[&'static str] = match c {
+                    1 => &["Y"],
+                    3 => &["R", "G", "B"],
+                    _ => &["R", "G", "B", "A"],
+                };
+                let channels: SmallVec<[AnyChannel<FlatSamples>; 4]> = names.iter().enumerate().map(|(k, name)| AnyChannel::new(*name, FlatSamples::F32(self.data.iter().skip(k).step_by(c).copied().collect()))).collect();
+                let layer = Layer::new((self.size as usize, self.size as usize), LayerAttributes::named("noiser"), Encoding::FAST_LOSSLESS, AnyChannels::sort(channels));
+                Image::from_layer(layer).write().to_file(path).map_err(|e| format!("{}: {e}", path.display()))
+            }
+        }
+    }
+
+    /// Writes a 16-bit PNG (grey, RGB or RGBA).
     pub fn write_png(&self, path: &std::path::Path) -> Result<(), String> {
         let q = |v: f32| (v.clamp(0.0, 1.0) * 65535.0 + 0.5) as u16;
         let data: Vec<u16> = self.data.iter().map(|&v| q(v)).collect();

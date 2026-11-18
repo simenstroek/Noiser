@@ -3,6 +3,20 @@
 use crate::graph::NodeKind;
 use eframe::egui;
 
+thread_local! {
+    /// The folder of the mesh graph being edited: relative paths of its nodes are relative to it.
+    static BASE: std::cell::RefCell<std::path::PathBuf> = std::cell::RefCell::new(std::path::PathBuf::from("."));
+}
+
+/// Tells the node settings which folder relative paths belong to (the mesh graph's).
+pub fn set_base(dir: std::path::PathBuf) {
+    BASE.with(|b| *b.borrow_mut() = dir);
+}
+
+fn base() -> std::path::PathBuf {
+    BASE.with(|b| b.borrow().clone())
+}
+
 /// A text field with a Browse button; `filter` is the file dialog's name and extensions, empty for a folder.
 fn path_row(ui: &mut egui::Ui, id: &str, path: &mut String, hint: &str, filter: Option<(&str, &[&str])>) {
     ui.horizontal(|ui| {
@@ -61,10 +75,11 @@ pub fn props(ui: &mut egui::Ui, kind: &mut NodeKind) -> bool {
             } else if !p.embedded.is_empty() && ui.button("Detach (keep only the embedded copy)").on_hover_text("Edits to the file no longer change this mesh graph.").clicked() {
                 p.detached = true;
             }
-            match crate::meshgraph::noise_graph_source(p, std::path::Path::new(".")) {
-                Ok(_) if !p.detached && !p.file.is_empty() && std::fs::metadata(&p.file).is_ok() => {
+            let full = crate::meshgraph::resolve_in(&base(), &p.file);
+            match crate::meshgraph::noise_graph_source(p, &base()) {
+                Ok(_) if !p.detached && !p.file.is_empty() && std::fs::metadata(&full).is_ok() => {
                     if ui.button("Refresh embedded copy").on_hover_text("Saving the mesh graph does this too.").clicked() {
-                        if let Ok(text) = std::fs::read_to_string(&p.file) {
+                        if let Ok(text) = std::fs::read_to_string(&full) {
                             p.embedded = text;
                         }
                     }
@@ -146,13 +161,25 @@ pub fn props(ui: &mut egui::Ui, kind: &mut NodeKind) -> bool {
             true
         }
         NodeKind::OutMesh(o) | NodeKind::OutImage(o) => {
-            ui.weak(if image { "Writes the image as a 16-bit PNG." } else { "Writes the mesh as an OBJ (with UVs and normals when it has them)." });
+            ui.weak(if image { "Writes the image." } else { "Writes the mesh (with UVs and normals when it has them)." });
+            if image {
+                egui::ComboBox::from_id_salt("image format").selected_text(o.image.label()).show_ui(ui, |ui| {
+                    for f in crate::bake::ImageFormat::ALL {
+                        ui.selectable_value(&mut o.image, f, f.label());
+                    }
+                });
+            } else {
+                ui.horizontal(|ui| {
+                    ui.selectable_value(&mut o.ply, false, "OBJ");
+                    ui.selectable_value(&mut o.ply, true, "PLY (binary)");
+                });
+            }
             path_row(ui, "output folder", &mut o.folder, "folder (empty: next to the graph)", None);
             ui.horizontal(|ui| {
                 ui.label("name");
                 ui.add(egui::TextEdit::singleline(&mut o.name).desired_width(140.0));
             });
-            ui.weak(if image { "Written as name.png; a node fed by a Bake gets the map's name added: name_Normal.png." } else { "Written as name.obj. Existing files are not overwritten: a number is added." });
+            ui.weak(if image { "A map's name is added to the file name: name_Normal.png. {name} in the name is the mesh file's name in a batch." } else { "Existing files are not overwritten: a number is added. {name} in the name is the mesh file's name in a batch." });
             true
         }
         _ => false,

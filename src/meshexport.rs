@@ -218,7 +218,10 @@ impl MeshEvaluator {
     /// output node whose source is the field to evaluate; the loaded-mesh nodes read `meshes` in the order of
     /// `Compiled::mesh_slots`. The field is in the units of the mesh files.
     pub fn new_graph(device: &wgpu::Device, queue: &wgpu::Queue, graph: &Graph, seed: u32, mut meshes: Vec<GraphMesh>) -> Result<Self, String> {
-        let c = codegen::compile(graph)?;
+        // The Normal node steps over half a voxel of the finest loaded mesh, in the units of the mesh files.
+        let eps = meshes.iter().map(|m| 0.5 * m.voxel * m.scale).fold(f32::MAX, f32::min);
+        let eps = if eps.is_finite() && eps > 0.0 && eps < f32::MAX { eps } else { codegen::NORMAL_EPS };
+        let c = codegen::compile_eps(graph, &Default::default(), eps)?;
         if meshes.len() > MAX_GRAPH_MESHES {
             return Err(format!("a mesh graph can load at most {MAX_GRAPH_MESHES} meshes"));
         }

@@ -77,6 +77,7 @@ struct Gen<'a> {
     /// Noise kinds used, each getting its own fBm function.
     kinds: BTreeSet<NoiseKind>,
     mesh_slots: Vec<NodeId>,
+    eps: f32,
     out: String,
 }
 
@@ -84,9 +85,18 @@ pub fn compile(g: &Graph) -> Result<Compiled, String> {
     compile_with(g, &BTreeMap::new())
 }
 
+/// The step the Normal node differentiates over, in position units, unless told otherwise.
+pub const NORMAL_EPS: f32 = 1e-3;
+
 /// Like `compile`, but nodes in `caches` read their baked texture (`cache_sample(slot, p)`)
 /// instead of evaluating their upstream graph. Preview only.
 pub fn compile_with(g: &Graph, caches: &BTreeMap<NodeId, u32>) -> Result<Compiled, String> {
+    compile_eps(g, caches, NORMAL_EPS)
+}
+
+/// `compile_with` with the Normal node's differentiation step: the 1e-3 of the noise graph is right for tiles of one
+/// unit, but a mesh graph works in the units of its mesh files, where a step should follow the size of the mesh.
+pub fn compile_eps(g: &Graph, caches: &BTreeMap<NodeId, u32>, eps: f32) -> Result<Compiled, String> {
     let lowered = g.lowered();
     let g = &lowered;
     // Parameter slots, in node-id order.
@@ -159,7 +169,7 @@ pub fn compile_with(g: &Graph, caches: &BTreeMap<NodeId, u32>) -> Result<Compile
     }
 
     let mesh_slots: Vec<NodeId> = g.nodes.iter().filter(|(_, n)| matches!(n.kind, NodeKind::LoadMesh(_))).map(|(id, _)| *id).collect();
-    let mut cg = Gen { g, caches, slots, types: BTreeMap::new(), done: BTreeSet::new(), building: BTreeSet::new(), kinds: BTreeSet::new(), mesh_slots: mesh_slots.clone(), out: String::new() };
+    let mut cg = Gen { g, caches, slots, types: BTreeMap::new(), done: BTreeSet::new(), building: BTreeSet::new(), kinds: BTreeSet::new(), mesh_slots: mesh_slots.clone(), eps, out: String::new() };
     let density = g.find(|k| *k == NodeKind::OutDensity).and_then(|o| g.input_from(o, 0));
     let normal = g.find(|k| *k == NodeKind::OutNormal).and_then(|o| g.input_from(o, 0));
     // One output of a Separate node is a component of the vector its function returns.
@@ -187,7 +197,7 @@ pub fn compile_with(g: &Graph, caches: &BTreeMap<NodeId, u32>) -> Result<Compile
         }
         None => "tetra_grad_density(p)".into(),
     };
-    writeln!(cg.out, "fn tetra_grad_density(p: vec3f) -> vec3f {{ {} }}", tetra_body(|q| format!("graph_density({q})"))).unwrap();
+    writeln!(cg.out, "fn tetra_grad_density(p: vec3f) -> vec3f {{ {} }}", tetra_body(eps, |q| format!("graph_density({q})"))).unwrap();
     writeln!(cg.out, "fn graph_normal(p: vec3f) -> vec3f {{ return {normal_expr}; }}").unwrap();
 
     if params.is_empty() {
@@ -208,9 +218,9 @@ pub fn compile_with(g: &Graph, caches: &BTreeMap<NodeId, u32>) -> Result<Compile
 
 /// Body of a function returning the normalized tetrahedral gradient (IQ) of the float field `sample(q)`.
 /// A loop, so the field is inlined once rather than four times (driver compile time).
-fn tetra_body(sample: impl Fn(&str) -> String) -> String {
+fn tetra_body(eps: f32, sample: impl Fn(&str) -> String) -> String {
     format!(
-        "let e = 1e-3; var g = vec3f(0.0); for (var k = 0u; k < 4u; k++) {{ let o = tetra(k); g += o * {}; }} return safe_normalize(g);",
+        "let e = {eps:e}; var g = vec3f(0.0); for (var k = 0u; k < 4u; k++) {{ let o = tetra(k); g += o * {}; }} return safe_normalize(g);",
         sample("p + o * e")
     )
 }
@@ -413,7 +423,7 @@ impl Gen<'_> {
                         let gname = format!("g{src}{}", part.map_or(String::new(), |c| format!("_{c}")));
                         if !self.out.contains(&format!("fn {gname}(")) {
                             let ty = if part.is_some() { Ty::F } else { self.types[&src] };
-                            let body = tetra_body(|q| convert(&format!("c{src}({q}){}", part.map_or(String::new(), |c| format!(".{c}"))), ty, Ty::F));
+                            let body = tetra_body(self.eps, |q| convert(&format!("c{src}({q}){}", part.map_or(String::new(), |c| format!(".{c}"))), ty, Ty::F));
                             writeln!(self.out, "fn {gname}(p: vec3f) -> vec3f {{ {body} }}").unwrap();
                         }
                         (Ty::V, format!("{sign}{gname}(p)"))
