@@ -120,6 +120,10 @@ fn run(mesh: &RawMesh, base: &[V3], material: Option<&[u32]>, params: &UvParams,
     let pack = xatlas::PackOptions { resolution: params.resolution, padding: params.padding, bilinear: true, brute_force: params.brute_force, rotate_charts: true, rotate_charts_to_axis: true, ..Default::default() };
     atlas.generate(&chart, &pack);
     let (w, h) = (atlas.width().max(1) as f32, atlas.height().max(1) as f32);
+    if std::env::var_os("NOISER_REMESH_DEBUG").is_some() {
+        eprintln!("atlas {w} x {h}, {} atlas(es), texels per unit {}", atlas.atlas_count(), atlas.texels_per_unit());
+    }
+    let side = w.max(h);
     let meshes = atlas.meshes();
     let m = meshes.first().ok_or("UV generation produced no mesh")?;
     let mut out = UvMesh::default();
@@ -127,7 +131,7 @@ fn run(mesh: &RawMesh, base: &[V3], material: Option<&[u32]>, params: &UvParams,
         let src = v.xref as usize;
         out.positions.push(mesh.positions[src]);
         out.normals.push(mesh.normals.get(src).copied().unwrap_or([0.0; 3]));
-        out.uvs.push([v.uv[0] / w, v.uv[1] / h]);
+        out.uvs.push([v.uv[0] / side, v.uv[1] / side]);
         out.source.push(v.xref);
     }
     out.triangles = m.index_array.chunks_exact(3).map(|t| [t[0], t[1], t[2]]).collect();
@@ -444,6 +448,20 @@ pub fn generate(mesh: &RawMesh, params: &UvParams) -> Result<UvMesh, String> {
     }
     let base = if params.smoothing > 0 { smoothed(mesh, params.smoothing) } else { mesh.positions.clone() };
     let (mut uv, mut charts) = run(mesh, &base, None, params, params.max_cost)?;
+    if std::env::var_os("NOISER_REMESH_DEBUG").is_some() {
+        let bad = crate::meshquality::bad_faces(mesh);
+        let min = (mesh.triangles.len() / 400).max(10);
+        let (mut in_tiny, mut bad_in_tiny, mut tiny_with_bad, mut tiny) = (0, 0, 0, 0);
+        for c in charts.iter().filter(|c| c.len() < min) {
+            tiny += 1;
+            in_tiny += c.len();
+            let b = c.iter().filter(|&&f| bad[f as usize]).count();
+            bad_in_tiny += b;
+            tiny_with_bad += (b > 0) as usize;
+        }
+        let total_bad = bad.iter().filter(|b| **b).count();
+        eprintln!("bad faces: {total_bad} of {} overall; {tiny} tiny charts hold {in_tiny} faces, {bad_in_tiny} bad; {tiny_with_bad} of them contain a bad face", bad.len());
+    }
     let min_faces = (mesh.triangles.len() / 400).max(10);
     for _ in 0..params.merge_rounds {
         let Some(labels) = merge_small_charts(mesh, &charts, min_faces) else { break };

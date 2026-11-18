@@ -42,11 +42,13 @@ pub struct Settings {
     pub uv: Option<crate::uvgen::UvParams>,
     /// Also bake maps from the field into PNG files next to the mesh (needs UVs, which are generated if not asked for).
     pub bake: Option<crate::bake::Settings>,
+    /// Append the quality numbers of the result (see meshquality.rs) to the summary.
+    pub report: bool,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { res: 256, format: Format::Obj, cull: 0.01, remesh: None, uv: None, bake: None }
+        Self { res: 256, format: Format::Obj, cull: 0.01, remesh: None, uv: None, bake: None, report: false }
     }
 }
 
@@ -494,6 +496,21 @@ impl Job<'_> {
             return Err("the displaced surface is empty (is the mesh outside the exported region?)".into());
         }
         let removed = if self.settings.remesh.is_some() { 0 } else { mesh.remove_small_parts(self.settings.cull) };
+        if self.settings.remesh.is_some() {
+            mesh.recompute_normals();
+        }
+        let mut quality = String::new();
+        if self.settings.report {
+            let (lo, hi) = mesh.positions.iter().fold(([f32::MAX; 3], [f32::MIN; 3]), |(lo, hi), p| ([0, 1, 2].map(|a| lo[a].min(p[a])), [0, 1, 2].map(|a| hi[a].max(p[a]))));
+            let diagonal = (0..3).map(|a| (hi[a] - lo[a]).powi(2)).sum::<f32>().sqrt();
+            let (d, eps) = (self.d, 0.0005 * diagonal);
+            let mut r = crate::meshquality::report(&mesh).with_surface_error(&mesh, &mut |pts| self.ev.points(d, pts, eps));
+            // Distances in the mesh's own units, like the file.
+            let to_object = self.norm.scale / self.d.prim_size;
+            (r.mean_error, r.max_error) = (r.mean_error.map(|v| v * to_object), r.max_error.map(|v| v * to_object));
+            quality = format!("
+{r}");
+        }
         let wants_uv = self.settings.uv.is_some() || self.settings.bake.is_some();
         if wants_uv && self.settings.format != Format::Obj {
             return Err("UVs and maps are written with OBJ meshes only; choose the OBJ format".into());
@@ -505,8 +522,9 @@ impl Job<'_> {
         if wants_uv {
             let params = self.settings.uv.clone().unwrap_or_default();
             let mut u = crate::uvgen::generate(&mesh, &params)?;
-            if std::env::var_os("NOISER_REMESH_DEBUG").is_some() {
-                eprintln!("{}", crate::meshquality::uv_report(&u, 1024));
+            if self.settings.report {
+                quality += &format!("
+{}", crate::meshquality::uv_report(&u, 1024));
             }
             if let Some(bake) = &self.settings.bake {
                 let (lo, hi) = u.positions.iter().fold(([f32::MAX; 3], [f32::MIN; 3]), |(lo, hi), p| ([0, 1, 2].map(|a| lo[a].min(p[a])), [0, 1, 2].map(|a| hi[a].max(p[a]))));
@@ -538,7 +556,7 @@ impl Job<'_> {
         progress.store(1000, Ordering::Relaxed);
         let parts = if removed > 0 { format!(", {removed} small parts removed") } else { String::new() };
         let (vertices, triangles) = uv.as_ref().map_or((mesh.positions.len(), mesh.triangles.len()), |u| (u.positions.len(), u.triangles.len()));
-        Ok(format!("Exported {vertices} vertices, {triangles} triangles{parts}{baked} to {}", path.display()))
+        Ok(format!("Exported {vertices} vertices, {triangles} triangles{parts}{baked} to {}{quality}", path.display()))
     }
 }
 

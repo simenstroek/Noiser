@@ -76,8 +76,6 @@ struct Options {
     combine: crate::meshsdf::Combine,
     /// `--object-units`: --tile and --amount are in the meshes' own units, so the detail is the same size on every mesh.
     object_units: bool,
-    /// `--report`: after each mesh, print its quality numbers (see meshquality.rs).
-    report: bool,
     mask: MaskSettings,
 }
 
@@ -101,7 +99,6 @@ fn parse(args: &[String]) -> Result<Options, String> {
         grid_res: 128,
         combine: Default::default(),
         object_units: false,
-        report: false,
         mask: MaskSettings::default(),
     };
     let mut it = args.iter();
@@ -152,7 +149,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
                 o.combine.mode = crate::meshsdf::CombineMode::ALL.into_iter().find(|m| m.file_name() == name).ok_or(format!("unknown combine mode {name}"))?;
             }
             "--object-units" => o.object_units = true,
-            "--report" => o.report = true,
+            "--report" => o.settings.report = true,
             "--uv" => o.settings.uv = Some(crate::uvgen::UvParams::default()),
             "--uv-res" => o.settings.uv.get_or_insert_with(Default::default).resolution = whole(value("a texture size like 2048")?)?,
             "--uv-smooth" => o.settings.uv.get_or_insert_with(Default::default).smoothing = whole(value("a number of rounds")?)?,
@@ -169,6 +166,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
             "--bake-size" => o.settings.bake.get_or_insert_with(Default::default).size = whole(value("a texture size like 2048")?)?,
             "--bake-pad" => o.settings.bake.get_or_insert_with(Default::default).padding = whole(value("texels")?)?,
             "--green-up" => o.settings.bake.get_or_insert_with(Default::default).green_up = true,
+            "--uv-brute" => o.settings.uv.get_or_insert_with(Default::default).brute_force = true,
             "--uv-cost" => o.settings.uv.get_or_insert_with(Default::default).max_cost = float(value("a number like 4")?)?,
             "--remesh" => o.settings.remesh = Some(whole(value("a triangle count")?)?.max(100) as usize),
             "--combine-smooth" => o.combine.smooth = float(value("a width like 0.1")?)?.max(0.0),
@@ -351,12 +349,6 @@ fn run(args: &[String], log: &mut Log) -> Result<usize, String> {
         match result {
             Ok(Ok(info)) => {
                 log.line(&format!("[{n}/{total}] {} -> {} ({info}, {:.1} s)", input.display(), output.display(), started.elapsed().as_secs_f32()));
-                if o.report {
-                    match crate::meshformats::load(&output) {
-                        Ok(m) => log.line(&crate::meshquality::report(&crate::surface::RawMesh { normals: Vec::new(), positions: m.positions, triangles: m.triangles }).to_string()),
-                        Err(e) => log.line(&format!("report: could not read {} back: {e}", output.display())),
-                    }
-                }
             }
             Ok(Err(e)) => {
                 failed += 1;

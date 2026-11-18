@@ -152,6 +152,39 @@ pub fn report(mesh: &RawMesh) -> Report {
     r
 }
 
+/// The triangles that are slivers (quality under 0.1) or folded back over a neighbour (normals more than 125 degrees
+/// apart): the ones that cause trouble for UV charting and baking.
+pub fn bad_faces(mesh: &RawMesh) -> Vec<bool> {
+    let n = mesh.triangles.len();
+    let mut normal = vec![[0.0f32; 3]; n];
+    let mut bad = vec![false; n];
+    let mut edges: HashMap<(u32, u32), Vec<u32>> = HashMap::new();
+    for (t, tri) in mesh.triangles.iter().enumerate() {
+        let p = tri.map(|i| mesh.positions[i as usize]);
+        let (e0, e1, e2) = (sub(p[1], p[0]), sub(p[2], p[1]), sub(p[0], p[2]));
+        let c = cross(e0, [-e2[0], -e2[1], -e2[2]]);
+        let a2 = len(c);
+        let q = if a2 > 0.0 { 2.0 * 3f32.sqrt() * a2 / (dot(e0, e0) + dot(e1, e1) + dot(e2, e2)) } else { 0.0 };
+        bad[t] = q < 0.1;
+        if a2 > 0.0 {
+            normal[t] = [c[0] / a2, c[1] / a2, c[2] / a2];
+        }
+        for k in 0..3 {
+            let (a, b) = (tri[k], tri[(k + 1) % 3]);
+            edges.entry((a.min(b), a.max(b))).or_default().push(t as u32);
+        }
+    }
+    for tris in edges.values() {
+        if let [a, b] = tris[..] {
+            if dot(normal[a as usize], normal[b as usize]) < -0.57 {
+                bad[a as usize] = true;
+                bad[b as usize] = true;
+            }
+        }
+    }
+    bad
+}
+
 impl Report {
     /// Adds how far the mesh lies from the zero level of a field. `sample` takes points and returns
     /// (distance, gradient) for each; the distance to the surface is estimated as |d| / |gradient|, at every

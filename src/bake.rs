@@ -479,8 +479,9 @@ mod tests {
         assert!(sum / count as f32 > 0.97, "blue averages {}", sum / count as f32);
         // Occlusion: a convex sphere is open everywhere.
         let ao = get(Channel::Occlusion);
-        let mean = ao.data.iter().sum::<f32>() / ao.data.len() as f32;
-        assert!(mean > 0.9, "occlusion {mean}");
+        let covered: Vec<f32> = ao.data.iter().cloned().filter(|v| *v > 0.0).collect();
+        let mean = covered.iter().sum::<f32>() / covered.len() as f32;
+        assert!(covered.len() > 128 * 128 / 3 && mean > 0.9, "occlusion {mean} over {} texels", covered.len());
         // Thickness: the diameter of the unit sphere, 2, in units of the radius 1, clamped to 1.
         let th = get(Channel::Thickness);
         assert!(th.data.iter().filter(|v| **v > 0.0).all(|v| *v > 0.9), "thickness");

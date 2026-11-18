@@ -293,6 +293,7 @@ impl App {
                     ui.add(egui::DragValue::new(&mut uv.resolution).range(256..=8192).speed(32.0).suffix(" px atlas")).on_hover_text("The texture size the atlas is packed for; it sets how much padding between islands is worth in texels.");
                     ui.add(egui::DragValue::new(&mut uv.smoothing).range(0..=60).speed(0.5).prefix("chart smoothing ")).on_hover_text("Rounds of smoothing applied to the surface the islands are cut from. A bumpy surface otherwise breaks into hundreds of tiny islands; the UVs still map the true surface.");
                     ui.checkbox(&mut uv.absorb_tiny, "fold tiny islands into neighbours");
+                    ui.checkbox(&mut uv.brute_force, "best packing (slower)").on_hover_text("Fills the square better, but takes several times longer on meshes with many islands.");
                 });
             }
             crate::row(ui, &mut s.bake, d.bake, |ui, v| {

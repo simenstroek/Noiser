@@ -216,6 +216,30 @@ fn find(parent: &mut [u32], mut x: u32) -> u32 {
 }
 
 impl RawMesh {
+    /// Replaces the vertex normals with the angle-weighted mean of the faces around each vertex: the normals a game
+    /// engine or Blender computes by itself. A low-poly mesh needs these rather than the field's gradient, which on a
+    /// bumpy surface is a random sample of one bump, and a baked normal map is only right against the normals the
+    /// mesh is used with.
+    pub fn recompute_normals(&mut self) {
+        let mut sum = vec![[0.0f32; 3]; self.positions.len()];
+        for t in &self.triangles {
+            let p = t.map(|i| self.positions[i as usize]);
+            let sub = |a: V3, b: V3| [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+            let n = unit({
+                let (u, v) = (sub(p[1], p[0]), sub(p[2], p[0]));
+                [u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]]
+            });
+            for k in 0..3 {
+                let (a, b) = (unit(sub(p[(k + 1) % 3], p[k])), unit(sub(p[(k + 2) % 3], p[k])));
+                let angle = (a[0] * b[0] + a[1] * b[1] + a[2] * b[2]).clamp(-1.0, 1.0).acos();
+                for c in 0..3 {
+                    sum[t[k] as usize][c] += n[c] * angle;
+                }
+            }
+        }
+        self.normals = sum.into_iter().map(unit).collect();
+    }
+
     /// Removes connected parts whose surface area is below `fraction` of the largest part's, and
     /// the vertices only they used. Returns how many parts were removed. A mesh made of several
     /// large parts keeps them all; only small floating bits go.
