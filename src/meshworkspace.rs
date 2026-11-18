@@ -38,6 +38,11 @@ pub struct MeshWorkspace {
     preview: Option<Preview>,
     /// The images the last run wrote, as thumbnails under the view.
     thumbnails: Vec<(String, egui::TextureHandle)>,
+    /// Redo the quick preview a moment after the graph (or the noise graph it uses) changes.
+    pub auto_preview: bool,
+    /// What the last preview was made from, and since when the graph has differed from it.
+    preview_key: u64,
+    changed_since: Option<std::time::Instant>,
     history: crate::history::History,
     yaw: f32,
     pitch: f32,
@@ -116,7 +121,7 @@ impl Default for MeshWorkspace {
         let mut editor = crate::editor::Editor::default();
         editor.mesh_mode = true;
         editor.frame_next = true;
-        MeshWorkspace { saved: graph.clone(), graph, editor, path: None, cache: Arc::new(Mutex::new(MeshCache::default())), job: None, log: Vec::new(), written: Vec::new(), seed: 0, autorun: false, preview: None, thumbnails: Vec::new(), history: crate::history::History::new(&Graph::default()), yaw: 0.6, pitch: 0.35, zoom: 1.0 }
+        MeshWorkspace { saved: graph.clone(), graph, editor, path: None, cache: Arc::new(Mutex::new(MeshCache::default())), job: None, log: Vec::new(), written: Vec::new(), seed: 0, autorun: false, preview: None, thumbnails: Vec::new(), auto_preview: false, preview_key: 0, changed_since: None, history: crate::history::History::new(&Graph::default()), yaw: 0.6, pitch: 0.35, zoom: 1.0 }
     }
 }
 
@@ -430,6 +435,28 @@ impl crate::App {
                 }
             }
         }
+        // Auto preview: when what the preview is made from has been still for a moment, make it again.
+        if self.mesh_ws.auto_preview && !self.mesh_ws.running() {
+            use std::hash::{Hash, Hasher};
+            let g = self.graph_for_run();
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            g.to_json().hash(&mut h);
+            self.mesh_ws.seed.hash(&mut h);
+            let key = h.finish();
+            if key != self.mesh_ws.preview_key {
+                let since = *self.mesh_ws.changed_since.get_or_insert_with(std::time::Instant::now);
+                if since.elapsed() > std::time::Duration::from_millis(1000) && !ui.input(|i| i.pointer.any_down()) {
+                    self.mesh_ws.preview_key = key;
+                    self.mesh_ws.changed_since = None;
+                    let (d, q) = (self.rs.device.clone(), self.rs.queue.clone());
+                    self.mesh_ws.start_preview(g, d, q);
+                } else {
+                    ctx.request_repaint_after(std::time::Duration::from_millis(300));
+                }
+            } else {
+                self.mesh_ws.changed_since = None;
+            }
+        }
         // Ctrl+Z and Ctrl+Y (or Ctrl+Shift+Z) act on this graph here, unless a text field has the keyboard.
         if !ctx.egui_wants_keyboard_input() {
             let (z, y, shift) = ui.input(|i| (i.modifiers.command && i.key_pressed(egui::Key::Z), i.modifiers.command && i.key_pressed(egui::Key::Y), i.modifiers.shift));
@@ -485,6 +512,7 @@ impl crate::App {
                 }
                 ui.add(egui::DragValue::new(&mut self.mesh_ws.seed).prefix("seed "));
             });
+            ui.checkbox(&mut self.mesh_ws.auto_preview, "Preview again after changes").on_hover_text("A second after the graph, or the noise graph open in the Noise tab, stops changing, the quick preview runs again.");
             if let Some(job) = &self.mesh_ws.job {
                 let p = job.progress.load(std::sync::atomic::Ordering::Relaxed) as f32 / 1000.0;
                 ui.add(egui::ProgressBar::new(p).show_percentage());
