@@ -48,6 +48,12 @@ pub struct Editor {
     pub selected: BTreeSet<NodeId>,
     /// Snap nodes to a 20-unit grid when a drag ends (a preference).
     pub snap: bool,
+    /// Where a Ctrl+right-drag that cuts wires started.
+    cut_start: Option<Pos2>,
+    /// Ctrl was held when the right button went down.
+    cut_armed: bool,
+    /// Tests cannot hold Ctrl; they set this to cut with a plain right-drag.
+    cut_without_ctrl: bool,
     /// Which output pin of the node the wire being dragged started from (Separate XYZ has three).
     wire_port: usize,
     /// Frame all nodes on the next draw (set when a graph is opened, so it is in view).
@@ -80,6 +86,9 @@ impl Default for Editor {
             zoom: 1.0,
             selected: BTreeSet::new(),
             snap: false,
+            cut_start: None,
+            cut_armed: false,
+            cut_without_ctrl: false,
             wire_port: 0,
             frame_next: false,
             node_dragged: false,
@@ -402,6 +411,28 @@ impl Editor {
 
         let layouts: BTreeMap<NodeId, Layout> =
             graph.nodes.iter().map(|(&id, n)| (id, self.layout(origin, &n.kind, n.pos))).collect();
+        // Ctrl + right-drag across wires cuts them.
+        if ui.input(|i| i.pointer.button_pressed(egui::PointerButton::Secondary)) {
+            self.cut_armed = self.cut_without_ctrl || ui.input(|i| i.modifiers.command);
+        }
+        if bg.drag_started_by(egui::PointerButton::Secondary) && self.cut_armed {
+            self.cut_start = bg.interact_pointer_pos();
+        }
+        if let (Some(a), Some(p)) = (self.cut_start, ui.input(|i| i.pointer.interact_pos())) {
+            painter.line_segment([a, p], Stroke::new(1.5, Color32::from_rgb(230, 90, 90)));
+            if bg.drag_stopped_by(egui::PointerButton::Secondary) {
+                let before = graph.edges.len();
+                graph.edges.retain(|e| match (layouts[&e.from].outputs.get(e.from_port).copied().or(layouts[&e.from].output), layouts[&e.to].inputs.get(e.port)) {
+                    (Some(s), Some(t)) => !wire_crosses(s, *t, a, p),
+                    _ => true,
+                });
+                let _ = before;
+                self.cut_start = None;
+            }
+        }
+        if !ui.input(|i| i.pointer.button_down(egui::PointerButton::Secondary)) {
+            self.cut_start = None;
+        }
         // Wires under nodes.
         for e in &graph.edges {
             if let (Some(a), Some(b)) = (layouts[&e.from].outputs.get(e.from_port).copied().or(layouts[&e.from].output), layouts[&e.to].inputs.get(e.port)) {
@@ -929,6 +960,21 @@ fn palette_matching(query: &str) -> Vec<(&'static str, NodeKind)> {
     palette().into_iter().filter(|(label, _)| label.to_lowercase().contains(&q)).collect()
 }
 
+/// Whether segment `p`-`q` crosses the wire from `a` to `b` (drawn by `bezier`).
+fn wire_crosses(a: Pos2, b: Pos2, p: Pos2, q: Pos2) -> bool {
+    let dx = ((b.x - a.x).abs() * 0.5).max(30.0);
+    let (c1, c2) = (a + Vec2::new(dx, 0.0), b - Vec2::new(dx, 0.0));
+    let at = |t: f32| {
+        let u = 1.0 - t;
+        (a.to_vec2() * (u * u * u) + c1.to_vec2() * (3.0 * u * u * t) + c2.to_vec2() * (3.0 * u * t * t) + b.to_vec2() * (t * t * t)).to_pos2()
+    };
+    let cross = |o: Pos2, u: Pos2, v: Pos2| (u.x - o.x) * (v.y - o.y) - (u.y - o.y) * (v.x - o.x);
+    (0..32).any(|i| {
+        let (s, e) = (at(i as f32 / 32.0), at((i + 1) as f32 / 32.0));
+        cross(p, q, s) * cross(p, q, e) <= 0.0 && cross(s, e, p) * cross(s, e, q) <= 0.0
+    })
+}
+
 /// Whether the wire from `a` to `b` (drawn by `bezier`) passes through `rect`.
 fn wire_passes_through(a: Pos2, b: Pos2, rect: Rect) -> bool {
     let dx = ((b.x - a.x).abs() * 0.5).max(30.0);
@@ -982,6 +1028,14 @@ mod tests {
             let q = ed.to_screen(Pos2::ZERO, [n.pos[0] + NODE_W, n.pos[1] + HEADER_H]);
             assert!(p.x >= 0.0 && p.y >= 0.0 && q.x <= size.x && q.y <= size.y, "node at {:?} is outside the canvas", n.pos);
         }
+    }
+
+    #[test]
+    fn a_cut_line_crosses_only_the_wires_it_passes_over() {
+        let (a, b) = (Pos2::new(0.0, 0.0), Pos2::new(300.0, 100.0));
+        assert!(wire_crosses(a, b, Pos2::new(150.0, -50.0), Pos2::new(150.0, 150.0)), "straight across the middle");
+        assert!(!wire_crosses(a, b, Pos2::new(150.0, 200.0), Pos2::new(150.0, 300.0)), "well below it");
+        assert!(!wire_crosses(a, b, Pos2::new(400.0, -50.0), Pos2::new(400.0, 150.0)), "past its end");
     }
 
     #[test]
@@ -1162,6 +1216,35 @@ mod tests {
         drag(&mut h, from, to);
         let g = &h.state().1;
         assert_eq!(g.input_from(comb, 1), Some((sep, 2)), "{:?}", g.edges);
+    }
+
+    /// Ctrl + right-drag across a wire removes it; a plain right-drag does not.
+    #[test]
+    fn ctrl_right_drag_cuts_a_wire() {
+        let mut g = Graph::default();
+        let src = g.add(NodeKind::Float(1.0), [100.0, 200.0]);
+        let out = g.add(NodeKind::OutDensity, [500.0, 200.0]);
+        g.connect(src, out, 0);
+        let mut h = editor_harness(g);
+        h.run();
+        let (from, to) = { let ed = &h.state().0; (ed.to_screen(ed.debug_origin, [330.0, 120.0]), ed.to_screen(ed.debug_origin, [330.0, 330.0])) };
+        let cut = |h: &mut egui_kittest::Harness<'static, (Editor, Graph)>, mods: egui::Modifiers| {
+            h.hover_at(from);
+            h.run();
+            h.event(egui::Event::PointerButton { pos: from, button: egui::PointerButton::Secondary, pressed: true, modifiers: mods });
+            h.run();
+            for i in 1..=8 {
+                h.hover_at(from + (to - from) * i as f32 / 8.0);
+                h.run();
+            }
+            h.event(egui::Event::PointerButton { pos: to, button: egui::PointerButton::Secondary, pressed: false, modifiers: mods });
+            h.run();
+        };
+        cut(&mut h, egui::Modifiers::NONE);
+        assert_eq!(h.state().1.edges.len(), 1, "a plain right-drag leaves the wire");
+        h.state_mut().0.cut_without_ctrl = true; // the harness cannot hold Ctrl
+        cut(&mut h, egui::Modifiers::NONE);
+        assert!(h.state().1.edges.is_empty(), "the cut drag removed the wire");
     }
 
     /// A lone node dropped on a wire is spliced into it: source to the node, node to the old target.
