@@ -1271,27 +1271,6 @@ impl eframe::App for App {
 
         egui::Panel::top("menu").show(ui, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
-                ui.menu_button("Edit", |ui| {
-                    if ui.add_enabled(self.history.can_undo(), egui::Button::new("Undo").shortcut_text("Ctrl+Z")).clicked() {
-                        self.undo(false);
-                    }
-                    if ui.add_enabled(self.history.can_redo(), egui::Button::new("Redo").shortcut_text("Ctrl+Y")).clicked() {
-                        self.undo(true);
-                    }
-                    ui.separator();
-                    if ui.button("Arrange nodes").on_hover_text("Lay the graph out in columns, inputs on the left").clicked() {
-                        editor::arrange(&mut self.graph);
-                        self.editor.frame_next = true;
-                    }
-                    if ui.button("Exposed parameters…").clicked() {
-                        self.exposed_open = true;
-                        ui.close();
-                    }
-                    if ui.button("Preferences…").clicked() {
-                        self.prefs_open = true;
-                        ui.close();
-                    }
-                });
                 ui.menu_button("File", |ui| {
                     if ui.add(egui::Button::new("New").shortcut_text("Ctrl+N")).clicked() {
                         self.request(Pending::New);
@@ -1358,6 +1337,27 @@ impl eframe::App for App {
                                 None => "Pick a .hlsl, .glsl or .wgsl file name".into(),
                             };
                         }
+                    }
+                });
+                ui.menu_button("Edit", |ui| {
+                    if ui.add_enabled(self.history.can_undo(), egui::Button::new("Undo").shortcut_text("Ctrl+Z")).clicked() {
+                        self.undo(false);
+                    }
+                    if ui.add_enabled(self.history.can_redo(), egui::Button::new("Redo").shortcut_text("Ctrl+Y")).clicked() {
+                        self.undo(true);
+                    }
+                    ui.separator();
+                    if ui.button("Arrange nodes").on_hover_text("Lay the graph out in columns, inputs on the left").clicked() {
+                        editor::arrange(&mut self.graph);
+                        self.editor.frame_next = true;
+                    }
+                    if ui.button("Exposed parameters…").clicked() {
+                        self.exposed_open = true;
+                        ui.close();
+                    }
+                    if ui.button("Preferences…").clicked() {
+                        self.prefs_open = true;
+                        ui.close();
                     }
                 });
                 ui.menu_button("Help", |ui| {
