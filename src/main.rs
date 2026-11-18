@@ -981,11 +981,13 @@ struct Prefs {
     backups: bool,
     /// Nodes snap to a grid when released.
     snap_nodes: bool,
+    /// The About / getting-started window was shown once already.
+    seen_about: bool,
 }
 
 impl Default for Prefs {
     fn default() -> Self {
-        Prefs { ui_scale: 1.0, backups: true, snap_nodes: false }
+        Prefs { ui_scale: 1.0, backups: true, snap_nodes: false, seen_about: false }
     }
 }
 
@@ -1050,6 +1052,11 @@ impl eframe::App for App {
             }
         }
         self.editor.snap = self.prefs.snap_nodes;
+        // The first time Noiser runs, the getting-started window opens by itself.
+        if !self.prefs.seen_about {
+            self.prefs.seen_about = true;
+            self.about_open = true;
+        }
         // Window title: the file and an asterisk for unsaved changes.
         let dirty = self.graph != self.saved;
         let title = match (&self.path, dirty) {
@@ -1130,7 +1137,7 @@ impl eframe::App for App {
             ui.checkbox(&mut self.prefs.backups, "Keep rolling backups for crash recovery");
             ui.checkbox(&mut self.prefs.snap_nodes, "Snap nodes to a grid when released");
             if ui.button("Reset to defaults").clicked() {
-                self.prefs = Prefs::default();
+                self.prefs = Prefs { seen_about: true, ..Prefs::default() };
                 ctx.set_zoom_factor(1.0);
             }
         });
