@@ -1499,6 +1499,15 @@ mod mesh_export_tests {
         let v_down = probe_mask(&gpu, vec![down]);
         assert!((mean(&v_down) - 0.5).abs() < 0.1 && mean(&v_down.iter().filter(|(p, _)| p[1] > 0.8).map(|(p, m)| (*p, *m)).collect::<Vec<_>>()) < 0.1);
 
+        // Power 2 squares the ramp (mean of y² over 0..1 is 1/3, against 1/2 linear); inverted, the power shapes the flipped ramp.
+        let mut sq = MaskTerm::new(MaskKind::Position);
+        sq.power = 2.0;
+        let (m1, m2) = (mean(&probe_mask(&gpu, vec![MaskTerm::new(MaskKind::Position)])), mean(&probe_mask(&gpu, vec![sq.clone()])));
+        assert!(m2 < m1 - 0.08, "power 2 mean {m2} vs linear {m1}");
+        sq.invert = true;
+        let m3 = mean(&probe_mask(&gpu, vec![sq]));
+        assert!((m3 - m2).abs() < 0.1 && m3 > 0.0, "inverted power 2 mean {m3}");
+
         // Normal direction: facing up counts fully, the equator and below not at all.
         let up = MaskTerm::new(MaskKind::Normal);
         let v = probe_mask(&gpu, vec![up]);

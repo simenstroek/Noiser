@@ -19,7 +19,7 @@ fn mesh_color_at(t: texture_3d<f32>, p: vec3f, origin: vec3f, voxel: f32) -> vec
 }
 
 // Displacement strength at `p` (mesh space) from the mask terms (meshmask.rs); 1 with no terms.
-// `terms` holds two vec4 per term: (kind, weight, lo, hi) and (direction xyz, invert). Every term is
+// `terms` holds two vec4 per term: (kind, weight, lo, hi) and (direction xyz, power; negative = inverted). Every term is
 // measured on the mesh's own distance field, at the nearest surface point, so the mask is a property
 // of the surface and does not change along the normal. `blo`/`bhi` are the mesh's bounds.
 fn mesh_mask(t: texture_3d<f32>, p: vec3f, origin: vec3f, voxel: f32, blo: vec3f, bhi: vec3f, terms: array<vec4f, 12>, count: u32) -> f32 {
@@ -76,7 +76,8 @@ fn mesh_mask(t: texture_3d<f32>, p: vec3f, origin: vec3f, voxel: f32, blo: vec3f
             raw = 0.5 * (xp + xm + yp + ym + zp + zm - 6.0 * d0) / (e * e); // mean curvature
         }
         var v = clamp((raw - a.z) / max(a.w - a.z, 1e-6), 0.0, 1.0);
-        if (b.w > 0.5) { v = 1.0 - v; }
+        if (b.w < 0.0) { v = 1.0 - v; }
+        v = pow(v, abs(b.w));
         sum += a.y * v;
     }
     return sum;

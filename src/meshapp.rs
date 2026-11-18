@@ -541,11 +541,19 @@ impl App {
                     if t.kind != MaskKind::Constant {
                         let (dlo, dhi) = t.kind.default_range();
                         let speed = if t.kind == MaskKind::Curvature { 0.05 } else { 0.01 };
-                        crate::row(ui, &mut (t.lo, t.hi), (dlo, dhi), |ui, v| {
+                        // The pair is copied out and back: `row` edits a value it owns, and a temporary tuple would drop the edit.
+                        let mut range = (t.lo, t.hi);
+                        crate::row(ui, &mut range, (dlo, dhi), |ui, v| {
                             ui.add(egui::DragValue::new(&mut v.0).speed(speed).prefix("0 at "));
                             ui.add(egui::DragValue::new(&mut v.1).speed(speed).prefix("1 at "));
                         });
+                        (t.lo, t.hi) = range;
                         crate::row(ui, &mut t.invert, false, |ui, v| _ = ui.checkbox(v, "invert"));
+                        crate::row(ui, &mut t.power, 1.0, |ui, v| {
+                            ui.add(egui::Slider::new(v, 0.1..=8.0).logarithmic(true).text("power")).on_hover_text(
+                                "Shapes the ramp after the range and invert: 1 is linear, above 1 pulls the middle down (only the strongest parts stay high), below 1 lifts it (a softer, wider mask).",
+                            );
+                        });
                     }
                     ui.weak(t.kind.help());
                 });
