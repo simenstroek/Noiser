@@ -243,17 +243,29 @@ impl MeshWorkspace {
         Ok(())
     }
 
-    fn start(&mut self, device: eframe::wgpu::Device, queue: eframe::wgpu::Queue) {
+    fn start(&mut self, device: eframe::wgpu::Device, queue: eframe::wgpu::Queue, files: Vec<Option<PathBuf>>) {
         let progress = crate::meshexport::Progress::default();
         let log = Arc::new(Mutex::new(Vec::new()));
         let (tx, rx) = mpsc::channel();
         let (graph, cache, seed, p, l) = (self.graph.clone(), self.cache.clone(), self.seed, progress.clone(), log.clone());
         let base = self.base();
         std::thread::spawn(move || {
-            let mut note = |s: &str| l.lock().unwrap().push(s.to_string());
             let mut cache = cache.lock().unwrap();
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| Runner { device: &device, queue: &queue, cache: &mut cache, base, seed, progress: p, log: &mut note, batch_file: None }.run(&graph)));
-            let _ = tx.send(result.unwrap_or_else(|_| Err("the run crashed".into())));
+            let (mut written, mut failures) = (Vec::new(), Vec::new());
+            let total = files.len();
+            for (i, file) in files.into_iter().enumerate() {
+                let label = file.as_ref().map_or(String::new(), |f| format!("[{}/{total}] {}: ", i + 1, f.file_name().map_or(String::new(), |n| n.to_string_lossy().into_owned())));
+                let mut note = |s: &str| l.lock().unwrap().push(format!("{label}{s}"));
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| Runner { device: &device, queue: &queue, cache: &mut cache, base: base.clone(), seed, progress: p.clone(), log: &mut note, batch_file: file }.run(&graph)));
+                match result.unwrap_or_else(|_| Err("the run crashed".into())) {
+                    Ok(f) => written.extend(f),
+                    Err(e) => {
+                        l.lock().unwrap().push(format!("{label}FAILED: {e}"));
+                        failures.push(e);
+                    }
+                }
+            }
+            let _ = tx.send(if failures.is_empty() { Ok(written) } else { Err(format!("{} of {total} run(s) failed: {}", failures.len(), failures[0])) });
         });
         self.log.clear();
         self.written.clear();
@@ -309,7 +321,7 @@ impl crate::App {
         if self.mesh_ws.autorun && !self.mesh_ws.running() {
             self.mesh_ws.autorun = false;
             let (d, q) = (self.rs.device.clone(), self.rs.queue.clone());
-            self.mesh_ws.start(d, q);
+            self.mesh_ws.start(d, q, vec![None]);
         }
         crate::meshgraph_ui::set_base(self.mesh_ws.base());
         // Ctrl+Z and Ctrl+Y (or Ctrl+Shift+Z) act on this graph here, unless a text field has the keyboard.
@@ -353,7 +365,13 @@ impl crate::App {
                 let running = self.mesh_ws.running();
                 if ui.add_enabled(!running, egui::Button::new("Run")).on_hover_text("Runs every Remesh, Auto UVs and Bake that feeds an output node and writes the files.").clicked() {
                     let (d, q) = (self.rs.device.clone(), self.rs.queue.clone());
-                    self.mesh_ws.start(d, q);
+                    self.mesh_ws.start(d, q, vec![None]);
+                }
+                if ui.add_enabled(!running, egui::Button::new("Run on files…")).on_hover_text("Runs the graph once for each mesh file you pick: a Load Mesh node whose path is {batch} reads that file, and {name} in an output name becomes its name.").clicked() {
+                    if let Some(files) = rfd::FileDialog::new().add_filter("Mesh", &["obj", "ply", "stl", "gltf", "glb"]).pick_files() {
+                        let (d, q) = (self.rs.device.clone(), self.rs.queue.clone());
+                        self.mesh_ws.start(d, q, files.into_iter().map(Some).collect());
+                    }
                 }
                 ui.add(egui::DragValue::new(&mut self.mesh_ws.seed).prefix("seed "));
             });

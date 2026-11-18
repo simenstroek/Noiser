@@ -86,7 +86,7 @@ pub fn lowered_mesh(g: &Graph, base: &Path) -> Result<Graph, String> {
     let ids: Vec<_> = g.nodes.iter().filter(|(_, n)| matches!(n.kind, NodeKind::NoiseGraph(_)) && !n.muted).map(|(id, _)| *id).collect();
     for id in ids {
         let NodeKind::NoiseGraph(p) = g.nodes[&id].kind.clone() else { continue };
-        let sub = noise_graph_source(&p, base)?;
+        let sub = noise_graph_source(&p, base).map_err(|e| format!("Noise Graph node {id}: {e}"))?;
         let Some(out_id) = sub.nodes.iter().find(|(_, n)| matches!(n.kind, NodeKind::OutDensity)).map(|(i, _)| *i) else { return Err("the noise graph has no Density Output".into()) };
         // The position the sub graph sees: the node's input (or the world position) times the frequency.
         let world = out.add(NodeKind::Position, [0.0; 2]);
