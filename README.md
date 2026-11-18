@@ -7,6 +7,8 @@ OpenVDB volume, or a portable `.noiser` math-function file that other software c
 Everything is evaluated on the GPU (Rust, egui, wgpu). Resolution never limits the detail: the graph
 stays a function, and exports sample it at whatever resolution you ask for.
 
+![A low-poly rock and the same rock displaced by a Noiser graph](docs/mesh-example.png)
+
 > **Status: early and moving fast.** Windows only for now (a Vulkan or DX12 GPU is required).
 > Releases are builds of whatever state the project is in at the time; see
 > [Releases](../../releases) and the notes there.
