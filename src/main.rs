@@ -15,6 +15,7 @@ mod meshapp;
 mod meshmask;
 mod meshexport;
 mod meshquality;
+mod remesh;
 mod meshformats;
 mod meshsdf;
 mod shaderexport;
