@@ -305,6 +305,31 @@ def build(data, name, tree_type=GN):
         elif kind == "mix":
             fl = lambda x: out[x["node"]] if isinstance(x, dict) else float(x)
             v = b.mix(fl(op["a"]), fl(op["b"]), fl(op["factor"]), clamp=bool(op["clamp"]))
+        elif kind == "curve":
+            if op["mode"] != "linear":
+                raise Unsupported(f"{op['mode']} curves (Blender's Float Curve is a spline; only linear segments match)")
+            xs0 = [p[0] for p in op["points"]]
+            if len(xs0) < 2 or len(set(xs0)) < len(xs0):
+                raise Unsupported("a curve needs two or more points with different x")
+            fl = lambda x: out[x["node"]] if isinstance(x, dict) else float(x)
+            n = b.node("ShaderNodeFloatCurve")
+            xs = [p[0] for p in op["points"]]
+            span = max(xs) - min(xs) or 1.0
+            m = n.mapping
+            m.use_clip = False
+            m.extend = "HORIZONTAL"  # hold the end values, as the format says
+            curve = m.curves[0]
+            while len(curve.points) > len(op["points"]):
+                curve.points.remove(curve.points[-1])
+            while len(curve.points) < len(op["points"]):
+                curve.points.new(0.5, 0.5)
+            for p, (x, y) in zip(curve.points, op["points"]):
+                p.location = (x, y)
+                p.handle_type = "VECTOR"
+            m.update()
+            b.feed(n.inputs[0], 1.0)
+            b.feed(n.inputs[1], fl(op["value"]))
+            v = n.outputs[0]
         elif kind == "separate":
             n = b.node("ShaderNodeSeparateXYZ")
             if op["vector"] is not None:

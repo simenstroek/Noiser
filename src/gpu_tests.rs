@@ -895,10 +895,11 @@ fn write_random_noiser_files() {
     for _ in 0..rounds {
         let g = codegen::random_graph(&mut rnd);
         let file = crate::noiser_file::ops(&g, 1).unwrap();
-        // Only what the add-on builds: no patterns, grids, normals, curves, or noise other than Perlin.
+        // Only what the add-on builds: no patterns, grids, normals, non-linear curves, or noise other than Perlin.
         let ok = file["ops"].as_array().unwrap().iter().all(|o| match o["op"].as_str().unwrap() {
             "noise" => o["kind"] == "perlin",
             "position" | "value" | "math" | "remap" | "mix" | "separate" | "combine" => true,
+            "curve" => o["mode"] == "linear",
             _ => false,
         });
         if !ok || file["outputs"]["density"].is_null() {
