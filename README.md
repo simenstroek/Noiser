@@ -38,7 +38,7 @@ a node that breaks tiling gets an orange outline and says why in the details pan
 - **Patterns**: *Grid* (distance to the nearest cell centre or corner), *Bricks* (running bond or thirds, 2D
   or 3D), *Checker*, *Stripes*, *Dimples*, *Gyroid*, *Fractal* (Menger, Sierpinski), *Truchet* (arcs,
   diagonals) and *Honeycomb*, with Distance, Shape and Cell value outputs where they make sense.
-- **Math**: add, subtract, multiply, divide, min, max, power, smooth min and max, dot product, absolute, ridge. The
+- **Math**: add, subtract, multiply, divide, min, max, power, smooth min and max, dot product, absolute, ridge, floor, fraction, sine, square root, modulo, greater than. The
   operator is a dropdown on the node (the mouse wheel over it steps through them). A float with a vector
   gives a vector.
 - **Separate XYZ** and **Combine XYZ** (take a vector apart, build one; domain warping is Position + a Combine of noises), **Remap** (with optional clamp), **Mix** (blend A into B by a factor), **Curve** (a response curve through up to 16 points; linear, smooth, step or cubic), **Value**, **Position**, **Normal** (gradient of a field).
@@ -73,12 +73,11 @@ painted on the mesh (OBJ `v x y z r g b` lines or PLY red/green/blue). See `PLAN
 its limits. *Show mask on the mesh* colours the preview by mask strength. Open surfaces (terrains, leaves, sheets)
 work too: the side the normals face is outside, the other side is inside.
 
-**Batch.** Once a graph and settings look right on one mesh, *Batch displace meshes* applies them to many OBJ
-files at once: pick the files and an output folder, choose the same seed for all, the global seed plus one per
+**Batch.** Once a graph and settings look right on one mesh, *Batch displace meshes* applies them to many mesh
+files (OBJ, PLY, STL) at once: pick the files and an output folder, choose the same seed for all, the global seed plus one per
 mesh, or a repeatable random seed per mesh (the seed is in the file name), and start. Because every mesh is
 scaled to a unit sphere first, the noise is the same size relative to each mesh. A file that fails is
-reported and the rest continue; nothing is ever overwritten. From a script:
-`noiser.exe graph.noisegraph --batch-out DIR --batch-file a.obj --batch-file b.obj`.
+reported and the rest continue; nothing is ever overwritten. Without a window, see Headless below.
 
 **Headless.** `noiser-batch.cmd graph.noisegraph --batch-out DIR --batch-dir SRC` (it runs `noiser.exe --headless`, waits for it and returns the exit code; `noiser.exe` itself is a windowed program that shells do not wait for) does the same without a window
 (options: `--amount`, `--amount-var 0.2` (each mesh varies its displacement by up to 20 %), `--tile`, `--size`, `--seed`, `--seed-mode same|increment|random`, `--res`, `--grid-res`,
@@ -88,9 +87,9 @@ folder; the exit code is 1 if any mesh failed. Without the .cmd, use `Start-Proc
 **Editing.** Undo and redo, copy and paste of nodes (also between two Noiser windows), duplicate, reroute nodes, mute (bypass) a
 node with M, frame the selection with F or everything with Home, search in the add menu, File > New from template
 (clouds, ridged mountains, cracked rock, brick wall, gyroid foam, warped cells), Open recent, drag a `.noisegraph` or `.obj` file
-onto the window, and a prompt before closing with unsaved changes (the window title shows an asterisk).
-Edit > Preferences holds the interface scale and the backup switch; Help > Keyboard shortcuts lists the keys.
-The preview has material settings (colour, specular, roughness, soft shadows), a render resolution (full, half,
+onto the window, comment frames, node labels, snap-to-grid, and a prompt before closing or replacing a graph with unsaved changes with unsaved changes (the window title shows an asterisk).
+Edit > Preferences holds the interface scale, snapping and the backup switch; Help > Keyboard shortcuts lists the keys.
+The preview has material settings (colour, specular, roughness, soft shadows), lighting presets with sun and sky controls, a render resolution (full, half,
 quarter) and a march step limit; none of them affect exports.
 
 ## Controls
@@ -99,7 +98,7 @@ quarter) and a march step limit; none of them affect exports.
 |---|---|
 | Node graph | Middle-drag pans, scroll zooms, left-drag on empty space box-selects, right-click adds a node |
 | | Drag from a pin to connect; drag a connected input away to disconnect; drop a wire on empty space to pick a node for it |
-| | | Delete removes the selection, Ctrl+D duplicates it at the cursor, Ctrl+C / Ctrl+V copy and paste, M mutes, F / Home frame, Ctrl+A selects all; drop a lone node on a wire to splice it in; Ctrl+S / Ctrl+O save and open |
+| | Delete removes the selection, Ctrl+D duplicates it at the cursor, Ctrl+C / Ctrl+V copy and paste, M mutes, F / Home frame, Ctrl+A selects all; drop a lone node on a wire to splice it in; Ctrl+S / Ctrl+O save and open |
 | 3D view | Drag orbits, scroll zooms |
 | Slice view | Scroll moves the slice; hovering shows the value under the pointer |
 
