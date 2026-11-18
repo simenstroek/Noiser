@@ -617,6 +617,41 @@ fn slice_values_can_be_read_back_for_the_value_readout() {
     assert!((got - want).abs() < 1e-4, "slice readback {got} vs direct {want}");
 }
 
+/// Whenever the tiling analysis says a graph has no broken node, the density must repeat every tile.
+#[test]
+fn graphs_the_analysis_accepts_really_tile() {
+    let Some(gpu) = gpu() else { return eprintln!("no GPU adapter; skipping") };
+    let mut state = 0xA5A5_1234_5678_9ABCu64;
+    let mut rnd = move |n: usize| {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        (state % n as u64) as usize
+    };
+    let rounds: usize = std::env::var("NOISER_FUZZ_ROUNDS").ok().and_then(|v| v.parse().ok()).unwrap_or(40);
+    let pts = points(300, 77);
+    let mut checked = 0;
+    for round in 0..rounds {
+        let g = codegen::random_graph(&mut rnd);
+        let tiling = g.tiling();
+        // Only graphs whose upstream (reachable) nodes all tile are expected to repeat.
+        let reachable_ok = g.nodes.keys().all(|id| !matches!(tiling[id], crate::graph::Tiling::Broken(_)));
+        if !reachable_ok || g.density_range() == (0.0, 0.0) {
+            continue;
+        }
+        let base = eval(&gpu, &g, &pts);
+        for axis in 0..3 {
+            let moved: Vec<[f32; 3]> = pts.iter().map(|p| { let mut q = *p; q[axis] += 1.0; q }).collect();
+            let shifted = eval(&gpu, &g, &moved);
+            let bad = base.iter().zip(&shifted).filter(|(a, b)| a.is_finite() && b.is_finite() && (*a - *b).abs() > 2e-3 * (1.0 + a.abs())).count();
+            assert!(bad * 50 <= pts.len(), "round {round}, axis {axis}: {bad} of {} points differ one tile later
+{}", pts.len(), g.to_json());
+        }
+        checked += 1;
+    }
+    eprintln!("{checked} of {rounds} random graphs were expected to tile and did");
+}
+
 #[test]
 fn separate_and_combine_move_components_around() {
     let Some(gpu) = gpu() else { return eprintln!("no GPU adapter; skipping") };
