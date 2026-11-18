@@ -90,7 +90,7 @@ work too: the side the normals face is outside, the other side is inside.
 **Batch.** Once a graph and settings look right on one mesh, *Batch displace meshes* applies them to many mesh
 files (OBJ, PLY, STL) at once: pick the files and an output folder, choose the same seed for all, the global seed plus one per
 mesh, or a repeatable random seed per mesh (the seed is in the file name), and start. Because every mesh is
-scaled to a unit sphere first, the noise is the same size relative to each mesh. To keep the detail the same size in object units instead (so a 1 cm and a 100 cm mesh get the same grain), tick *same detail size in object units* (it uses the loaded mesh as the reference) or pass `--object-units` headless, where `--tile` and `--amount` are then in the meshes' own units. A file that fails is
+scaled to a unit sphere first, the noise is the same size relative to each mesh. To work in real sizes instead, tick *noise in object units* in the Mesh section (or `--object-units` headless): one noise tile is then 1 unit of the mesh file (1 m for a mesh modelled in metres), the displacement is in the same units, and every mesh gets the same detail size whatever its size. A file that fails is
 reported and the rest continue; nothing is ever overwritten. Without a window, see Headless below.
 
 **Headless.** `noiser-batch.cmd graph.noisegraph --batch-out DIR --batch-dir SRC` (it runs `noiser.exe --headless`, waits for it and returns the exit code; `noiser.exe` itself is a windowed program that shells do not wait for) does the same without a window

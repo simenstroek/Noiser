@@ -176,8 +176,8 @@ struct App {
     batch_seeds: meshexport::SeedMode,
     /// Batch: each mesh's displacement amount varies by up to this fraction.
     batch_amount_var: f32,
-    /// Batch: keep the noise detail the same size in object units (see `FileJob::object_scale`).
-    batch_object_units: bool,
+    /// Mesh: tile size and displacement are in the mesh file's units instead of relative to the mesh (see `App::detail_scale`).
+    mesh_object_units: bool,
     batch_job: Option<meshapp::BatchJob>,
     /// How strongly the noise displaces each part of a mesh (see meshmask.rs).
     mesh_mask: meshmask::MaskSettings,
@@ -321,7 +321,7 @@ impl App {
             batch_dir: None,
             batch_seeds: meshexport::SeedMode::Same,
             batch_amount_var: 0.0,
-            batch_object_units: false,
+            mesh_object_units: false,
             batch_job: None,
             mesh_mask: meshmask::MaskSettings::default(),
             history: history::History::new(&saved_for_history),
@@ -542,19 +542,20 @@ impl App {
         // The displacement mask only applies to a mesh.
         let mesh_on = pv.prim == meshapp::MESH_PRIM && self.mesh.is_some();
         let mask = if mesh_on { self.mesh_mask.pack() } else { meshmask::PackedMask::NONE };
-        let push = view::push_range(range, pv.amount, mask.range);
+        let k = if mesh_on { self.detail_scale() } else { 1.0 };
+        let push = view::push_range(range, pv.amount * k, mask.range);
         let (mesh_origin, mesh_voxel) = self.mesh.as_ref().map_or(([0.0; 3], 1.0), |m| (m.sdf.origin, m.sdf.voxel));
         let (mesh_lo, mesh_hi) = self.mesh.as_ref().map_or(([0.0; 3], [0.0; 3]), |m| m.bounds);
         Uniforms {
             cam_pos: pos,
             aspect: aspect(view3d),
             cam_fwd: fwd,
-            amount: pv.amount,
+            amount: pv.amount * k,
             cam_right: right,
             step_scale: pv.step_scale,
             cam_up: up,
             seed: pv.seed,
-            tile_size: pv.tile_size,
+            tile_size: pv.tile_size * k,
             prim_size: pv.prim_size,
             // Logical points are fine here: only the ratio to the view height matters.
             pixel: 2.0 / (view3d.height() * pv.render_scale).max(1.0),
@@ -738,8 +739,8 @@ fn preview_props(ui: &mut egui::Ui, pv: &mut Preview, mesh_loaded: bool, tab: Si
         });
     });
     row(ui, &mut pv.prim_size, d.prim_size, |ui, v| _ = ui.add(egui::Slider::new(v, 0.25..=2.0).text("shape size")));
-    row(ui, &mut pv.amount, d.amount, |ui, v| _ = ui.add(egui::Slider::new(v, 0.0..=1.0).text("displacement")));
-    row(ui, &mut pv.tile_size, d.tile_size, |ui, v| _ = ui.add(egui::Slider::new(v, 0.25..=4.0).logarithmic(true).text("tile size")));
+    row(ui, &mut pv.amount, d.amount, |ui, v| _ = ui.add(egui::Slider::new(v, 0.0..=1.0).clamping(egui::SliderClamping::Never).text("displacement")));
+    row(ui, &mut pv.tile_size, d.tile_size, |ui, v| _ = ui.add(egui::Slider::new(v, 0.25..=4.0).logarithmic(true).clamping(egui::SliderClamping::Never).text("tile size")));
     row(ui, &mut pv.seed, d.seed, |ui, v| _ = ui.add(egui::Slider::new(v, 0..=100).text("global seed")));
     if pv.cloud {
         row(ui, &mut pv.cloud_density, d.cloud_density, |ui, v| _ = ui.add(egui::Slider::new(v, 0.5..=64.0).logarithmic(true).text("cloud density")));

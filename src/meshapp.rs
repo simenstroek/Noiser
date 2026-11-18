@@ -154,7 +154,7 @@ impl App {
             ui.weak("Import a low-resolution mesh to shape it with the graph. It shows up as the Mesh shape in the 3D view.");
             return;
         };
-        let reach = view::push_range(self.graph.density_range(), self.pv.amount, self.mesh_mask.range());
+        let reach = view::push_range(self.graph.density_range(), self.pv.amount * self.detail_scale(), self.mesh_mask.range());
         let reach = reach.0.abs().max(reach.1.abs());
         let (name, tris, dims, grid_res, grid_pad, baked_combine, parts) = (m.name.clone(), m.normalized.triangles.len(), m.sdf.dims, m.res, m.pad, m.combine, m.parts);
         ui.label(format!("{name}: {tris} triangles"));
@@ -187,6 +187,11 @@ impl App {
         if reach > grid_pad - 0.05 {
             ui.colored_label(crate::editor::ORANGE, format!("Displacement reaches {reach:.2} but the grid only extends {grid_pad:.2} past the mesh: the shape will be clipped. Raise the padding."));
         }
+        crate::row(ui, &mut self.mesh_object_units, false, |ui, v| {
+            ui.checkbox(v, "noise in object units (1 tile = 1 unit)").on_hover_text(
+                "Off: the mesh is scaled to a unit sphere first, so the noise is the same size relative to every mesh.\nOn: tile size and displacement are in the mesh file's own units (one tile is 1 unit, 1 m for a mesh modelled in metres), so a big mesh gets finer grain relative to its size and every mesh gets the same detail size. Applies to the preview, exports and batches.",
+            );
+        });
         self.mask_ui(ui);
         if ui.button("Export displaced mesh…").clicked() {
             self.mesh_export_open = true;
@@ -204,7 +209,22 @@ pub struct MeshExportJob {
 impl App {
     /// How far the current displacement can move the surface, limited to what the distance grid covers.
     fn displacement_reach(&self, grid_pad: f32) -> f32 {
-        meshexport::reach(&self.graph, self.pv.amount, self.mesh_mask.range(), grid_pad)
+        meshexport::reach(&self.graph, self.pv.amount * self.detail_scale(), self.mesh_mask.range(), grid_pad)
+    }
+
+    /// With "noise in object units" on, the factor from the preview's tile size and displacement (in the mesh file's
+    /// units) to the normalized space the mesh is baked in: one tile is then one unit of the file, whatever the mesh's size.
+    pub fn detail_scale(&self) -> f32 {
+        match &self.mesh {
+            Some(m) if self.mesh_object_units => 1.0 / m.norm.scale,
+            _ => 1.0,
+        }
+    }
+
+    /// How the preview displaces the loaded mesh, which the export repeats.
+    fn mesh_displace(&self) -> Displace {
+        let k = self.detail_scale();
+        Displace { amount: self.pv.amount * k, tile_size: self.pv.tile_size * k, prim_size: self.pv.prim_size, mask: self.mesh_mask.pack() }
     }
 
     /// The Export displaced mesh window.
@@ -228,7 +248,7 @@ impl App {
             return;
         };
         let (lo, hi) = m.normalized.bounds();
-        let displace = Displace { amount: self.pv.amount, tile_size: self.pv.tile_size, prim_size: self.pv.prim_size, mask: self.mesh_mask.pack() };
+        let displace = self.mesh_displace();
         let reach = self.displacement_reach(m.pad);
         let name = m.name.clone();
         let mut open = true;
@@ -280,7 +300,7 @@ impl App {
             return;
         };
         let (lo, hi) = m.normalized.bounds();
-        let displace = Displace { amount: self.pv.amount, tile_size: self.pv.tile_size, prim_size: self.pv.prim_size, mask: self.mesh_mask.pack() };
+        let displace = self.mesh_displace();
         let reach = self.displacement_reach(m.pad);
         let (graph, seed, norm) = (self.graph.clone(), self.pv.seed, m.norm);
         let (device, queue) = (self.rs.device.clone(), self.rs.queue.clone());
@@ -390,17 +410,13 @@ impl App {
                 ui.selectable_value(v, SeedMode::Random, "Random each");
             });
             crate::row(ui, &mut self.batch_amount_var, 0.0, |ui, v| _ = ui.add(egui::Slider::new(v, 0.0..=0.5).custom_formatter(|x, _| format!("±{:.0}%", x * 100.0)).text("vary displacement")));
-            crate::row(ui, &mut self.batch_object_units, false, |ui, v| {
-                ui.add_enabled(self.mesh.is_some(), egui::Checkbox::new(v, "same detail size in object units")).on_hover_text(
-                    "Off: the noise scales with each mesh (a 100 cm mesh gets 100 times the detail size of a 1 cm one).\nOn: the tile size and displacement of the loaded mesh are kept in object units, so every mesh gets the same detail size. Needs a loaded mesh as the reference.",
-                );
-            });
             let base = self.pv.seed;
             ui.weak(match self.batch_seeds {
                 SeedMode::Same => format!("Every mesh uses the global seed ({base})."),
                 SeedMode::Increment => format!("The first mesh uses the global seed ({base}), the next {}, and so on.", base + 1),
                 SeedMode::Random => format!("Each mesh gets a different seed, repeatable from the global seed ({base}). Seeds are in the file names."),
             });
+            ui.weak(if self.mesh_object_units { "Tile size and displacement are in each mesh's own units (see the Mesh section)." } else { "Tile size and displacement scale with each mesh (see the Mesh section)." });
             ui.weak("Displacement, tile size, shape size and the graph come from the current 3D view; samples, format and small-part removal from Export displaced mesh; the distance grid from the Mesh section. Existing files are never overwritten.");
             ui.separator();
             match &self.batch_job {
@@ -431,7 +447,7 @@ impl App {
         let d = Displace { amount: self.pv.amount, tile_size: self.pv.tile_size, prim_size: self.pv.prim_size, mask: self.mesh_mask.pack() };
         let settings = self.mesh_export.clone();
         let (grid_res, grid_pad, combine) = (self.mesh_res, self.mesh_pad, self.mesh_combine);
-        let object_scale = self.mesh.as_ref().filter(|_| self.batch_object_units).map(|m| m.norm.scale);
+        let object_scale = self.mesh_object_units.then_some(1.0);
         let (device, queue) = (self.rs.device.clone(), self.rs.queue.clone());
         let index = Arc::new(AtomicU32::new(0));
         let file_progress = meshexport::Progress::default();
