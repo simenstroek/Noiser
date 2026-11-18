@@ -1,23 +1,24 @@
-//! PLY and STL readers, so meshes from Houdini, ZBrush, Blender and CAD tools can be used without
+//! PLY, STL and glTF readers, so meshes from Houdini, ZBrush, Blender and CAD tools can be used without
 //! converting them to OBJ first. Only the geometry is read (positions and faces, with polygons
 //! fanned into triangles).
 
 use crate::mesh::{Mesh, V3};
 use std::path::Path;
 
-/// Reads a mesh by file extension: obj, ply or stl.
+/// Reads a mesh by file extension: obj, ply, stl, gltf or glb.
 pub fn load(path: &Path) -> Result<Mesh, String> {
     let ext = path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
     match ext.as_str() {
         "ply" => load_ply(path),
         "stl" => load_stl(path),
+        "gltf" | "glb" => load_gltf(path),
         _ => Mesh::load_obj(path),
     }
 }
 
 /// Whether a file name has an extension `load` understands.
 pub fn is_mesh_file(path: &Path) -> bool {
-    path.extension().is_some_and(|e| ["obj", "ply", "stl"].iter().any(|x| e.eq_ignore_ascii_case(x)))
+    path.extension().is_some_and(|e| ["obj", "ply", "stl", "gltf", "glb"].iter().any(|x| e.eq_ignore_ascii_case(x)))
 }
 
 fn finish(mesh: Mesh, path: &Path) -> Result<Mesh, String> {
@@ -25,6 +26,67 @@ fn finish(mesh: Mesh, path: &Path) -> Result<Mesh, String> {
         return Err(format!("{} has no triangles", path.display()));
     }
     Ok(mesh.welded())
+}
+
+// ---- glTF ------------------------------------------------------------------
+
+/// Reads every mesh of the default scene with its node transforms applied (glTF is Y-up and in metres), as one
+/// mesh. Only triangle primitives are read; vertex colours (COLOR_0) are kept when every primitive has them.
+fn load_gltf(path: &Path) -> Result<Mesh, String> {
+    let (doc, buffers, _images) = gltf::import(path).map_err(|e| format!("could not read {}: {e}", path.display()))?;
+    let scene = doc.default_scene().or_else(|| doc.scenes().next()).ok_or("the glTF file has no scene")?;
+    let mut mesh = Mesh::default();
+    let mut all_colored = true;
+    let mut stack: Vec<(gltf::Node, [[f32; 4]; 4])> = scene.nodes().map(|n| (n, IDENTITY)).collect();
+    while let Some((node, parent)) = stack.pop() {
+        let world = mul(parent, node.transform().matrix());
+        stack.extend(node.children().map(|c| (c, world)));
+        let Some(m) = node.mesh() else { continue };
+        for prim in m.primitives() {
+            use gltf::mesh::Mode;
+            if !matches!(prim.mode(), Mode::Triangles | Mode::TriangleStrip | Mode::TriangleFan) {
+                continue;
+            }
+            let reader = prim.reader(|b| Some(&buffers[b.index()]));
+            let Some(positions) = reader.read_positions() else { continue };
+            let base = mesh.positions.len() as u32;
+            let n = positions.len() as u32;
+            mesh.positions.extend(positions.map(|p| transform(&world, p)));
+            match reader.read_colors(0) {
+                Some(c) => mesh.colors.extend(c.into_rgb_f32()),
+                None => all_colored = false,
+            }
+            let index: Vec<u32> = match reader.read_indices() {
+                Some(i) => i.into_u32().collect(),
+                None => (0..n).collect(),
+            };
+            let tris: Vec<[u32; 3]> = match prim.mode() {
+                Mode::Triangles => index.chunks_exact(3).map(|t| [t[0], t[1], t[2]]).collect(),
+                // A strip alternates its winding.
+                Mode::TriangleStrip => (0..index.len().saturating_sub(2)).map(|k| if k % 2 == 0 { [index[k], index[k + 1], index[k + 2]] } else { [index[k + 1], index[k], index[k + 2]] }).collect(),
+                _ => (1..index.len().saturating_sub(1)).map(|k| [index[0], index[k], index[k + 1]]).collect(),
+            };
+            if tris.iter().any(|t| t.iter().any(|&i| i >= n)) {
+                return Err("the glTF file has an index past its vertices".into());
+            }
+            mesh.triangles.extend(tris.into_iter().map(|t| t.map(|i| i + base)));
+        }
+    }
+    if !all_colored || mesh.colors.len() != mesh.positions.len() {
+        mesh.colors.clear();
+    }
+    finish(mesh, path)
+}
+
+const IDENTITY: [[f32; 4]; 4] = [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]];
+
+/// Column-major 4x4 product `a * b`.
+fn mul(a: [[f32; 4]; 4], b: [[f32; 4]; 4]) -> [[f32; 4]; 4] {
+    std::array::from_fn(|c| std::array::from_fn(|r| (0..4).map(|k| a[k][r] * b[c][k]).sum()))
+}
+
+fn transform(m: &[[f32; 4]; 4], p: V3) -> V3 {
+    std::array::from_fn(|r| m[0][r] * p[0] + m[1][r] * p[1] + m[2][r] * p[2] + m[3][r])
 }
 
 // ---- STL -------------------------------------------------------------------
@@ -292,6 +354,39 @@ mod tests {
         let plain = tmp("plain.ply");
         std::fs::write(&plain, "ply\nformat ascii 1.0\nelement vertex 3\nproperty float x\nproperty float y\nproperty float z\nelement face 1\nproperty list uchar int vertex_indices\nend_header\n0 0 0\n1 0 0\n0 1 0\n3 0 1 2\n").unwrap();
         assert!(load(&plain).unwrap().colors.is_empty());
+    }
+
+    #[test]
+    fn gltf_nodes_are_transformed_and_strips_fanned() {
+        // One triangle with an embedded buffer, on a node translated by (1, 2, 3) and scaled by 2.
+        let mut buf = Vec::new();
+        for v in [0.0f32, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0] {
+            buf.extend(v.to_le_bytes());
+        }
+        let b64 = {
+            const T: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+            let mut s = String::new();
+            for c in buf.chunks(3) {
+                let n = (c[0] as u32) << 16 | (*c.get(1).unwrap_or(&0) as u32) << 8 | *c.get(2).unwrap_or(&0) as u32;
+                for k in 0..4 {
+                    s.push(if k <= c.len() { T[(n >> (18 - 6 * k) & 63) as usize] as char } else { '=' });
+                }
+            }
+            s
+        };
+        let json = format!(
+            r#"{{"asset":{{"version":"2.0"}},"scene":0,"scenes":[{{"nodes":[0]}}],"nodes":[{{"mesh":0,"translation":[1,2,3],"scale":[2,2,2]}}],
+            "meshes":[{{"primitives":[{{"attributes":{{"POSITION":0}}}}]}}],
+            "accessors":[{{"bufferView":0,"componentType":5126,"count":3,"type":"VEC3","min":[0,0,0],"max":[1,1,0]}}],
+            "bufferViews":[{{"buffer":0,"byteLength":36}}],
+            "buffers":[{{"byteLength":36,"uri":"data:application/octet-stream;base64,{b64}"}}]}}"#
+        );
+        let path = tmp("tri.gltf");
+        std::fs::write(&path, json).unwrap();
+        let m = load(&path).unwrap();
+        assert_eq!((m.positions.len(), m.triangles.len()), (3, 1));
+        assert!(m.positions.contains(&[3.0, 2.0, 3.0]) && m.positions.contains(&[1.0, 4.0, 3.0]), "{:?}", m.positions);
+        assert!(is_mesh_file(&path) && is_mesh_file(std::path::Path::new("a.GLB")));
     }
 
     #[test]

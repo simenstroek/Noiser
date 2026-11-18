@@ -77,7 +77,7 @@ tiling 3D texture for the preview, and the nodes it covers get a green outline. 
 
 **Crash recovery.** Rolling backups; after a crash you are offered the last one on the next start. A panic is also written to `crash.log` in Noiser's data folder (`%APPDATA%\Noiser\data` on Windows); please attach it to bug reports.
 
-**Meshes.** Import a low-resolution OBJ, PLY or STL (File menu, drag and drop, or `noiser.exe --mesh file.obj`) and it appears as the
+**Meshes.** Import a low-resolution OBJ, PLY, STL or glTF (File menu, drag and drop, or `noiser.exe --mesh file.obj`) and it appears as the
 *Mesh* shape in the 3D view, shaped live by your graph. *Export displaced mesh* then writes a high-resolution
 OBJ or PLY of the same surface (as many samples along the longest side as you ask for), with small floating
 bits removed and the mesh's own size and position restored. The mesh can be made of overlapping parts, and when it has several separate ones the Mesh tab says how they combine: *union* (the default), *intersect* (only where all overlap, for interior spaces), or *smooth union / smooth intersect* with a blend width (`--combine MODE --combine-smooth W` headless). A
@@ -88,9 +88,9 @@ its limits. *Show mask on the mesh* colours the preview by mask strength. Open s
 work too: the side the normals face is outside, the other side is inside.
 
 **Batch.** Once a graph and settings look right on one mesh, *Batch displace meshes* applies them to many mesh
-files (OBJ, PLY, STL) at once: pick the files and an output folder, choose the same seed for all, the global seed plus one per
+files (OBJ, PLY, STL, glTF) at once: pick the files and an output folder, choose the same seed for all, the global seed plus one per
 mesh, or a repeatable random seed per mesh (the seed is in the file name), and start. Because every mesh is
-scaled to a unit sphere first, the noise is the same size relative to each mesh. To work in real sizes instead, tick *noise in object units* in the Mesh section (or `--object-units` headless): one noise tile is then 1 unit of the mesh file (1 m for a mesh modelled in metres), the displacement is in the same units, and every mesh gets the same detail size whatever its size. A file that fails is
+scaled to a unit sphere first, the noise is the same size relative to each mesh. To work in real sizes instead, tick *noise in object units* in the Mesh section (or `--object-units` headless): one noise tile is then 1 unit of the mesh file (1 m for a mesh modelled in metres, and always for glTF, which is in metres; a glTF is read with its scene's node transforms applied, triangles only), the displacement is in the same units, and every mesh gets the same detail size whatever its size. A file that fails is
 reported and the rest continue; nothing is ever overwritten. Without a window, see Headless below.
 
 **Headless.** `noiser-batch.cmd graph.noisegraph --batch-out DIR --batch-dir SRC` (it runs `noiser.exe --headless`, waits for it and returns the exit code; `noiser.exe` itself is a windowed program that shells do not wait for) does the same without a window

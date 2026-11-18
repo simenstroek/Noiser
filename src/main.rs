@@ -1316,7 +1316,7 @@ impl eframe::App for App {
                     }
                     ui.separator();
                     if ui.button("Import mesh (OBJ)…").clicked() {
-                        if let Some(p) = rfd::FileDialog::new().add_filter("Mesh (OBJ, PLY, STL)", &["obj", "ply", "stl"]).pick_file() {
+                        if let Some(p) = rfd::FileDialog::new().add_filter("Mesh (OBJ, PLY, STL, glTF)", &["obj", "ply", "stl", "gltf", "glb"]).pick_file() {
                             self.start_mesh_load(p);
                         }
                     }
