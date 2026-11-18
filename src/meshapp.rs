@@ -550,92 +550,96 @@ impl App {
 impl App {
     /// The Displacement mask section: terms that vary how strongly the noise displaces the mesh.
     fn mask_ui(&mut self, ui: &mut egui::Ui) {
-        use crate::meshmask::{MAX_TERMS, MaskKind, MaskTerm};
         let has_colors = self.mesh.as_ref().is_some_and(|m| m.sdf.colors.is_some());
-        egui::CollapsingHeader::new("Displacement mask").default_open(!self.mesh_mask.terms.is_empty()).show(ui, |ui| {
-            ui.weak("Varies how strongly the noise displaces each part of the mesh. With no terms every part moves equally. Strength is the sum of weight × term; every term is measured on the mesh itself. Applies to the Mesh shape.");
-            ui.add_enabled(!self.mesh_mask.terms.is_empty(), egui::Checkbox::new(&mut self.pv.show_mask, "Show mask on the mesh"))
-                .on_hover_text("Colours the surface by mask strength: blue 0, green 0.5, red 1; magenta above 1, black below 0. The preview only.");
-            let mut remove = None;
-            for (i, t) in self.mesh_mask.terms.iter_mut().enumerate() {
-                ui.group(|ui| {
-                    ui.horizontal(|ui| {
-                        let before = t.kind;
-                        egui::ComboBox::from_id_salt(("mask kind", i)).selected_text(t.kind.name()).show_ui(ui, |ui| {
-                            for k in MaskKind::ALL {
-                                ui.selectable_value(&mut t.kind, k, k.name());
-                            }
-                        });
-                        if t.kind != before {
-                            // A new kind starts from its own defaults (range, axis or channel, direction).
-                            let fresh = MaskTerm::new(t.kind);
-                            (t.lo, t.hi, t.axis, t.negative) = (fresh.lo, fresh.hi, fresh.axis, fresh.negative);
+        mask_terms_ui(ui, &mut self.mesh_mask, &mut self.pv.show_mask, has_colors);
+    }
+}
+
+fn mask_terms_ui(ui: &mut egui::Ui, mask: &mut crate::meshmask::MaskSettings, show_mask: &mut bool, has_colors: bool) {
+    use crate::meshmask::{MAX_TERMS, MaskKind, MaskTerm};
+    egui::CollapsingHeader::new("Displacement mask").default_open(!mask.terms.is_empty()).show(ui, |ui| {
+        ui.weak("Varies how strongly the noise displaces each part of the mesh. With no terms every part moves equally. Strength is the sum of weight × term; every term is measured on the mesh itself. Applies to the Mesh shape.");
+        ui.add_enabled(!mask.terms.is_empty(), egui::Checkbox::new(show_mask, "Show mask on the mesh"))
+            .on_hover_text("Colours the surface by mask strength: blue 0, green 0.5, red 1; magenta above 1, black below 0. The preview only.");
+        let mut remove = None;
+        for (i, t) in mask.terms.iter_mut().enumerate() {
+            ui.group(|ui| {
+                ui.horizontal(|ui| {
+                    let before = t.kind;
+                    egui::ComboBox::from_id_salt(("mask kind", i)).selected_text(t.kind.name()).show_ui(ui, |ui| {
+                        for k in MaskKind::ALL {
+                            ui.selectable_value(&mut t.kind, k, k.name());
                         }
-                        if ui.small_button("×").on_hover_text("Remove this term").clicked() {
-                            remove = Some(i);
+                    }).response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::ComboBox, true, "Mask term kind"));
+                    if t.kind != before {
+                        // A new kind starts from its own defaults (range, axis or channel, direction).
+                        let fresh = MaskTerm::new(t.kind);
+                        (t.lo, t.hi, t.axis, t.negative) = (fresh.lo, fresh.hi, fresh.axis, fresh.negative);
+                    }
+                    if ui.small_button("×").on_hover_text("Remove this term").clicked() {
+                        remove = Some(i);
+                    }
+                });
+                crate::row(ui, &mut t.weight, 1.0, |ui, v| _ = ui.add(egui::Slider::new(v, -2.0..=2.0).text("weight")));
+                if matches!(t.kind, MaskKind::Position | MaskKind::Normal) {
+                    let word = if t.kind == MaskKind::Position { "along" } else { "facing" };
+                    crate::row(ui, &mut t.axis, 1, |ui, v| {
+                        ui.label(word);
+                        for (a, name) in [(0, "X"), (1, "Y"), (2, "Z")] {
+                            ui.selectable_value(v, a, name);
                         }
                     });
-                    crate::row(ui, &mut t.weight, 1.0, |ui, v| _ = ui.add(egui::Slider::new(v, -2.0..=2.0).text("weight")));
-                    if matches!(t.kind, MaskKind::Position | MaskKind::Normal) {
-                        let word = if t.kind == MaskKind::Position { "along" } else { "facing" };
-                        crate::row(ui, &mut t.axis, 1, |ui, v| {
-                            ui.label(word);
-                            for (a, name) in [(0, "X"), (1, "Y"), (2, "Z")] {
-                                ui.selectable_value(v, a, name);
-                            }
-                        });
-                        crate::row(ui, &mut t.negative, false, |ui, v| _ = ui.checkbox(v, "negative direction"));
-                    }
-                    if t.kind == MaskKind::VertexColor {
-                        crate::row(ui, &mut t.axis, 0, |ui, v| {
-                            ui.label("channel");
-                            for (a, name) in [(0, "R"), (1, "G"), (2, "B"), (3, "Luminance")] {
-                                ui.selectable_value(v, a, name);
-                            }
-                        });
-                        if !has_colors {
-                            ui.colored_label(crate::editor::ORANGE, "This mesh has no vertex colours, so this term is meaningless.");
+                    crate::row(ui, &mut t.negative, false, |ui, v| _ = ui.checkbox(v, "negative direction"));
+                }
+                if t.kind == MaskKind::VertexColor {
+                    crate::row(ui, &mut t.axis, 0, |ui, v| {
+                        ui.label("channel");
+                        for (a, name) in [(0, "R"), (1, "G"), (2, "B"), (3, "Luminance")] {
+                            ui.selectable_value(v, a, name);
                         }
+                    });
+                    if !has_colors {
+                        ui.colored_label(crate::editor::ORANGE, "This mesh has no vertex colours, so this term is meaningless.");
                     }
-                    if t.kind != MaskKind::Constant {
-                        let (dlo, dhi) = t.kind.default_range();
-                        let speed = if t.kind == MaskKind::Curvature { 0.05 } else { 0.01 };
-                        // The pair is copied out and back: `row` edits a value it owns, and a temporary tuple would drop the edit.
-                        let mut range = (t.lo, t.hi);
-                        crate::row(ui, &mut range, (dlo, dhi), |ui, v| {
-                            ui.add(egui::DragValue::new(&mut v.0).speed(speed).prefix("0 at "));
-                            ui.add(egui::DragValue::new(&mut v.1).speed(speed).prefix("1 at "));
-                        });
-                        (t.lo, t.hi) = range;
-                        crate::row(ui, &mut t.invert, false, |ui, v| _ = ui.checkbox(v, "invert"));
-                        crate::row(ui, &mut t.power, 1.0, |ui, v| {
-                            ui.add(egui::Slider::new(v, 0.1..=8.0).logarithmic(true).text("power")).on_hover_text(
-                                "Shapes the ramp after the range and invert: 1 is linear, above 1 pulls the middle down (only the strongest parts stay high), below 1 lifts it (a softer, wider mask).",
-                            );
-                        });
+                }
+                if t.kind != MaskKind::Constant {
+                    let (dlo, dhi) = t.kind.default_range();
+                    let speed = if t.kind == MaskKind::Curvature { 0.05 } else { 0.01 };
+                    // The pair is copied out and back: `row` edits a value it owns, and a temporary tuple would drop the edit.
+                    let mut range = (t.lo, t.hi);
+                    crate::row(ui, &mut range, (dlo, dhi), |ui, v| {
+                        ui.add(egui::DragValue::new(&mut v.0).speed(speed).prefix("0 at "));
+                        ui.add(egui::DragValue::new(&mut v.1).speed(speed).prefix("1 at "));
+                    });
+                    (t.lo, t.hi) = range;
+                    crate::row(ui, &mut t.invert, false, |ui, v| _ = ui.checkbox(v, "invert"));
+                    crate::row(ui, &mut t.power, 1.0, |ui, v| {
+                        ui.add(egui::Slider::new(v, 0.1..=8.0).logarithmic(true).text("power")).on_hover_text(
+                            "Shapes the ramp after the range and invert: 1 is linear, above 1 pulls the middle down (only the strongest parts stay high), below 1 lifts it (a softer, wider mask).",
+                        );
+                    });
+                }
+                ui.weak(t.kind.help());
+            });
+        }
+        if let Some(i) = remove {
+            mask.terms.remove(i);
+        }
+        if mask.terms.len() < MAX_TERMS {
+            ui.menu_button("Add term", |ui| {
+                for k in MaskKind::ALL {
+                    if ui.button(k.name()).on_hover_text(k.help()).clicked() {
+                        mask.terms.push(MaskTerm::new(k));
+                        ui.close();
                     }
-                    ui.weak(t.kind.help());
-                });
-            }
-            if let Some(i) = remove {
-                self.mesh_mask.terms.remove(i);
-            }
-            if self.mesh_mask.terms.len() < MAX_TERMS {
-                ui.menu_button("Add term", |ui| {
-                    for k in MaskKind::ALL {
-                        if ui.button(k.name()).on_hover_text(k.help()).clicked() {
-                            self.mesh_mask.terms.push(MaskTerm::new(k));
-                            ui.close();
-                        }
-                    }
-                });
-            }
-            if self.mesh_mask.range() != (1.0, 1.0) {
-                let (lo, hi) = self.mesh_mask.range();
-                ui.weak(format!("Strength ranges from {lo:.2} to {hi:.2}."));
-            }
-        });
-    }
+                }
+            });
+        }
+        if mask.range() != (1.0, 1.0) {
+            let (lo, hi) = mask.range();
+            ui.weak(format!("Strength ranges from {lo:.2} to {hi:.2}."));
+        }
+    });
 }
 
 #[cfg(test)]
@@ -648,5 +652,31 @@ mod tests {
         let cube = crate::mesh::shapes::icosphere(1.0, 1);
         assert!(open_mesh_res(&flat, 0.5) > open_mesh_res(&cube, 0.5));
         assert!(open_mesh_res(&flat, 0.5) <= 768);
+    }
+
+    /// The range fields of a mask term can be typed into (they once ignored edits).
+    #[test]
+    fn mask_term_range_and_power_can_be_edited() {
+        use crate::meshmask::{MaskKind, MaskSettings, MaskTerm};
+        use egui_kittest::{kittest::Queryable, Harness};
+        let state = (MaskSettings { terms: vec![MaskTerm::new(MaskKind::Curvature)] }, true);
+        let mut h = Harness::builder().with_size(egui::Vec2::new(500.0, 500.0)).with_step_dt(1.0 / 60.0).build_ui_state(
+            |ui, (mask, show): &mut (MaskSettings, bool)| {
+                egui_extras::install_image_loaders(ui.ctx());
+                mask_terms_ui(ui, mask, show, true);
+            },
+            state,
+        );
+        h.run();
+        let spin = egui::accesskit::Role::SpinButton;
+        for (label, text) in [("0 at", "0.1"), ("1 at", "0.9"), ("power", "3")] {
+            h.get_by_role_and_label(spin, label).click();
+            h.run();
+            h.get_by_role_and_label(spin, label).type_text(text);
+            h.key_press(egui::Key::Enter);
+            h.run();
+        }
+        let t = &h.state().0.terms[0];
+        assert!((t.lo - 0.1).abs() < 1e-4 && (t.hi - 0.9).abs() < 1e-4 && (t.power - 3.0).abs() < 1e-3, "lo {} hi {} power {}", t.lo, t.hi, t.power);
     }
 }

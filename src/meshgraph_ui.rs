@@ -190,3 +190,41 @@ pub fn props(ui: &mut egui::Ui, kind: &mut NodeKind) -> bool {
         _ => false,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use egui_kittest::{kittest::Queryable, Harness};
+
+    fn harness(kind: NodeKind) -> Harness<'static, NodeKind> {
+        Harness::builder().with_size(egui::Vec2::new(500.0, 400.0)).with_step_dt(1.0 / 60.0).build_ui_state(|ui, kind: &mut NodeKind| {
+            egui_extras::install_image_loaders(ui.ctx());
+            props(ui, kind);
+        }, kind)
+    }
+
+    /// Typing into a node's number field (double-click, type, Enter) and moving a slider with the keyboard change the node.
+    #[test]
+    fn remesh_fields_can_be_typed_into_and_the_slider_moved() {
+        let mut h = harness(NodeKind::Remesh { triangles: 20_000, adaptivity: 1.0 });
+        h.run();
+        h.get_by_label("triangles").click();
+        h.run();
+        h.get_by_label("triangles").type_text("5000");
+        h.key_press(egui::Key::Enter);
+        h.run();
+        let NodeKind::Remesh { triangles, .. } = h.state() else { panic!() };
+        assert_eq!(*triangles, 5000, "typing into the field sets it");
+        // Pressing the slider's rail towards its left end lowers it.
+        let r = h.get_by_role_and_label(egui::accesskit::Role::SpinButton, "adaptivity").rect();
+        let at = egui::Pos2::new(r.left() - 90.0, r.center().y);
+        h.hover_at(at);
+        h.step();
+        h.event(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() });
+        h.step();
+        h.event(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default() });
+        h.step();
+        let NodeKind::Remesh { adaptivity, .. } = h.state() else { panic!() };
+        assert!(*adaptivity < 0.9, "the slider moved: {adaptivity}");
+    }
+}
