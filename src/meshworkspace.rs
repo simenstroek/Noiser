@@ -275,11 +275,11 @@ impl MeshWorkspace {
     }
 
     /// A quick look: the shape the first Remesh gives, at most 6000 triangles, written to a temporary file and shown.
-    fn start_preview(&mut self, device: eframe::wgpu::Device, queue: eframe::wgpu::Queue) {
+    fn start_preview(&mut self, graph: Graph, device: eframe::wgpu::Device, queue: eframe::wgpu::Queue) {
         let progress = crate::meshexport::Progress::default();
         let log = Arc::new(Mutex::new(Vec::new()));
         let (tx, rx) = mpsc::channel();
-        let (graph, cache, seed, p, l, base) = (self.graph.clone(), self.cache.clone(), self.seed, progress.clone(), log.clone(), self.base());
+        let (cache, seed, p, l, base) = (self.cache.clone(), self.seed, progress.clone(), log.clone(), self.base());
         std::thread::spawn(move || {
             let mut cache = cache.lock().unwrap();
             let mut note = |s: &str| l.lock().unwrap().push(s.to_string());
@@ -297,11 +297,11 @@ impl MeshWorkspace {
         self.job = Some(RunJob { progress, log, done: rx });
     }
 
-    fn start(&mut self, device: eframe::wgpu::Device, queue: eframe::wgpu::Queue, files: Vec<Option<PathBuf>>) {
+    fn start(&mut self, graph: Graph, device: eframe::wgpu::Device, queue: eframe::wgpu::Queue, files: Vec<Option<PathBuf>>) {
         let progress = crate::meshexport::Progress::default();
         let log = Arc::new(Mutex::new(Vec::new()));
         let (tx, rx) = mpsc::channel();
-        let (graph, cache, seed, p, l) = (self.graph.clone(), self.cache.clone(), self.seed, progress.clone(), log.clone());
+        let (cache, seed, p, l) = (self.cache.clone(), self.seed, progress.clone(), log.clone());
         let base = self.base();
         std::thread::spawn(move || {
             let mut cache = cache.lock().unwrap();
@@ -328,6 +328,26 @@ impl MeshWorkspace {
 }
 
 impl crate::App {
+    /// The mesh graph as a run should see it: a Noise Graph node that names the noise graph open in the Noise graph tab
+    /// uses that graph as it is on screen, saved or not, so the noise can be tuned and the result previewed straight away.
+    fn graph_for_run(&self) -> Graph {
+        let mut g = self.mesh_ws.graph.clone();
+        if let Some(open) = &self.path {
+            let base = self.mesh_ws.base();
+            let same = |a: &std::path::Path, b: &std::path::Path| a == b || matches!((std::fs::canonicalize(a), std::fs::canonicalize(b)), (Ok(x), Ok(y)) if x == y);
+            let text = self.graph.to_json();
+            for n in g.nodes.values_mut() {
+                if let NodeKind::NoiseGraph(p) = &mut n.kind {
+                    if !p.detached && !p.file.is_empty() && same(&crate::meshgraph::resolve_in(&base, &p.file), open) {
+                        p.embedded = text.clone();
+                        p.detached = true;
+                    }
+                }
+            }
+        }
+        g
+    }
+
     /// Saves the mesh graph. A noise graph that is open and changed in the Noise graph tab, and that this mesh graph
     /// uses, is saved first, so the copy embedded in the mesh graph is the one just edited.
     fn save_mesh_graph(&mut self, ask: bool) {
@@ -389,8 +409,8 @@ impl crate::App {
         }
         if self.mesh_ws.autorun && !self.mesh_ws.running() {
             self.mesh_ws.autorun = false;
-            let (d, q) = (self.rs.device.clone(), self.rs.queue.clone());
-            self.mesh_ws.start(d, q, vec![None]);
+            let (d, q, g) = (self.rs.device.clone(), self.rs.queue.clone(), self.graph_for_run());
+            self.mesh_ws.start(g, d, q, vec![None]);
         }
         let base = self.mesh_ws.base();
         crate::meshgraph_ui::set_base(base.clone());
@@ -450,17 +470,17 @@ impl crate::App {
             ui.horizontal(|ui| {
                 let running = self.mesh_ws.running();
                 if ui.add_enabled(!running, egui::Button::new("Run")).on_hover_text("Runs every Remesh, Auto UVs and Bake that feeds an output node and writes the files.").clicked() {
-                    let (d, q) = (self.rs.device.clone(), self.rs.queue.clone());
-                    self.mesh_ws.start(d, q, vec![None]);
+                    let (d, q, g) = (self.rs.device.clone(), self.rs.queue.clone(), self.graph_for_run());
+                    self.mesh_ws.start(g, d, q, vec![None]);
                 }
                 if ui.add_enabled(!running, egui::Button::new("Preview")).on_hover_text("A quick look at the shape the first Remesh makes (6,000 triangles at most), without UVs or maps: for tuning the noise graphs.").clicked() {
-                    let (d, q) = (self.rs.device.clone(), self.rs.queue.clone());
-                    self.mesh_ws.start_preview(d, q);
+                    let (d, q, g) = (self.rs.device.clone(), self.rs.queue.clone(), self.graph_for_run());
+                    self.mesh_ws.start_preview(g, d, q);
                 }
                 if ui.add_enabled(!running, egui::Button::new("Run on files…")).on_hover_text("Runs the graph once for each mesh file you pick: a Load Mesh node whose path is {batch} reads that file, and {name} in an output name becomes its name.").clicked() {
                     if let Some(files) = rfd::FileDialog::new().add_filter("Mesh", &["obj", "ply", "stl", "gltf", "glb"]).pick_files() {
-                        let (d, q) = (self.rs.device.clone(), self.rs.queue.clone());
-                        self.mesh_ws.start(d, q, files.into_iter().map(Some).collect());
+                        let (d, q, g) = (self.rs.device.clone(), self.rs.queue.clone(), self.graph_for_run());
+                        self.mesh_ws.start(g, d, q, files.into_iter().map(Some).collect());
                     }
                 }
                 ui.add(egui::DragValue::new(&mut self.mesh_ws.seed).prefix("seed "));
