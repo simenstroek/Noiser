@@ -900,7 +900,8 @@ impl Graph {
     /// Drops links into inputs a node no longer has (a Math node switched away from smooth min/max).
     pub fn prune_edges(&mut self) {
         let nodes = &self.nodes;
-        self.edges.retain(|e| nodes.get(&e.to).is_some_and(|n| e.port < n.kind.input_count()));
+        // A wire also goes when its output pin is gone (a Bake node with a map unticked).
+        self.edges.retain(|e| nodes.get(&e.to).is_some_and(|n| e.port < n.kind.input_count()) && nodes.get(&e.from).is_some_and(|n| e.from_port == 0 || e.from_port < n.kind.output_count()));
     }
 
     pub fn disconnect(&mut self, to: NodeId, port: usize) {
@@ -2003,5 +2004,20 @@ mod frame_tests {
         g.connect(bake, out_mesh, 0);
         assert_eq!(g.edges.len(), 6, "{:?}", g.edges);
         assert_eq!((g.output_type(remesh), g.output_type(bake), g.input_type(bake, 1)), (PortType::Mesh, PortType::Image, PortType::Float));
+    }
+
+    #[test]
+    fn unticking_a_bake_map_drops_its_wire() {
+        let mut g = Graph::default();
+        let bake = g.add(NodeKind::Bake(crate::bake::Settings { channels: vec![crate::bake::Channel::Normal, crate::bake::Channel::Occlusion], ..Default::default() }), [0.0; 2]);
+        let out = g.add(NodeKind::OutImage(Default::default()), [0.0; 2]);
+        g.connect_from(bake, 1, out, 0);
+        g.prune_edges();
+        assert_eq!(g.edges.len(), 1);
+        if let NodeKind::Bake(b) = &mut g.nodes.get_mut(&bake).unwrap().kind {
+            b.channels.retain(|c| *c == crate::bake::Channel::Normal);
+        }
+        g.prune_edges();
+        assert!(g.edges.is_empty());
     }
 }
