@@ -10,14 +10,51 @@ use std::io::Write;
 use std::path::PathBuf;
 
 pub const USAGE: &str = "usage: noiser --headless GRAPH.noisegraph --batch-out DIR (--batch-file F.obj ... | --batch-dir SRC)
-  [--export-noiser OUT.noiser] [--param name=value ...] [--set 3.scale=8 ...] [--amount 0.25] [--amount-var 0.2] [--tile 1.0] [--size 1.0] [--seed 0] [--seed-mode same|increment|random]
+  [--export-noiser OUT.noiser] [--manifest meshes.json] [--param name=value ...] [--set 3.scale=8 ...] [--amount 0.25] [--amount-var 0.2] [--tile 1.0] [--size 1.0] [--seed 0] [--seed-mode same|increment|random]
   [--res 256] [--grid-res 128] [--format obj|ply] [--cull 0.01] [--mask KIND ...]";
+
+/// One mesh of a `--manifest`: the file and any settings that differ from the command line for that mesh.
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Spec {
+    file: PathBuf,
+    amount: Option<f32>,
+    tile: Option<f32>,
+    size: Option<f32>,
+    seed: Option<u32>,
+    res: Option<u32>,
+    #[serde(rename = "grid-res")]
+    grid_res: Option<u32>,
+    cull: Option<f32>,
+    /// Mask terms for this mesh (kind names as for `--mask`); replaces the command line's.
+    mask: Option<Vec<String>>,
+    /// Exposed parameters of the graph for this mesh.
+    #[serde(default)]
+    params: std::collections::BTreeMap<String, serde_json::Value>,
+}
+
+/// Reads a manifest: a JSON list of specs, or an object with a `meshes` list. Relative files are relative to it.
+fn read_manifest(path: &std::path::Path) -> Result<Vec<Spec>, String> {
+    let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let value: serde_json::Value = serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?;
+    let list = if value.is_array() { value } else { value.get("meshes").cloned().ok_or("the manifest needs a list of meshes")? };
+    let mut specs: Vec<Spec> = serde_json::from_value(list).map_err(|e| format!("{}: {e}", path.display()))?;
+    let dir = path.parent().unwrap_or(std::path::Path::new("."));
+    for s in &mut specs {
+        if s.file.is_relative() {
+            s.file = dir.join(&s.file);
+        }
+    }
+    Ok(specs)
+}
 
 #[derive(Debug)]
 struct Options {
     graph: PathBuf,
     out: PathBuf,
     files: Vec<PathBuf>,
+    /// Meshes from `--manifest`, with their own settings.
+    specs: Vec<Spec>,
     amount: f32,
     tile: f32,
     size: f32,
@@ -40,6 +77,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
         graph: PathBuf::new(),
         out: PathBuf::new(),
         files: Vec::new(),
+        specs: Vec::new(),
         amount: 0.25,
         tile: 1.0,
         size: 1.0,
@@ -61,6 +99,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
         match a.as_str() {
             "--headless" => {}
             "--batch-out" => o.out = value("a folder")?.into(),
+            "--manifest" => o.specs.extend(read_manifest(std::path::Path::new(&value("a JSON file")?))?),
             "--batch-file" => o.files.push(value("a file")?.into()),
             "--batch-dir" => {
                 let dir = PathBuf::from(value("a folder")?);
@@ -127,8 +166,8 @@ fn parse(args: &[String]) -> Result<Options, String> {
     if o.out.as_os_str().is_empty() {
         return Err("--batch-out is required".into());
     }
-    if o.files.is_empty() {
-        return Err("no meshes: use --batch-file or --batch-dir".into());
+    if o.files.is_empty() && o.specs.is_empty() {
+        return Err("no meshes: use --batch-file, --batch-dir or --manifest".into());
     }
     Ok(o)
 }
@@ -156,6 +195,17 @@ fn apply_sets(text: &str, sets: &[(String, String, serde_json::Value)]) -> Resul
         }
     }
     Ok(doc.to_string())
+}
+
+/// Mask terms from kind names (`thickness`, `position`...), as `--mask` takes them.
+fn mask_from_names(names: &[String]) -> Result<MaskSettings, String> {
+    let mut m = MaskSettings::default();
+    for name in names {
+        let lower = name.to_lowercase();
+        let kind = MaskKind::ALL.iter().find(|k| k.name().to_lowercase().starts_with(&lower)).ok_or(format!("unknown mask term {name}"))?;
+        m.terms.push(MaskTerm::new(*kind));
+    }
+    Ok(m)
 }
 
 /// `--param name=value` turned into `--set` overrides through the graph file's exposed parameters.
@@ -216,15 +266,40 @@ fn run(args: &[String], log: &mut Log) -> Result<usize, String> {
     let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default())).map_err(|e| format!("no GPU adapter: {e}"))?;
     let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).map_err(|e| format!("no GPU device: {e}"))?;
     let d = Displace { amount: o.amount, tile_size: o.tile, prim_size: o.size, mask: o.mask.pack() };
-    let total = o.files.len();
+    // Plain files first, then the manifest's meshes, each with the overrides it names.
+    let specs: Vec<Spec> = o.files.iter().map(|f| Spec { file: f.clone(), ..Default::default() }).chain(o.specs.iter().cloned()).collect();
+    let total = specs.len();
     let mut failed = 0;
-    for (i, input) in o.files.iter().enumerate() {
+    for (i, spec) in specs.iter().enumerate() {
+        let input = &spec.file;
+        let d = Displace {
+            amount: spec.amount.unwrap_or(d.amount),
+            tile_size: spec.tile.unwrap_or(d.tile_size),
+            prim_size: spec.size.unwrap_or(d.prim_size),
+            mask: match &spec.mask {
+                Some(names) => mask_from_names(names)?.pack(),
+                None => d.mask,
+            },
+        };
+        let mut settings = o.settings.clone();
+        settings.res = spec.res.unwrap_or(settings.res);
+        settings.cull = spec.cull.unwrap_or(settings.cull);
+        // A mesh with its own parameters gets its own copy of the graph.
+        let own_graph;
+        let graph = if spec.params.is_empty() {
+            &graph
+        } else {
+            let mut sets = o.sets.clone();
+            sets.extend(resolve_params(&text, &spec.params.iter().map(|(k, v)| (k.clone(), v.clone())).collect::<Vec<_>>())?);
+            own_graph = Graph::from_json(&apply_sets(&text, &sets)?)?;
+            &own_graph
+        };
         let stem = input.file_stem().map_or("mesh".into(), |s| s.to_string_lossy().into_owned());
-        let seed = o.mode.seed_for(o.seed, i);
-        let label = if o.mode == SeedMode::Same { stem.clone() } else { format!("{stem}_seed{seed}") };
-        let output = crate::meshapp::unique_path(&o.out, &format!("{label}_displaced"), o.settings.format.extension());
+        let seed = spec.seed.unwrap_or_else(|| o.mode.seed_for(o.seed, i));
+        let label = if o.mode == SeedMode::Same && spec.seed.is_none() { stem.clone() } else { format!("{stem}_seed{seed}") };
+        let output = crate::meshapp::unique_path(&o.out, &format!("{label}_displaced"), settings.format.extension());
         let d = Displace { amount: d.amount * crate::meshexport::amount_factor(o.seed, i, o.amount_var), ..d };
-        let job = FileJob { device: &device, queue: &queue, graph: &graph, seed, d, settings: o.settings.clone(), grid_res: o.grid_res, grid_pad: 0.5 };
+        let job = FileJob { device: &device, queue: &queue, graph, seed, d, settings, grid_res: spec.grid_res.unwrap_or(o.grid_res), grid_pad: 0.5 };
         let started = std::time::Instant::now();
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| job.run(input, &output, &Progress::default())));
         let n = i + 1;
@@ -323,5 +398,22 @@ mod tests {
         assert!(err.contains("roughness"), "the error lists what is exposed: {err}");
         assert_eq!(g.exposed_value(&g.exposed[0]).unwrap(), serde_json::json!(4.0));
         assert!(g.exposed_value(&crate::graph::Exposed { name: "x".into(), node: 1, field: "bogus".into() }).is_err());
+    }
+
+    #[test]
+    fn a_manifest_gives_each_mesh_its_own_settings() {
+        let dir = std::env::temp_dir().join("noiser-manifest-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("m.json");
+        std::fs::write(&path, r#"{"meshes": [{"file": "a.obj", "amount": 0.4, "seed": 9, "mask": ["thickness"], "params": {"size": 6}}, {"file": "sub/b.obj"}]}"#).unwrap();
+        let specs = read_manifest(&path).unwrap();
+        assert_eq!(specs.len(), 2);
+        assert_eq!((specs[0].amount, specs[0].seed), (Some(0.4), Some(9)));
+        assert!(specs[0].file.starts_with(&dir) && specs[1].file.ends_with("sub/b.obj") || specs[1].file.ends_with("sub\\b.obj"));
+        assert_eq!(mask_from_names(specs[0].mask.as_ref().unwrap()).unwrap().terms.len(), 1);
+        std::fs::write(&path, r#"[{"file": "a.obj", "bogus": 1}]"#).unwrap();
+        assert!(read_manifest(&path).is_err(), "unknown keys are rejected");
+        let o = parse(&args("--headless g.noisegraph --batch-out out --manifest ".to_string().as_str()).into_iter().chain([path.to_string_lossy().into_owned()]).collect::<Vec<_>>());
+        assert!(o.is_err());
     }
 }
