@@ -14,8 +14,10 @@
 use crate::mesh::V3;
 use crate::surface::RawMesh;
 
-/// Points in, (distance, gradient x, y, z) out.
-pub type Field<'a> = &'a mut dyn FnMut(&[V3]) -> Vec<[f32; 4]>;
+/// Points and a smoothing radius for each in, (distance, gradient x, y, z) out. The radius says over what distance
+/// the field may be averaged: a surface with detail finer than the triangles cannot be followed by them, so
+/// each vertex is placed on the field blurred at about its own edge length. A radius of 0 asks for the exact field.
+pub type Field<'a> = &'a mut dyn FnMut(&[V3], &[f32]) -> Vec<[f32; 4]>;
 
 #[derive(Clone, Debug)]
 pub struct Params {
@@ -26,12 +28,15 @@ pub struct Params {
     /// Shortest and longest edge the size field may ask for.
     pub min_edge: f32,
     pub max_edge: f32,
+    /// The smoothing radius as a fraction of the local edge length. 0 (the default) follows the exact field: blurring
+    /// it was tried and made the triangles no cleaner, only the surface less true.
+    pub blur: f32,
 }
 
 impl Params {
     /// Sensible edge limits for a mesh with the given bounding box diagonal.
     pub fn new(target: usize, diagonal: f32) -> Params {
-        Params { target, iterations: 14, min_edge: diagonal / 1500.0, max_edge: diagonal / 6.0 }
+        Params { target, iterations: 14, min_edge: diagonal / 1500.0, max_edge: diagonal / 6.0, blur: 0.0 }
     }
 }
 
@@ -156,27 +161,89 @@ impl Mesh {
         cross(sub(p(t[1]), p(t[0])), sub(p(t[2]), p(t[0])))
     }
 
+    /// Whether triangle `t` is folded back over a neighbour: across one of its edges the normals are more than
+    /// about 125 degrees apart. Operations are refused when they would create such a fold.
+    fn fold_at(&self, t: u32) -> bool {
+        const FOLD_COS: f32 = -0.57;
+        let tri = self.tris[t as usize];
+        let n = self.tri_cross(tri, &[]);
+        let ln = len(n);
+        if ln < 1e-14 {
+            return false;
+        }
+        for i in 0..3 {
+            let (x, y) = (tri[i], tri[(i + 1) % 3]);
+            let across = self.common(x, y);
+            if across.len() != 2 {
+                continue;
+            }
+            let u = if across[0] == t { across[1] } else { across[0] };
+            let m = self.tri_cross(self.tris[u as usize], &[]);
+            if len(m) > 1e-14 && dot(n, m) < FOLD_COS * ln * len(m) {
+                return true;
+            }
+        }
+        false
+    }
+
     // ---- the field ----
 
     /// Moves every live vertex onto the surface (Newton steps along the gradient), then reads the normals.
-    fn project(&mut self, field: Field, steps: usize, max_step: f32) {
+    fn project(&mut self, field: Field, steps: usize, blur: f32) {
         let live: Vec<u32> = (0..self.pos.len() as u32).filter(|&v| !self.vt[v as usize].is_empty()).collect();
         for _ in 0..steps {
             let pts: Vec<V3> = live.iter().map(|&v| self.pos[v as usize]).collect();
-            for (&v, s) in live.iter().zip(field(&pts)) {
+            let radii: Vec<f32> = live.iter().map(|&v| blur * self.size[v as usize]).collect();
+            let mut moves = Vec::with_capacity(live.len());
+            for (&v, s) in live.iter().zip(field(&pts, &radii)) {
                 let g = [s[1], s[2], s[3]];
                 let g2 = dot(g, g);
                 if g2 > 1e-12 && s[0].is_finite() {
+                    // A vertex never moves more than half its edge length in one step, so it cannot jump to another sheet.
                     let step = scale(g, s[0] / g2);
-                    let l = len(step);
-                    let step = if l > max_step { scale(step, max_step / l) } else { step };
-                    self.pos[v as usize] = sub(self.pos[v as usize], step);
+                    let (l, cap) = (len(step), 0.5 * self.size[v as usize]);
+                    let step = if l > cap { scale(step, cap / l) } else { step };
+                    moves.push((v, sub(self.pos[v as usize], step)));
                 }
             }
+            self.commit(moves);
         }
         let pts: Vec<V3> = live.iter().map(|&v| self.pos[v as usize]).collect();
-        for (&v, s) in live.iter().zip(field(&pts)) {
+        let radii: Vec<f32> = live.iter().map(|&v| blur * self.size[v as usize]).collect();
+        for (&v, s) in live.iter().zip(field(&pts, &radii)) {
             self.nrm[v as usize] = unit([s[1], s[2], s[3]]);
+        }
+    }
+
+    /// Applies vertex moves, then puts back any vertex whose move folded one of its triangles over.
+    fn commit(&mut self, moves: Vec<(u32, V3)>) {
+        let old = self.pos.clone();
+        // The triangles that were already folded may stay so; no others may become folded.
+        let mut around: Vec<u32> = moves.iter().flat_map(|&(v, _)| self.vt[v as usize].iter().copied()).collect();
+        around.sort_unstable();
+        around.dedup();
+        let folded_before: std::collections::HashSet<u32> = around.iter().copied().filter(|&t| self.fold_at(t)).collect();
+        for &(v, q) in &moves {
+            self.pos[v as usize] = q;
+        }
+        let was = |t: [u32; 3]| cross(sub(old[t[1] as usize], old[t[0] as usize]), sub(old[t[2] as usize], old[t[0] as usize]));
+        for _ in 0..3 {
+            let mut bad = Vec::new();
+            for &(v, _) in &moves {
+                for &t in &self.vt[v as usize] {
+                    let tri = self.tris[t as usize];
+                    let (before, after) = (was(tri), self.tri_cross(tri, &[]));
+                    if dot(before, after) < 0.2 * len(before) * len(after) || (!folded_before.contains(&t) && self.fold_at(t)) {
+                        bad.extend(tri);
+                    }
+                }
+            }
+            if bad.is_empty() {
+                break;
+            }
+            for v in bad {
+                self.pos[v as usize] = old[v as usize];
+            }
         }
     }
 
@@ -216,11 +283,11 @@ impl Mesh {
     }
 
     /// The error budget that gives the target count, by bisection (the count falls as `e` grows).
-    fn solve_e(&self, p: &Params) -> f32 {
+    fn solve_e(&self, p: &Params, target: f32) -> f32 {
         let (mut lo, mut hi) = (1e-9f32.ln(), 10f32.ln());
         for _ in 0..40 {
             let mid = 0.5 * (lo + hi);
-            if self.estimate(mid.exp(), p) > p.target as f32 {
+            if self.estimate(mid.exp(), p) > target {
                 lo = mid;
             } else {
                 hi = mid;
@@ -305,6 +372,10 @@ impl Mesh {
         if na.iter().chain(&nb).any(|&x| x != a && x != b && len(sub(self.pos[x as usize], m)) > longest) {
             return false;
         }
+        let was_folded = self.vt[a as usize].iter().chain(&self.vt[b as usize]).any(|&t| self.fold_at(t));
+        let saved: Vec<[u32; 3]> = self.vt[a as usize].iter().map(|&t| self.tris[t as usize]).collect();
+        let (old_pos, old_nrm, old_curv) = (self.pos[b as usize], self.nrm[b as usize], self.curv[b as usize]);
+        let first = self.tris.len() as u32;
         for &t in &ts {
             self.kill_tri(t);
         }
@@ -321,6 +392,19 @@ impl Mesh {
         self.pos[b as usize] = m;
         self.nrm[b as usize] = unit(add(self.nrm[a as usize], self.nrm[b as usize]));
         self.curv[b as usize] = self.curv[a as usize].max(self.curv[b as usize]);
+        if !was_folded && self.vt[b as usize].clone().iter().any(|&t| self.fold_at(t)) {
+            // Put everything back as it was.
+            for t in first..self.tris.len() as u32 {
+                if self.alive[t as usize] {
+                    self.kill_tri(t);
+                }
+            }
+            for tri in saved {
+                self.add_tri(tri);
+            }
+            (self.pos[b as usize], self.nrm[b as usize], self.curv[b as usize]) = (old_pos, old_nrm, old_curv);
+            return false;
+        }
         true
     }
 
@@ -358,10 +442,20 @@ impl Mesh {
                 return false;
             }
         }
+        let was_folded = self.fold_at(t1) || self.fold_at(t2);
+        let (old1, old2) = (self.tris[t1 as usize], self.tris[t2 as usize]);
         self.kill_tri(t1);
         self.kill_tri(t2);
+        let first = self.tris.len() as u32;
         self.add_tri([a, d, c]);
         self.add_tri([d, b, c]);
+        if !was_folded && (self.fold_at(first) || self.fold_at(first + 1)) {
+            self.kill_tri(first);
+            self.kill_tri(first + 1);
+            self.add_tri(old1);
+            self.add_tri(old2);
+            return false;
+        }
         true
     }
 
@@ -414,9 +508,7 @@ impl Mesh {
             let tangent = sub(d, scale(n, dot(d, n)));
             moves.push((v, add(self.pos[v as usize], scale(tangent, 0.5))));
         }
-        for (v, q) in moves {
-            self.pos[v as usize] = q;
-        }
+        self.commit(moves);
     }
 
     fn finish(self) -> RawMesh {
@@ -440,34 +532,46 @@ impl Mesh {
 
 /// Remeshes the closed surface `start` (counter-clockwise seen from outside) onto the zero level of `field`.
 /// `progress` is called with (round, rounds).
-pub fn remesh(start: RawMesh, field: Field, p: &Params, progress: &dyn Fn(usize, usize)) -> RawMesh {
+pub fn remesh(start: RawMesh, field: Field, params: &Params, progress: &dyn Fn(usize, usize)) -> RawMesh {
     let mut m = Mesh::new(start);
     if m.live == 0 {
         return RawMesh::default();
     }
-    let diag = p.max_edge;
-    m.project(field, 2, diag);
+    // Edges stay within a few times the length that would give the target count on a uniform mesh: a sharp
+    // crease has a huge curvature but must not eat the whole triangle budget.
+    let area: f32 = m.tris.iter().enumerate().filter(|(t, _)| m.alive[*t]).map(|(_, t)| 0.5 * len(m.tri_cross(*t, &[]))).sum();
+    let uniform = (4.0 * area / (3f32.sqrt() * params.target as f32)).sqrt();
+    let p = &Params { min_edge: params.min_edge.max(uniform / 4.0), max_edge: params.max_edge.min(uniform * 5.0).max(uniform / 2.0), ..params.clone() };
+    m.size.iter_mut().for_each(|s| *s = 0.25 * p.max_edge);
+    m.project(field, 2, p.blur);
     let rounds = p.iterations;
     let mut extra = 0;
     let mut round = 0;
+    // How many more triangles the edge-length rules end up with than the equilateral estimate says.
+    let mut corr = 1.0f32;
     while round < rounds + extra {
         progress(round, rounds + extra);
         m.curvature();
-        let e = m.solve_e(p);
+        let e = m.solve_e(p, p.target as f32 / corr);
         m.set_sizes(e, p);
-        m.split_pass();
-        m.collapse_pass();
-        m.flip_pass();
+        let before = m.live;
+        let (sp, co) = (m.split_pass(), m.collapse_pass());
+        let fl = m.flip_pass();
         m.smooth_pass();
-        m.flip_pass();
-        m.project(field, 1, diag);
+        let fl2 = m.flip_pass();
+        let ratio = m.live as f32 / m.estimate(e, p).max(1.0);
+        corr = if round == 0 { ratio } else { 0.5 * corr + 0.5 * ratio };
+        if std::env::var_os("NOISER_REMESH_DEBUG").is_some() {
+            eprintln!("round {round}: e {e:.2e}, {before} -> {} triangles ({sp} splits, {co} collapses, {fl}+{fl2} flips), estimated {:.0}", m.live, m.estimate(e, p));
+        }
+        m.project(field, 1, p.blur);
         round += 1;
         // The count settles late in the run; a few more rounds if it is still off by more than 6%.
         if round == rounds + extra && extra < 6 && (m.live as f32 - p.target as f32).abs() > 0.06 * p.target as f32 {
             extra += 2;
         }
     }
-    m.project(field, 2, diag);
+    m.project(field, 2, p.blur);
     progress(rounds + extra, rounds + extra);
     m.finish()
 }
@@ -482,7 +586,7 @@ mod tests {
         RawMesh { normals: vec![[0.0; 3]; m.positions.len()], positions: m.positions, triangles: m.triangles }
     }
 
-    fn sphere_field(pts: &[V3]) -> Vec<[f32; 4]> {
+    fn sphere_field(pts: &[V3], _radii: &[f32]) -> Vec<[f32; 4]> {
         pts.iter()
             .map(|p| {
                 let r = len(*p).max(1e-9);
@@ -495,7 +599,7 @@ mod tests {
     fn a_sphere_is_remeshed_to_the_requested_count_with_good_triangles() {
         for target in [500usize, 4000, 20000] {
             let out = remesh(icosphere(1.0, 3), &mut sphere_field, &Params::new(target, 3.46), &|_, _| {});
-            let r = meshquality::report(&out).with_surface_error(&out, &mut sphere_field);
+            let r = meshquality::report(&out).with_surface_error(&out, &mut |pts| sphere_field(pts, &[]));
             eprintln!("target {target}:\n{r}");
             assert!((r.triangles as f32 - target as f32).abs() < 0.15 * target as f32, "{} triangles for a target of {target}", r.triangles);
             assert!(r.watertight() && r.components == 1, "not a single closed surface: {r}");
@@ -510,7 +614,7 @@ mod tests {
     #[test]
     fn edges_are_shorter_where_the_surface_bends_more() {
         // An ellipsoid with semi-axes 1.6, 0.5 and 0.5: its tips curve much more sharply than its flanks.
-        let field = |pts: &[V3]| -> Vec<[f32; 4]> {
+        let field = |pts: &[V3], _radii: &[f32]| -> Vec<[f32; 4]> {
             pts.iter()
                 .map(|p| {
                     let q = [p[0] / 1.6, p[1] / 0.5, p[2] / 0.5];
@@ -545,5 +649,61 @@ mod tests {
         assert!(tip < 0.7 * flank, "tips {tip}, flanks {flank}");
         let r = meshquality::report(&out);
         assert!(r.watertight() && r.thin_fraction < 0.05, "{r}");
+    }
+
+    #[test]
+    fn a_bumpy_sphere_stays_a_clean_surface_at_every_count() {
+        // Radius 1 plus bumps of wavelength about 0.7 and height 0.08: finer than the triangles at low counts.
+        let bumpy = |pts: &[V3], _radii: &[f32]| -> Vec<[f32; 4]> {
+            let f = |p: V3| len(p) - 1.0 - 0.08 * (9.0 * p[0]).sin() * (9.0 * p[1]).sin() * (9.0 * p[2]).sin();
+            let e = 1e-3;
+            pts.iter()
+                .map(|p| {
+                    let g = [0, 1, 2].map(|a| {
+                        let (mut hi, mut lo) = (*p, *p);
+                        hi[a] += e;
+                        lo[a] -= e;
+                        (f(hi) - f(lo)) / (2.0 * e)
+                    });
+                    [f(*p), g[0], g[1], g[2]]
+                })
+                .collect()
+        };
+        for target in [800usize, 5000, 30000] {
+            let out = remesh(icosphere(1.0, 4), &mut { bumpy }, &Params::new(target, 3.5), &|_, _| {});
+            let r = meshquality::report(&out);
+            eprintln!("target {target}:
+{r}");
+            assert!(r.watertight() && r.components == 1, "{r}");
+            assert!(r.max_normal_deviation < 120.0 && r.thin_fraction < 0.05, "{r}");
+        }
+    }
+
+    #[test]
+    #[ignore = "experiment: a surface rougher than the triangles"]
+    fn rough_sphere_experiment() {
+        let rough = |pts: &[V3], _radii: &[f32]| -> Vec<[f32; 4]> {
+            let f = |p: V3| {
+                let b = |k: f32| (k * p[0]).sin() * (k * p[1] + 1.0).sin() * (k * p[2] + 2.0).sin();
+                len(p) - 1.0 - 0.14 * b(12.0) - 0.07 * b(24.0) - 0.035 * b(48.0)
+            };
+            let e = 1e-3;
+            pts.iter()
+                .map(|p| {
+                    let g = [0, 1, 2].map(|a| {
+                        let (mut hi, mut lo) = (*p, *p);
+                        hi[a] += e;
+                        lo[a] -= e;
+                        (f(hi) - f(lo)) / (2.0 * e)
+                    });
+                    [f(*p), g[0], g[1], g[2]]
+                })
+                .collect()
+        };
+        for target in [800usize, 5000, 30000] {
+            let out = remesh(icosphere(1.0, 4), &mut { rough }, &Params::new(target, 3.5), &|_, _| {});
+            eprintln!("target {target}:
+{}", meshquality::report(&out));
+        }
     }
 }

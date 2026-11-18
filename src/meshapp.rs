@@ -267,10 +267,23 @@ impl App {
                 ui.add(egui::Slider::new(v, 0.0..=0.25).fixed_decimals(3).text("remove small parts"))
                     .on_hover_text("Drops separate pieces whose surface area is below this fraction of the largest piece's.\nSeveral big pieces are all kept; 0 keeps everything.");
             });
+            crate::row(ui, &mut s.remesh, d.remesh, |ui, v| {
+                let mut on = v.is_some();
+                if ui.checkbox(&mut on, "remesh to").on_hover_text("Adaptive remeshing: small, even triangles where the surface bends, large ones where it is flat, onto the exact displaced surface. Instead of the uniform grid mesh, which has a triangle for every sample.").changed() {
+                    *v = on.then_some(20_000);
+                }
+                if let Some(n) = v {
+                    ui.add(egui::DragValue::new(n).range(200..=2_000_000).speed(100.0).suffix(" triangles"));
+                }
+            });
             let grid = meshexport::Grid::plan(lo, hi, displace, reach, s.res);
             let [nx, ny, nz] = grid.dims;
-            ui.weak(format!("{nx}×{ny}×{nz} samples ({:.0} million)", grid.samples() as f64 / 1e6));
-            if grid.samples() > 400_000_000 {
+            if s.remesh.is_some() {
+                ui.weak("The remesh starts from a coarse grid it chooses itself; the samples above do not apply.");
+            } else {
+                ui.weak(format!("{nx}×{ny}×{nz} samples ({:.0} million)", grid.samples() as f64 / 1e6));
+            }
+            if s.remesh.is_none() && grid.samples() > 400_000_000 {
                 ui.colored_label(crate::editor::ORANGE, "⚠ This is a lot of samples: it will take a while and the result will be a huge mesh.");
             }
             ui.weak(format!("Displacement {:.2} × the graph, tile size {:.2}, shape size {:.2}, seed {}: the same as the 3D view.", displace.amount, displace.tile_size, displace.prim_size, self.pv.seed));

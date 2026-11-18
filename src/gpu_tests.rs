@@ -1364,7 +1364,7 @@ mod mesh_export_tests {
     }
 
     fn job<'a>(ev: &'a MeshEvaluator, d: Displace, reach: f32, res: u32) -> Job<'a> {
-        Job { ev, d, lo: [-1.0; 3], hi: [1.0; 3], reach, norm: Normalization::IDENTITY, settings: Settings { res, format: Format::Obj, cull: 0.0 } }
+        Job { ev, d, lo: [-1.0; 3], hi: [1.0; 3], reach, norm: Normalization::IDENTITY, settings: Settings { res, format: Format::Obj, cull: 0.0, remesh: None } }
     }
 
     fn radius(p: [f32; 3]) -> f32 {
@@ -1638,13 +1638,43 @@ fn export_a_real_mesh() {
     let push = crate::view::push_range(graph.density_range(), amount, (1.0, 1.0));
     let reach = push.0.abs().max(push.1.abs()).min(pad - 0.05);
     let (lo, hi) = mesh.bounds();
-    let settings = Settings { res, format: Format::Obj, cull: 0.01 };
+    let settings = Settings { res, format: Format::Obj, cull: 0.01, remesh: None };
     let job = Job { ev: &ev, d: Displace { amount, tile_size: 1.0, prim_size: 1.0, mask: crate::meshmask::PackedMask::NONE }, lo, hi, reach, norm, settings };
     eprintln!("export grid {:?}", job.grid().dims);
     let t = std::time::Instant::now();
     let out = root.join("target").join(format!("{}_displaced.obj", mesh_path.file_stem().unwrap().to_string_lossy()));
     let summary = job.run(&out, &Default::default()).unwrap();
     eprintln!("{summary}\nexport took {:?}", t.elapsed());
+}
+
+/// Remeshes a real mesh the way the export does and scores the result, before and after.
+/// `NOISER_TEST_MESH=file.obj NOISER_TEST_TRIS=5000 cargo test --release remesh_a_real_mesh -- --ignored --nocapture`
+#[test]
+#[ignore = "needs NOISER_TEST_MESH"]
+fn remesh_a_real_mesh() {
+    use crate::meshexport::{Displace, Format, Job, MeshEvaluator, Settings};
+    let env = |k: &str| std::env::var(k).ok();
+    let mesh_path = std::path::PathBuf::from(env("NOISER_TEST_MESH").expect("set NOISER_TEST_MESH"));
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let graph = Graph::from_json(&std::fs::read_to_string(env("NOISER_TEST_GRAPH").map_or(root.join("SimpleTestGraph.noisegraph"), Into::into)).unwrap()).unwrap();
+    let tris: usize = env("NOISER_TEST_TRIS").map_or(5000, |v| v.parse().unwrap());
+    let amount: f32 = env("NOISER_TEST_AMOUNT").map_or(0.2, |v| v.parse().unwrap());
+    let gpu = gpu().expect("needs a GPU");
+    let (mesh, norm) = crate::mesh::Mesh::load_obj(&mesh_path).unwrap().normalized();
+    let sdf = crate::meshsdf::MeshSdf::build(&mesh, 128, 0.5, &Default::default());
+    let (_tex, view) = sdf.upload(&gpu.device, &gpu.queue);
+    let ev = MeshEvaluator::new(&gpu.device, &gpu.queue, &graph, 0, view, sdf.origin, sdf.voxel, mesh.bounds(), false).unwrap();
+    let push = crate::view::push_range(graph.density_range(), amount, (1.0, 1.0));
+    let reach = push.0.abs().max(push.1.abs()).min(0.45);
+    let (lo, hi) = mesh.bounds();
+    let d = Displace { amount, tile_size: 1.0, prim_size: 1.0, mask: crate::meshmask::PackedMask::NONE };
+    let job = Job { ev: &ev, d, lo, hi, reach, norm, settings: Settings { res: 160, format: Format::Obj, cull: 0.01, remesh: Some(tris) } };
+    let mut field = |pts: &[[f32; 3]]| ev.points(d, pts, 0.002);
+    let uniform = job.extract(&Default::default());
+    eprintln!("uniform surface nets:\n{}", crate::meshquality::report(&uniform).with_surface_error(&uniform, &mut field));
+    let t = std::time::Instant::now();
+    let out = job.remeshed(tris, &Default::default());
+    eprintln!("remeshed to {tris} in {:?}:\n{}", t.elapsed(), crate::meshquality::report(&out).with_surface_error(&out, &mut field));
 }
 
 // ---- batch pipeline ---------------------------------------------------------------
@@ -1701,7 +1731,7 @@ mod batch_tests {
                 graph: &noise,
                 seed,
                 d: Displace { amount: 0.1, tile_size: 1.0, prim_size: 1.0, mask: crate::meshmask::PackedMask::NONE },
-                settings: Settings { res: 48, format: Format::Obj, cull: 0.0 },
+                settings: Settings { res: 48, format: Format::Obj, cull: 0.0, remesh: None },
                 grid_res: 48,
                 grid_pad: 0.5,
                 combine: Default::default(),
@@ -1725,7 +1755,7 @@ mod batch_tests {
         // In object units the detail keeps its size: the big sphere moves about as far as the small one, not 3x as far.
         let spread = |m: &crate::mesh::Mesh, radius: f32| m.positions.iter().map(|p| ((p[0] * p[0] + p[1] * p[1] + p[2] * p[2]).sqrt() - radius).abs()).fold(0.0f32, f32::max);
         let absolute = |input: &str, out: &str| {
-            let job = FileJob { device: &gpu.device, queue: &gpu.queue, graph: &noise, seed: 0, d: Displace { amount: 0.1, tile_size: 1.0, prim_size: 1.0, mask: crate::meshmask::PackedMask::NONE }, settings: Settings { res: 48, format: Format::Obj, cull: 0.0 }, grid_res: 48, grid_pad: 0.5, combine: Default::default(), object_scale: Some(1.0) };
+            let job = FileJob { device: &gpu.device, queue: &gpu.queue, graph: &noise, seed: 0, d: Displace { amount: 0.1, tile_size: 1.0, prim_size: 1.0, mask: crate::meshmask::PackedMask::NONE }, settings: Settings { res: 48, format: Format::Obj, cull: 0.0, remesh: None }, grid_res: 48, grid_pad: 0.5, combine: Default::default(), object_scale: Some(1.0) };
             job.run(&dir.join(input), &dir.join(out), &Default::default()).unwrap();
             crate::mesh::Mesh::load_obj(&dir.join(out)).unwrap()
         };

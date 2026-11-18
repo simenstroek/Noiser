@@ -12,7 +12,7 @@ use std::path::PathBuf;
 pub const USAGE: &str = "usage: noiser --headless GRAPH.noisegraph --batch-out DIR (--batch-file F.obj ... | --batch-dir SRC)
   [--export-noiser OUT.noiser] [--export-shader OUT.hlsl|glsl|wgsl] [--manifest meshes.json] [--param name=value ...] [--set 3.scale=8 ...] [--amount 0.25] [--amount-var 0.2] [--tile 1.0] [--size 1.0] [--seed 0] [--seed-mode same|increment|random]
   [--res 256] [--grid-res 128] [--format obj|ply] [--cull 0.01] [--mask KIND ...]
-  [--combine union|intersect|smooth-union|smooth-intersect] [--combine-smooth 0.1] [--object-units] [--report]";
+  [--combine union|intersect|smooth-union|smooth-intersect] [--combine-smooth 0.1] [--object-units] [--report] [--remesh TRIANGLES]";
 
 /// One mesh of a `--manifest`: the file and any settings that differ from the command line for that mesh.
 #[derive(Debug, Clone, Default, serde::Deserialize)]
@@ -152,6 +152,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
             }
             "--object-units" => o.object_units = true,
             "--report" => o.report = true,
+            "--remesh" => o.settings.remesh = Some(whole(value("a triangle count")?)?.max(100) as usize),
             "--combine-smooth" => o.combine.smooth = float(value("a width like 0.1")?)?.max(0.0),
             "--seed-mode" => {
                 o.mode = match value("same, increment or random")?.as_str() {

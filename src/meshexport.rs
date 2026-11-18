@@ -6,7 +6,7 @@ use crate::codegen::{self, EVAL_BINDINGS, NOISE_LIB};
 use crate::graph::Graph;
 use crate::mesh::{Normalization, V3};
 use crate::meshmask::PackedMask;
-use crate::surface::{RawMesh, surface_nets};
+use crate::surface::{RawMesh, marching_tets, surface_nets};
 use eframe::wgpu;
 use std::path::Path;
 use std::sync::atomic::Ordering;
@@ -36,11 +36,13 @@ pub struct Settings {
     pub format: Format,
     /// Parts with less than this fraction of the largest part's surface area are dropped (0 keeps all).
     pub cull: f32,
+    /// Remesh to about this many triangles (adaptive, see remesh.rs) instead of writing the uniform grid mesh.
+    pub remesh: Option<usize>,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { res: 256, format: Format::Obj, cull: 0.01 }
+        Self { res: 256, format: Format::Obj, cull: 0.01, remesh: None }
     }
 }
 
@@ -401,11 +403,16 @@ impl Job<'_> {
 
     /// The displaced surface in the preview's space (before the shape size and normalization are undone).
     pub fn extract(&self, progress: &Progress) -> RawMesh {
+        self.extract_with(progress, false)
+    }
+
+    /// `extract`, by marching tetrahedra when `manifold` (a closed manifold surface, with poor triangles).
+    fn extract_with(&self, progress: &Progress, manifold: bool) -> RawMesh {
         let grid = self.grid();
         let [nx, ny, nz] = grid.dims;
         let band = self.reach + 3.0 * grid.h;
         let mut slab: (usize, Vec<f32>) = (usize::MAX, Vec::new());
-        let mut mesh = surface_nets(nx, ny, nz, |k| {
+        let mut layer = |k: usize| {
             if slab.0 == usize::MAX || k < slab.0 || k >= slab.0 + SLAB {
                 let count = SLAB.min(nz - k);
                 slab = (k, self.ev.layers(&grid, self.d, band, k, count));
@@ -413,20 +420,66 @@ impl Job<'_> {
             progress.store((k * 900 / nz) as u32, Ordering::Relaxed);
             let at = (k - slab.0) * nx * ny;
             slab.1[at..at + nx * ny].to_vec()
-        });
+        };
+        let mut mesh = if manifold { marching_tets(nx, ny, nz, &mut layer) } else { surface_nets(nx, ny, nz, &mut layer) };
         for p in &mut mesh.positions {
             *p = [grid.min[0] + p[0] * grid.h, grid.min[1] + p[1] * grid.h, grid.min[2] + p[2] * grid.h];
         }
         mesh
     }
 
+    /// This job with another extraction resolution.
+    fn with_res(&self, res: u32) -> Job<'_> {
+        Job { ev: self.ev, d: self.d, lo: self.lo, hi: self.hi, reach: self.reach, norm: self.norm, settings: Settings { res, ..self.settings.clone() } }
+    }
+
+    /// The displaced surface remeshed to about `target` triangles, in the preview's space: a coarse uniform
+    /// extraction (fine enough to keep the shape's topology), then adaptive remeshing onto the exact field.
+    pub fn remeshed(&self, target: usize, progress: &Progress) -> RawMesh {
+        let start_res = ((target as f32 / 8.0).sqrt() * 1.5).clamp(64.0, 192.0) as u32;
+        let coarse = self.with_res(start_res);
+        let mut mesh = coarse.extract_with(progress, true);
+        mesh.remove_small_parts(self.settings.cull);
+        if std::env::var_os("NOISER_REMESH_DEBUG").is_some() {
+            eprintln!("start mesh:
+{}", crate::meshquality::report(&mesh));
+        }
+        let grid = coarse.grid();
+        let diagonal = (0..3).map(|a| (grid.dims[a] as f32 * grid.h).powi(2)).sum::<f32>().sqrt();
+        let params = crate::remesh::Params::new(target, diagonal);
+        let eps = 0.5 * params.min_edge;
+        let d = self.d;
+        // The field averaged over a seven point stencil of the requested radius (distance and gradient alike).
+        let mut field = |pts: &[V3], radii: &[f32]| -> Vec<[f32; 4]> {
+            if radii.iter().all(|&r| r <= 0.0) {
+                return self.ev.points(d, pts, eps);
+            }
+            let mut stencil = Vec::with_capacity(pts.len() * 7);
+            for (p, &r) in pts.iter().zip(radii) {
+                stencil.push(*p);
+                for axis in 0..3 {
+                    for sign in [-1.0, 1.0] {
+                        let mut q = *p;
+                        q[axis] += sign * r;
+                        stencil.push(q);
+                    }
+                }
+            }
+            self.ev.points(d, &stencil, eps).chunks(7).map(|c| std::array::from_fn(|i| c.iter().map(|s| s[i]).sum::<f32>() / 7.0)).collect()
+        };
+        crate::remesh::remesh(mesh, &mut field, &params, &|round, rounds| progress.store(900 + (round * 100 / rounds.max(1)) as u32, Ordering::Relaxed))
+    }
+
     /// Extracts the surface, drops small parts, puts it back in the mesh's own units and writes it.
     pub fn run(&self, path: &Path, progress: &Progress) -> Result<String, String> {
-        let mut mesh = self.extract(progress);
+        let mut mesh = match self.settings.remesh {
+            Some(target) => self.remeshed(target, progress),
+            None => self.extract(progress),
+        };
         if mesh.triangles.is_empty() {
             return Err("the displaced surface is empty (is the mesh outside the exported region?)".into());
         }
-        let removed = mesh.remove_small_parts(self.settings.cull);
+        let removed = if self.settings.remesh.is_some() { 0 } else { mesh.remove_small_parts(self.settings.cull) };
         for p in &mut mesh.positions {
             *p = self.norm.to_object(p.map(|v| v / self.d.prim_size));
         }

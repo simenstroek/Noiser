@@ -111,6 +111,96 @@ pub fn surface_nets(nx: usize, ny: usize, nz: usize, mut layer: impl FnMut(usize
     mesh
 }
 
+/// The same input as `surface_nets`, but by marching tetrahedra: every cube is cut into six tetrahedra around
+/// its main diagonal (the same way in every cube, so neighbours agree on each shared face), and each
+/// tetrahedron the surface crosses gives one or two triangles. The result is always a closed manifold surface,
+/// which surface nets are not (a few edges end up with four faces), at the price of about twice the triangles
+/// and poor triangle shapes: it is meant as the start of a remesher, not as output. Normals are left zero.
+pub fn marching_tets(nx: usize, ny: usize, nz: usize, mut layer: impl FnMut(usize) -> Vec<f32>) -> RawMesh {
+    let mut mesh = RawMesh::default();
+    if nx < 2 || ny < 2 || nz < 2 {
+        return mesh;
+    }
+    // Corner bits: x = 1, y = 2, z = 4. Each tetrahedron is a path from corner 0 to corner 7.
+    const TETS: [[usize; 4]; 6] = [[0, 1, 3, 7], [0, 1, 5, 7], [0, 2, 3, 7], [0, 2, 6, 7], [0, 4, 5, 7], [0, 4, 6, 7]];
+    let mut vertex: std::collections::HashMap<(u32, u32), u32> = std::collections::HashMap::new();
+    let mut s0 = layer(0);
+    for k in 0..nz - 1 {
+        let s1 = layer(k + 1);
+        for j in 0..ny - 1 {
+            for i in 0..nx - 1 {
+                let corner = |c: usize| (i + (c & 1), j + ((c >> 1) & 1), k + ((c >> 2) & 1));
+                let value = |c: usize| {
+                    let (x, y, z) = corner(c);
+                    (if z == k { &s0 } else { &s1 })[y * nx + x]
+                };
+                let v: [f32; 8] = std::array::from_fn(value);
+                let inside = v.iter().filter(|x| **x < 0.0).count();
+                if inside == 0 || inside == 8 {
+                    continue;
+                }
+                for tet in TETS {
+                    let ins: Vec<usize> = tet.iter().copied().filter(|&c| v[c] < 0.0).collect();
+                    if ins.is_empty() || ins.len() == 4 {
+                        continue;
+                    }
+                    let outs: Vec<usize> = tet.iter().copied().filter(|&c| v[c] >= 0.0).collect();
+                    let point = |c: usize| {
+                        let (x, y, z) = corner(c);
+                        [x as f32, y as f32, z as f32]
+                    };
+                    let index = |c: usize| {
+                        let (x, y, z) = corner(c);
+                        ((z * ny + y) * nx + x) as u32
+                    };
+                    // The surface vertex on the tetrahedron edge between an inside and an outside corner.
+                    let mut cross = |a: usize, b: usize| -> u32 {
+                        let key = (index(a).min(index(b)), index(a).max(index(b)));
+                        *vertex.entry(key).or_insert_with(|| {
+                            let t = v[a] / (v[a] - v[b]);
+                            let (pa, pb) = (point(a), point(b));
+                            mesh.positions.push([0, 1, 2].map(|d| pa[d] + (pb[d] - pa[d]) * t));
+                            mesh.normals.push([0.0; 3]);
+                            mesh.positions.len() as u32 - 1
+                        })
+                    };
+                    let mut tris: Vec<[u32; 3]> = Vec::with_capacity(2);
+                    if ins.len() == 1 || outs.len() == 1 {
+                        let (lone, others) = if ins.len() == 1 { (ins[0], &outs) } else { (outs[0], &ins) };
+                        tris.push([cross(lone, others[0]), cross(lone, others[1]), cross(lone, others[2])]);
+                    } else {
+                        // Two inside, two outside: the four crossing edges form a quad.
+                        let (a, b, c, d) = (cross(ins[0], outs[0]), cross(ins[0], outs[1]), cross(ins[1], outs[1]), cross(ins[1], outs[0]));
+                        tris.push([a, b, c]);
+                        tris.push([a, c, d]);
+                    }
+                    // Wind each triangle to face away from the inside corners.
+                    let mean = |cs: &[usize]| {
+                        let mut m = [0.0f32; 3];
+                        for &c in cs {
+                            let p = point(c);
+                            for d in 0..3 {
+                                m[d] += p[d] / cs.len() as f32;
+                            }
+                        }
+                        m
+                    };
+                    let (c_in, c_out) = (mean(&ins), mean(&outs));
+                    for t in tris {
+                        let (p0, p1, p2) = (mesh.positions[t[0] as usize], mesh.positions[t[1] as usize], mesh.positions[t[2] as usize]);
+                        let (e1, e2) = ([p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2]], [p2[0] - p0[0], p2[1] - p0[1], p2[2] - p0[2]]);
+                        let n = [e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2], e1[0] * e2[1] - e1[1] * e2[0]];
+                        let toward_outside = (0..3).map(|d| n[d] * (c_out[d] - c_in[d])).sum::<f32>();
+                        mesh.triangles.push(if toward_outside >= 0.0 { t } else { [t[0], t[2], t[1]] });
+                    }
+                }
+            }
+        }
+        s0 = s1;
+    }
+    mesh
+}
+
 fn area(a: V3, b: V3, c: V3) -> f32 {
     let (u, v) = ([b[0] - a[0], b[1] - a[1], b[2] - a[2]], [c[0] - a[0], c[1] - a[1], c[2] - a[2]]);
     let w = [u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]];
@@ -339,5 +429,36 @@ mod tests {
         let header = String::from_utf8_lossy(&bytes[..header_end]).to_string();
         assert!(header.contains(&format!("element vertex {}", m.positions.len())) && header.contains(&format!("element face {}", m.triangles.len())));
         assert_eq!(bytes.len() - header_end, m.positions.len() * 24 + m.triangles.len() * 13);
+    }
+
+    #[test]
+    fn marching_tets_give_a_closed_outward_manifold_even_where_surface_nets_do_not() {
+        let n = 24;
+        let extent = 1.25f32;
+        let h = 2.0 * extent / (n - 1) as f32;
+        // Two spheres that nearly touch: the sort of field where a cell's corner signs are ambiguous.
+        let field = move |p: V3| {
+            let a = ((p[0] - 0.62).powi(2) + p[1] * p[1] + p[2] * p[2]).sqrt() - 0.6;
+            let b = ((p[0] + 0.62).powi(2) + p[1] * p[1] + p[2] * p[2]).sqrt() - 0.6;
+            a.min(b)
+        };
+        let m = marching_tets(n, n, n, |k| (0..n * n).map(|ij| field([-extent + (ij % n) as f32 * h, -extent + (ij / n) as f32 * h, -extent + k as f32 * h])).collect());
+        let mut edges: HashMap<(u32, u32), (u32, u32)> = HashMap::new();
+        for t in &m.triangles {
+            for i in 0..3 {
+                let (a, b) = (t[i], t[(i + 1) % 3]);
+                let e = edges.entry((a.min(b), a.max(b))).or_default();
+                if a < b { e.0 += 1 } else { e.1 += 1 }
+            }
+        }
+        assert!(!m.triangles.is_empty() && edges.values().all(|&c| c == (1, 1)), "every edge must be used once each way");
+        // Outward winding: the signed volume of two spheres of radius 0.6 is positive and about 2 * 4/3 pi r^3.
+        let mut volume = 0.0;
+        for t in &m.triangles {
+            let [a, b, c] = t.map(|i| m.positions[i as usize]);
+            volume += (a[0] * (b[1] * c[2] - b[2] * c[1]) - a[1] * (b[0] * c[2] - b[2] * c[0]) + a[2] * (b[0] * c[1] - b[1] * c[0])) / 6.0;
+        }
+        let exact = 2.0 * 4.0 / 3.0 * std::f32::consts::PI * 0.6f32.powi(3) / (h * h * h);
+        assert!((volume - exact).abs() < 0.1 * exact, "volume {volume} against {exact} (in voxels)");
     }
 }

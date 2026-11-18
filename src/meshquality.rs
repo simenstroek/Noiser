@@ -22,6 +22,8 @@ pub struct Report {
     /// Angle between the normals of neighbouring triangles, in degrees: 95th percentile and maximum.
     pub p95_normal_deviation: f32,
     pub max_normal_deviation: f32,
+    /// Edges whose two triangles are nearly folded flat onto each other (normals more than 150 degrees apart).
+    pub fold_edges: usize,
     /// Edges used by one triangle, and by more than two.
     pub boundary_edges: usize,
     pub non_manifold_edges: usize,
@@ -29,6 +31,8 @@ pub struct Report {
     /// Distance from the true surface (set by `with_surface_error`), in the mesh's units.
     pub mean_error: Option<f32>,
     pub max_error: Option<f32>,
+    /// Triangles whose normal points against the field's gradient at their centre (inside out), if measured.
+    pub inverted: Option<usize>,
 }
 
 impl Report {
@@ -42,12 +46,15 @@ impl fmt::Display for Report {
         writeln!(f, "{} triangles, {} vertices, {} part(s){}", self.triangles, self.vertices, self.components, if self.watertight() { ", watertight" } else { "" })?;
         writeln!(f, "triangle angle: smallest {:.1}°, median of smallest {:.1}°, {:.1}% under 20°", self.min_angle, self.median_min_angle, 100.0 * self.thin_fraction)?;
         writeln!(f, "triangle quality (1 = equilateral): mean {:.2}, worst {:.2}", self.mean_quality, self.worst_quality)?;
-        write!(f, "neighbour normal deviation: 95th percentile {:.1}°, max {:.1}°", self.p95_normal_deviation, self.max_normal_deviation)?;
+        write!(f, "neighbour normal deviation: 95th percentile {:.1}°, max {:.1}°, {} folded edge(s)", self.p95_normal_deviation, self.max_normal_deviation, self.fold_edges)?;
         if self.boundary_edges + self.non_manifold_edges > 0 {
             write!(f, "\nopen edges {}, non-manifold edges {}", self.boundary_edges, self.non_manifold_edges)?;
         }
         if let (Some(mean), Some(max)) = (self.mean_error, self.max_error) {
             write!(f, "\ndistance from the true surface: mean {mean:.5}, max {max:.5}")?;
+        }
+        if let Some(n) = self.inverted {
+            write!(f, "\n{n} triangle(s) face against the field")?;
         }
         Ok(())
     }
@@ -140,6 +147,7 @@ pub fn report(mesh: &RawMesh) -> Report {
     }
     r.components = (0..r.triangles as u32).filter(|&i| root(&mut parent, i) == i).count();
     r.max_normal_deviation = deviations.iter().cloned().fold(0.0, f32::max);
+    r.fold_edges = deviations.iter().filter(|a| **a > 150.0).count();
     r.p95_normal_deviation = quantile(&mut deviations, 0.95);
     r
 }
@@ -155,7 +163,18 @@ impl Report {
             let p = t.map(|i| mesh.positions[i as usize]);
             [0, 1, 2].map(|a| (p[0][a] + p[1][a] + p[2][a]) / 3.0)
         }));
-        let errors: Vec<f32> = sample(&points).iter().map(|s| s[0].abs() / len([s[1], s[2], s[3]]).max(1e-6)).collect();
+        let samples = sample(&points);
+        let errors: Vec<f32> = samples.iter().map(|s| s[0].abs() / len([s[1], s[2], s[3]]).max(1e-6)).collect();
+        self.inverted = Some(
+            mesh.triangles
+                .iter()
+                .zip(&samples[mesh.positions.len()..])
+                .filter(|(t, s)| {
+                    let p = t.map(|i| mesh.positions[i as usize]);
+                    dot(cross(sub(p[1], p[0]), sub(p[2], p[0])), [s[1], s[2], s[3]]) < 0.0
+                })
+                .count(),
+        );
         if !errors.is_empty() {
             self.mean_error = Some(errors.iter().sum::<f32>() / errors.len() as f32);
             self.max_error = Some(errors.iter().cloned().fold(0.0, f32::max));
