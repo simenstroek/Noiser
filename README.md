@@ -61,7 +61,7 @@ tiling 3D texture for the preview, and the nodes it covers get a green outline. 
   can check itself. The format is specified in [`docs/noiser-format.md`](docs/noiser-format.md). A Blender
   extension that builds Geometry Nodes groups from it is in [`blender/`](blender).
 
-**Crash recovery.** Rolling backups; after a crash you are offered the last one on the next start.
+**Crash recovery.** Rolling backups; after a crash you are offered the last one on the next start. A panic is also written to `crash.log` in Noiser's data folder (`%APPDATA%\Noiser\data` on Windows); please attach it to bug reports.
 
 **Meshes.** Import a low-resolution OBJ, PLY or STL (File menu, drag and drop, or `noiser.exe --mesh file.obj`) and it appears as the
 *Mesh* shape in the 3D view, shaped live by your graph. *Export displaced mesh* then writes a high-resolution
