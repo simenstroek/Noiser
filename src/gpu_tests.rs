@@ -652,6 +652,39 @@ fn graphs_the_analysis_accepts_really_tile() {
     eprintln!("{checked} of {rounds} random graphs were expected to tile and did");
 }
 
+/// The value range the analysis promises is never exceeded by the shader (the preview skips space by it).
+#[test]
+fn the_density_range_analysis_is_sound() {
+    let Some(gpu) = gpu() else { return eprintln!("no GPU adapter; skipping") };
+    let mut state = 0x0F0F_1357_2468_ACE1u64;
+    let mut rnd = move |n: usize| {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        (state % n as u64) as usize
+    };
+    let rounds: usize = std::env::var("NOISER_FUZZ_ROUNDS").ok().and_then(|v| v.parse().ok()).unwrap_or(40);
+    let pts = points(400, 5);
+    let mut checked = 0;
+    for round in 0..rounds {
+        let g = codegen::random_graph(&mut rnd);
+        let (lo, hi) = g.density_range();
+        if !lo.is_finite() && !hi.is_finite() {
+            continue;
+        }
+        let v = eval(&gpu, &g, &pts);
+        let eps = 1e-3 * (1.0 + lo.abs().max(hi.abs()).min(1e6));
+        for (p, x) in pts.iter().zip(&v) {
+            if x.is_finite() {
+                assert!(*x >= lo - eps && *x <= hi + eps, "round {round}: value {x} at {p:?} is outside the promised range {lo}..{hi}
+{}", g.to_json());
+            }
+        }
+        checked += 1;
+    }
+    eprintln!("{checked} of {rounds} random graphs had a finite range and kept to it");
+}
+
 #[test]
 fn separate_and_combine_move_components_around() {
     let Some(gpu) = gpu() else { return eprintln!("no GPU adapter; skipping") };
