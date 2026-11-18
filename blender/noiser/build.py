@@ -1,7 +1,7 @@
 """Builds a node group from a `.noiser` file (docs/noiser-format.md) out of stock Blender nodes.
 
 Geometry Nodes only: the pcg3d hash needs Integer Math and Bit Math, and Blender has no Bit Math
-node in shader trees. Version 1 supports position, value, math (all functions; some only on floats), remap, mix, separate, combine and
+node in shader trees. Version 1 supports position, value, math (all functions; some only on floats), remap, mix, separate, combine, grid and
 Perlin noise; other ops raise Unsupported, and the fallback for those (and for shaders) is Noiser's VDB or slice-grid export.
 """
 
@@ -338,6 +338,22 @@ def build(data, name, tree_type=GN):
         elif kind == "combine":
             fl = lambda x: out[x["node"]] if isinstance(x, dict) else float(x)
             v = b.combine(fl(op["x"]), fl(op["y"]), fl(op["z"]))
+        elif kind == "grid":
+            # The format's formula, node by node: f = fract(q n); d = (f - 0.5) / n (centre) or min(f, 1 - f) / n
+            # (corner); the result is |d| / (0.5 |1 / n|) * 2 - 1.
+            q = gin.outputs["Position"] if op["position"] is None else out[op["position"]]
+            nx, ny, nz = [float(c) for c in op["counts"]]
+            f = b.vmath("FRACTION", b.vmath("MULTIPLY", q, (nx, ny, nz)))
+            if op["reference"] == "corner":
+                d = b.vmath("MINIMUM", f, b.vmath("SUBTRACT", (1.0, 1.0, 1.0), f))
+            else:
+                d = b.vmath("SUBTRACT", f, (0.5, 0.5, 0.5))
+            d = b.vmath("DIVIDE", d, (nx, ny, nz))
+            length = b.vmath("LENGTH", d, out=1)
+            inv = (1 / nx, 1 / ny, 1 / nz)
+            scale = 2.0 / (0.5 * (inv[0] ** 2 + inv[1] ** 2 + inv[2] ** 2) ** 0.5)
+            v = b.math("MULTIPLY_ADD", length, scale)
+            v.node.inputs[2].default_value = -1.0
         elif kind == "noise":
             q = gin.outputs["Position"] if op["position"] is None else out[op["position"]]
             v = noise(b, op, q)
