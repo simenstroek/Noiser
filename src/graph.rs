@@ -642,7 +642,7 @@ pub enum NodeKind {
     OutMesh(crate::meshgraph::OutParams),
     /// Mesh graph: writes an image.
     OutImage(crate::meshgraph::OutParams),
-    /// Mesh graph: the UVs of a mesh (input 2, a Load Mesh's mesh output) carried onto another (input 1).
+    /// Mesh graph: the UVs of a mesh (input 2, a Load Mesh's mesh output) carried onto another (input 1), with the interior of each island relaxed (borders stay put) so the coarser mesh is less stretched.
     TransferUv,
     /// Mesh graph: an image split into its red, green, blue and alpha channels (four grey images).
     ImageSplit,

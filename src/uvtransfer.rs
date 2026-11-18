@@ -175,6 +175,10 @@ fn islands(mesh: &Mesh) -> Vec<u32> {
 
 /// The UVs of `source` (per triangle corner, V up) carried onto `target`; both in the same space.
 pub fn transfer(target: &RawMesh, source: &Mesh) -> Result<(UvMesh, Stats), String> {
+    transfer_with(target, source, 30)
+}
+
+pub fn transfer_with(target: &RawMesh, source: &Mesh, relax_iterations: usize) -> Result<(UvMesh, Stats), String> {
     if source.uvs.len() != source.triangles.len() || source.uvs.is_empty() {
         return Err("the source mesh has no UVs (an OBJ with vt lines, or a glTF with TEXCOORD_0, is needed)".into());
     }
@@ -217,7 +221,69 @@ pub fn transfer(target: &RawMesh, source: &Mesh) -> Result<(UvMesh, Stats), Stri
         out.triangles.push(corner);
     }
     stats.islands = seen.len();
+    relax(&mut out, relax_iterations);
     Ok((out, stats))
+}
+
+/// Smooths the interior UVs of every island towards the cotangent-weighted average of their neighbours, keeping island
+/// borders (and so the seams) where they are. A move that would turn a triangle over is skipped.
+pub fn relax(uv: &mut UvMesh, iterations: usize) {
+    let n = uv.positions.len();
+    let mut edge_count: HashMap<(u32, u32), u32> = HashMap::new();
+    for t in &uv.triangles {
+        for k in 0..3 {
+            let (a, b) = (t[k], t[(k + 1) % 3]);
+            *edge_count.entry((a.min(b), a.max(b))).or_default() += 1;
+        }
+    }
+    let mut pinned = vec![false; n];
+    for (&(a, b), &c) in &edge_count {
+        if c != 2 {
+            pinned[a as usize] = true;
+            pinned[b as usize] = true;
+        }
+    }
+    // Per vertex: (neighbour, cotangent weight) and the incident triangles.
+    let mut nbr: Vec<Vec<(u32, f32)>> = vec![Vec::new(); n];
+    let mut inc: Vec<Vec<u32>> = vec![Vec::new(); n];
+    for (f, t) in uv.triangles.iter().enumerate() {
+        for k in 0..3 {
+            let (i, a, b) = (t[k] as usize, t[(k + 1) % 3] as usize, t[(k + 2) % 3] as usize);
+            inc[i].push(f as u32);
+            // The angle at i is opposite edge a-b; its cotangent weighs that edge's two ends towards each other.
+            let (u, v) = (sub(uv.positions[a], uv.positions[i]), sub(uv.positions[b], uv.positions[i]));
+            let cr = [u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]];
+            let w = (dot(u, v) / dot(cr, cr).sqrt().max(1e-20)).clamp(0.0, 5.0) * 0.5;
+            nbr[a].push((b as u32, w));
+            nbr[b].push((a as u32, w));
+        }
+    }
+    let area = |uv: &UvMesh, f: u32| {
+        let t = uv.triangles[f as usize].map(|i| uv.uvs[i as usize]);
+        (t[1][0] - t[0][0]) * (t[2][1] - t[0][1]) - (t[2][0] - t[0][0]) * (t[1][1] - t[0][1])
+    };
+    let sign: Vec<f32> = (0..uv.triangles.len() as u32).map(|f| area(uv, f).signum()).collect();
+    for _ in 0..iterations {
+        for i in 0..n {
+            if pinned[i] || nbr[i].is_empty() {
+                continue;
+            }
+            let (mut sum, mut wsum) = ([0.0f32; 2], 0.0f32);
+            for &(j, w) in &nbr[i] {
+                sum[0] += w * uv.uvs[j as usize][0];
+                sum[1] += w * uv.uvs[j as usize][1];
+                wsum += w;
+            }
+            if wsum <= 1e-9 {
+                continue;
+            }
+            let old = uv.uvs[i];
+            uv.uvs[i] = [old[0] + 0.5 * (sum[0] / wsum - old[0]), old[1] + 0.5 * (sum[1] / wsum - old[1])];
+            if inc[i].iter().any(|&f| area(uv, f) * sign[f as usize] <= 0.0) {
+                uv.uvs[i] = old;
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -253,6 +319,13 @@ mod tests {
         assert!(r.overlap_fraction < 0.02 && r.coverage > 0.3, "{r}");
         assert!(uv.positions.len() > sphere(2).positions.len(), "seam vertices were duplicated");
         assert!(uv.uvs.iter().all(|t| (-0.01..=1.01).contains(&t[0]) && (-0.01..=1.01).contains(&t[1])));
+        // Relaxing the interior must not hurt: no new flips and no more stretch.
+        let (plain, _) = transfer_with(&sphere(2), &source, 0).unwrap();
+        let p = uv_report(&plain, 512);
+        eprintln!("unrelaxed:
+{p}");
+        assert!(r.flipped <= p.flipped && r.mean_stretch <= p.mean_stretch + 1e-4, "relaxed {r}
+plain {p}");
         // A source without UVs is refused.
         let bare = Mesh { uvs: Vec::new(), ..source };
         assert!(transfer(&sphere(2), &bare).is_err());
