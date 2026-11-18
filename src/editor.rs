@@ -990,6 +990,89 @@ mod tests {
         assert!(g.edges.iter().any(|e| e.from == 0 && matches!(g.nodes[&e.to].kind, NodeKind::Math { .. })));
     }
 
+    fn editor_harness(graph: Graph) -> egui_kittest::Harness<'static, (Editor, Graph)> {
+        egui_kittest::Harness::builder().with_size(Vec2::new(900.0, 600.0)).with_step_dt(1.0 / 60.0).build_ui_state(
+            |ui, (ed, g): &mut (Editor, Graph)| {
+                egui_extras::install_image_loaders(ui.ctx());
+                ed.debug_origin = ui.available_rect_before_wrap().min;
+                ed.show(ui, g, &BTreeMap::new());
+            },
+            (Editor::default(), graph),
+        )
+    }
+
+    fn drag(h: &mut egui_kittest::Harness<'static, (Editor, Graph)>, from: Pos2, to: Pos2) {
+        h.hover_at(from);
+        h.run();
+        h.event(egui::Event::PointerButton { pos: from, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() });
+        h.run();
+        for i in 1..=8 {
+            h.hover_at(from + (to - from) * i as f32 / 8.0);
+            h.run();
+        }
+        h.event(egui::Event::PointerButton { pos: to, button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default() });
+        h.run();
+    }
+
+    /// Dragging a frame title bar moves the frame and the nodes inside it, not the nodes outside.
+    #[test]
+    fn dragging_a_frame_moves_the_nodes_inside_it() {
+        let mut g = Graph::default();
+        let inside = g.add(NodeKind::Float(1.0), [100.0, 100.0]);
+        let outside = g.add(NodeKind::Float(2.0), [600.0, 400.0]);
+        g.frames.push(crate::graph::Frame { title: "Group".into(), pos: [60.0, 60.0], size: [300.0, 250.0] });
+        let mut h = editor_harness(g);
+        h.run();
+        let bar = { let ed = &h.state().0; ed.to_screen(ed.debug_origin, [200.0, 70.0]) };
+        drag(&mut h, bar, bar + Vec2::new(120.0, 40.0));
+        let g = &h.state().1;
+        assert!((g.frames[0].pos[0] - 180.0).abs() < 2.0 && (g.frames[0].pos[1] - 100.0).abs() < 2.0, "frame at {:?}", g.frames[0].pos);
+        assert!((g.nodes[&inside].pos[0] - 220.0).abs() < 2.0, "the node inside moved with it: {:?}", g.nodes[&inside].pos);
+        assert_eq!(g.nodes[&outside].pos, [600.0, 400.0]);
+    }
+
+    /// A lone node dropped on a wire is spliced into it: source to the node, node to the old target.
+    #[test]
+    fn dropping_a_node_on_a_wire_splices_it_in() {
+        let mut g = Graph::default();
+        let src = g.add(NodeKind::Float(1.0), [100.0, 200.0]);
+        let out = g.add(NodeKind::OutDensity, [500.0, 200.0]);
+        g.connect(src, out, 0);
+        let math = g.add(NodeKind::Math { op: MathOp::Add, a: 0.0, b: 0.0, c: 0.5 }, [150.0, 400.0]);
+        let mut h = editor_harness(g);
+        h.run();
+        let header = { let ed = &h.state().0; ed.to_screen(ed.debug_origin, [150.0 + NODE_W * 0.4, 400.0 + HEADER_H * 0.5]) };
+        // Drop it so the node sits over the middle of the wire.
+        let target = { let ed = &h.state().0; ed.to_screen(ed.debug_origin, [330.0, 215.0]) };
+        drag(&mut h, header, target);
+        let g = &h.state().1;
+        assert!(g.edges.iter().any(|e| e.from == src && e.to == math && e.port == 0), "source feeds the node: {:?}", g.edges);
+        assert!(g.edges.iter().any(|e| e.from == math && e.to == out), "the node feeds the output: {:?}", g.edges);
+        assert!(!g.edges.iter().any(|e| e.from == src && e.to == out), "the direct wire is gone");
+    }
+
+    /// Right-clicking a frame title bar opens the frame menu (rename, delete), and deleting removes only the frame.
+    #[test]
+    fn the_frame_menu_deletes_a_frame() {
+        use egui_kittest::kittest::Queryable;
+        let mut g = Graph::default();
+        g.add(NodeKind::Float(1.0), [100.0, 100.0]);
+        g.frames.push(crate::graph::Frame { title: "Group".into(), pos: [60.0, 60.0], size: [300.0, 250.0] });
+        let mut h = editor_harness(g);
+        h.run();
+        let bar = { let ed = &h.state().0; ed.to_screen(ed.debug_origin, [200.0, 70.0]) };
+        h.hover_at(bar);
+        h.run();
+        h.event(egui::Event::PointerButton { pos: bar, button: egui::PointerButton::Secondary, pressed: true, modifiers: Default::default() });
+        h.run();
+        h.event(egui::Event::PointerButton { pos: bar, button: egui::PointerButton::Secondary, pressed: false, modifiers: Default::default() });
+        h.run();
+        h.get_by_label("Delete frame").click();
+        h.run();
+        assert!(h.state().1.frames.is_empty());
+        assert_eq!(h.state().1.nodes.len(), 1);
+    }
+
     /// Ctrl+C then Ctrl+V over the canvas copies the selection to the clipboard text and pastes it back;
     /// M mutes it, F frames it, and a node dropped on a wire is spliced in.
     #[test]

@@ -1388,7 +1388,7 @@ impl eframe::App for App {
 value {v:.4} at ({tx:.3}, {ty:.3})");
                                 }
                             }
-                            ui.ctx().request_repaint();
+                            ui.ctx().request_repaint_after(std::time::Duration::from_millis(50)); // enough for a readout
                         }
                     }
                     let font = egui::FontId::monospace(12.0);
@@ -1774,5 +1774,35 @@ mod curve_ui_tests {
         h.run();
         assert!(h.get_all_by_label("x").count() >= 3, "a remove button per point");
         h.get_by_label("Cubic");
+    }
+
+    #[test]
+    fn dragging_a_point_in_the_curve_plot_moves_it() {
+        let kind = NodeKind::Curve { points: vec![[0.0, 0.0], [0.5, 1.0], [1.0, 0.2]], mode: graph::CurveMode::Linear };
+        let mut h = Harness::builder().with_size(egui::Vec2::new(400.0, 600.0)).with_step_dt(1.0 / 60.0).build_ui_state(|ui, kind: &mut NodeKind| node_props(ui, kind), kind);
+        h.run();
+        let label = h.get_by_label("Interpolation").rect();
+        let (left, top) = (label.left(), label.bottom() + ui_spacing());
+        // The plot is 300 x 150 and shows x in -0.08..1.08, y in -0.08..1.08 for these points.
+        let at = |x: f32, y: f32| egui::Pos2::new(left + (x + 0.08) / 1.16 * 300.0, top + 150.0 - (y + 0.08) / 1.16 * 150.0);
+        let (from, to) = (at(0.5, 1.0), at(0.4, 0.5));
+        h.hover_at(from);
+        h.run();
+        h.event(egui::Event::PointerButton { pos: from, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() });
+        h.run();
+        for i in 1..=8 {
+            h.hover_at(from + (to - from) * i as f32 / 8.0);
+            h.run();
+        }
+        h.event(egui::Event::PointerButton { pos: to, button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default() });
+        h.run();
+        let NodeKind::Curve { points, .. } = h.state() else { panic!() };
+        assert!((points[1][0] - 0.4).abs() < 0.08 && (points[1][1] - 0.5).abs() < 0.12, "the middle point is now {:?}", points[1]);
+        assert_eq!(points[0], [0.0, 0.0], "the others stay");
+    }
+
+    /// The vertical gap egui puts between widgets by default.
+    fn ui_spacing() -> f32 {
+        egui::Style::default().spacing.item_spacing.y
     }
 }
