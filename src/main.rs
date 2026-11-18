@@ -672,7 +672,9 @@ impl App {
                 None => return,
             },
         };
-        match std::fs::write(&path, self.graph.to_json()) {
+        let text = self.graph.to_json();
+        keep_previous_version(&path, &text);
+        match std::fs::write(&path, text) {
             Ok(()) => {
                 self.saved = self.graph.clone();
                 self.status = format!("Saved {}", path.display());
@@ -1030,6 +1032,31 @@ fn node_props(ui: &mut egui::Ui, kind: &mut NodeKind, names: &[String]) {
         }
         NodeKind::OutDensity | NodeKind::OutNormal => {}
         NodeKind::LoadMesh(_) | NodeKind::NoiseGraph(_) | NodeKind::Remesh { .. } | NodeKind::AutoUv(_) | NodeKind::Bake(_) | NodeKind::OutMesh(_) | NodeKind::OutImage(_) | NodeKind::ImageSplit | NodeKind::ImageCombine | NodeKind::ImageLevels { .. } => _ = meshgraph_ui::props(ui, kind),
+    }
+}
+
+/// Before a graph file is overwritten with different content, its old content goes to `<name>.history/` with a
+/// timestamp, so a noise graph a mesh graph uses can always be taken back (graphs are small; the newest 100 are kept).
+fn keep_previous_version(path: &std::path::Path, new_text: &str) {
+    let Ok(old) = std::fs::read_to_string(path) else { return };
+    if old == new_text {
+        return;
+    }
+    let (Some(name), Some(dir)) = (path.file_name(), path.parent()) else { return };
+    let history = dir.join(format!("{}.history", name.to_string_lossy()));
+    if std::fs::create_dir_all(&history).is_err() {
+        return;
+    }
+    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+    let ext = path.extension().map_or("noisegraph".to_string(), |e| e.to_string_lossy().into_owned());
+    let _ = std::fs::write(history.join(format!("{stamp}.{ext}")), old);
+    // Old versions beyond the newest 100 go.
+    if let Ok(entries) = std::fs::read_dir(&history) {
+        let mut files: Vec<_> = entries.filter_map(|e| e.ok().map(|e| e.path())).collect();
+        files.sort();
+        for old in files.iter().take(files.len().saturating_sub(100)) {
+            let _ = std::fs::remove_file(old);
+        }
     }
 }
 

@@ -110,7 +110,9 @@ impl MeshWorkspace {
                 }
             }
         }
-        std::fs::write(&path, self.graph.to_json()).map_err(|e| format!("{}: {e}", path.display()))?;
+        let text = self.graph.to_json();
+        crate::keep_previous_version(&path, &text);
+        std::fs::write(&path, text).map_err(|e| format!("{}: {e}", path.display()))?;
         self.saved = self.graph.clone();
         self.path = Some(path);
         Ok(())
@@ -142,6 +144,20 @@ impl MeshWorkspace {
 }
 
 impl crate::App {
+    /// Saves the mesh graph. A noise graph that is open and changed in the Noise graph tab, and that this mesh graph
+    /// uses, is saved first, so the copy embedded in the mesh graph is the one just edited.
+    fn save_mesh_graph(&mut self, ask: bool) {
+        let uses_open = self.path.as_ref().is_some_and(|open| {
+            self.mesh_ws.graph.nodes.values().any(|n| matches!(&n.kind, NodeKind::NoiseGraph(p) if std::path::Path::new(&p.file) == open.as_path()))
+        });
+        if uses_open && self.graph != self.saved {
+            self.save(false);
+        }
+        if let Err(e) = self.mesh_ws.save(ask) {
+            self.status = e;
+        }
+    }
+
     /// The whole Mesh graph tab (the menu bar above it is the app's).
     pub(crate) fn mesh_workspace_ui(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
@@ -172,9 +188,7 @@ impl crate::App {
         // Ctrl+S and Ctrl+O act on this graph here.
         let (ctrl_s, ctrl_shift) = ui.input(|i| (i.modifiers.command && i.key_pressed(egui::Key::S), i.modifiers.shift));
         if ctrl_s {
-            if let Err(e) = self.mesh_ws.save(ctrl_shift) {
-                self.status = e;
-            }
+            self.save_mesh_graph(ctrl_shift);
         }
         egui::Panel::right("mesh props").default_size(340.0).show(ui, |ui| {
             ui.horizontal_wrapped(|ui| {
@@ -186,15 +200,11 @@ impl crate::App {
                         self.status = e;
                     }
                 }
-                if ui.button("Save").on_hover_text("Ctrl+S. Also refreshes the embedded copy of every noise graph.").clicked() {
-                    if let Err(e) = self.mesh_ws.save(false) {
-                        self.status = e;
-                    }
+                if ui.button("Save").on_hover_text("Ctrl+S. Saves the mesh graph, refreshes the embedded copy of every noise graph it uses, and saves the open noise graph too if it is one of them.").clicked() {
+                    self.save_mesh_graph(false);
                 }
                 if ui.button("Save as…").clicked() {
-                    if let Err(e) = self.mesh_ws.save(true) {
-                        self.status = e;
-                    }
+                    self.save_mesh_graph(true);
                 }
             });
             ui.weak(match (&self.mesh_ws.path, self.mesh_ws.dirty()) {
@@ -259,5 +269,25 @@ impl crate::App {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn saving_over_a_graph_file_keeps_the_old_version_in_a_history_folder() {
+        let dir = std::env::temp_dir().join("noiser-history-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("rock.noisegraph");
+        crate::keep_previous_version(&file, "first"); // nothing to keep yet
+        assert!(!dir.join("rock.noisegraph.history").exists());
+        std::fs::write(&file, "first").unwrap();
+        crate::keep_previous_version(&file, "first"); // unchanged: nothing to keep
+        assert!(!dir.join("rock.noisegraph.history").exists());
+        crate::keep_previous_version(&file, "second");
+        let kept: Vec<_> = std::fs::read_dir(dir.join("rock.noisegraph.history")).unwrap().filter_map(|e| e.ok()).collect();
+        assert_eq!(kept.len(), 1);
+        assert_eq!(std::fs::read_to_string(kept[0].path()).unwrap(), "first");
     }
 }
