@@ -823,6 +823,11 @@ impl Graph {
 
     /// Connects `from` into input `port` of `to`, replacing any existing link on that input.
     pub fn connect(&mut self, from: NodeId, to: NodeId, port: usize) {
+        // Meshes and images only go to inputs of their own kind.
+        let special = |id: &NodeId| matches!(self.nodes.get(id).map(|n| &n.kind), Some(NodeKind::Remesh { .. } | NodeKind::AutoUv(_) | NodeKind::Bake(_) | NodeKind::OutMesh(_) | NodeKind::OutImage(_)));
+        if (special(&from) || special(&to)) && self.nodes.contains_key(&from) && self.nodes.contains_key(&to) && !self.output_type(from).connects_to(self.input_type(to, port)) {
+            return;
+        }
         self.edges.retain(|e| !(e.to == to && e.port == port));
         self.edges.push(Edge { from, from_port: 0, to, port });
     }
@@ -1276,18 +1281,39 @@ impl Graph {
 pub enum PortType {
     Float,
     Vector,
+    /// Mesh graph: a triangle mesh (not convertible to or from the others).
+    Mesh,
+    /// Mesh graph: a baked image.
+    Image,
+}
+
+impl PortType {
+    /// Whether a wire of this type may end in an input of type `to`: floats and vectors convert, meshes and images
+    /// only connect to their own kind.
+    pub fn connects_to(self, to: PortType) -> bool {
+        let value = |t: PortType| matches!(t, PortType::Float | PortType::Vector);
+        (value(self) && value(to)) || self == to
+    }
 }
 
 impl Graph {
     /// The type of a node's output. A Math node favors vectors: it outputs one when either input is
     /// a vector (the other is repeated), and only a float when it has to (dot product).
     pub fn output_type(&self, id: NodeId) -> PortType {
+        match &self.nodes[&id].kind {
+            NodeKind::Remesh { .. } | NodeKind::AutoUv(_) => return PortType::Mesh,
+            NodeKind::Bake(_) => return PortType::Image,
+            _ => {}
+        }
         if self.yields_vector(id) { PortType::Vector } else { PortType::Float }
     }
 
     /// The type an input expects; for Math it follows what is connected.
     pub fn input_type(&self, id: NodeId, port: usize) -> PortType {
         match &self.nodes[&id].kind {
+            NodeKind::AutoUv(_) | NodeKind::OutMesh(_) => PortType::Mesh,
+            NodeKind::Bake(_) if port == 0 => PortType::Mesh,
+            NodeKind::OutImage(_) => PortType::Image,
             NodeKind::Noise(_) | NodeKind::Grid { .. } | NodeKind::Pattern(_) | NodeKind::OutNormal | NodeKind::Separate => PortType::Vector,
             NodeKind::Math { op, .. } if port < 2 => {
                 let vector = *op == MathOp::Dot || (0..2).any(|p| self.input(id, p).is_some_and(|s| self.yields_vector(s)));
@@ -1926,5 +1952,30 @@ mod frame_tests {
         }
         assert_eq!(g.input(add, 0), None);
         assert!(!Graph::from_json(&g.to_json()).unwrap().nodes.is_empty());
+    }
+
+    #[test]
+    fn meshes_and_images_only_connect_to_their_own_kind() {
+        let mut g = Graph::default();
+        let mesh = g.add(NodeKind::LoadMesh(Default::default()), [0.0; 2]);
+        let remesh = g.add(NodeKind::Remesh { triangles: 1000 }, [0.0; 2]);
+        let uv = g.add(NodeKind::AutoUv(Default::default()), [0.0; 2]);
+        let bake = g.add(NodeKind::Bake(Default::default()), [0.0; 2]);
+        let out_mesh = g.add(NodeKind::OutMesh(Default::default()), [0.0; 2]);
+        let out_image = g.add(NodeKind::OutImage(Default::default()), [0.0; 2]);
+        let add = g.add(NodeKind::Math { op: MathOp::Add, a: 0.0, b: 0.0, c: 0.5 }, [0.0; 2]);
+        g.connect(mesh, remesh, 0); // a field into Remesh: fine
+        g.connect(remesh, uv, 0);
+        g.connect(uv, bake, 0);
+        g.connect(mesh, bake, 1);
+        g.connect(uv, out_mesh, 0);
+        g.connect_from(bake, 0, out_image, 0);
+        assert_eq!(g.edges.len(), 6);
+        // A mesh cannot feed a field input, a field cannot feed a mesh input, an image cannot feed a mesh output.
+        g.connect(remesh, add, 0);
+        g.connect(add, uv, 0);
+        g.connect(bake, out_mesh, 0);
+        assert_eq!(g.edges.len(), 6, "{:?}", g.edges);
+        assert_eq!((g.output_type(remesh), g.output_type(bake), g.input_type(bake, 1)), (PortType::Mesh, PortType::Image, PortType::Float));
     }
 }

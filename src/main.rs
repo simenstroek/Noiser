@@ -20,6 +20,7 @@ mod uvgen;
 mod bake;
 mod meshgraph;
 mod meshgraph_ui;
+mod meshworkspace;
 mod meshformats;
 mod meshsdf;
 mod shaderexport;
@@ -139,6 +140,9 @@ struct App {
     rs: egui_wgpu::RenderState,
     graph: Graph,
     editor: editor::Editor,
+    /// Which graph the window shows, and the mesh graph's state.
+    workspace: meshworkspace::Workspace,
+    mesh_ws: meshworkspace::MeshWorkspace,
     /// File the graph was last opened from / saved to.
     path: Option<std::path::PathBuf>,
     status: String,
@@ -298,6 +302,8 @@ impl App {
             saved: graph.clone(),
             graph,
             editor,
+            workspace: Default::default(),
+            mesh_ws: Default::default(),
             path,
             status,
             built: None,
@@ -345,6 +351,11 @@ impl App {
         };
         if let Some(p) = mesh_arg {
             app.start_mesh_load(p);
+        }
+        // The mesh graph as it was left (an unsaved one included), with the file it belongs to.
+        if let Some(g) = cc.storage.and_then(|s| s.get_string(MESH_GRAPH_KEY)).and_then(|s| Graph::from_json(&s).ok()) {
+            let path = cc.storage.and_then(|s| s.get_string(MESH_GRAPH_PATH_KEY)).filter(|p| !p.is_empty()).map(std::path::PathBuf::from);
+            app.mesh_ws.restore(g, path);
         }
         app.mesh_mask.terms = mask_terms;
         app.pv.show_mask = show_mask;
@@ -1023,6 +1034,8 @@ fn node_props(ui: &mut egui::Ui, kind: &mut NodeKind, names: &[String]) {
 }
 
 const PICKS_KEY: &str = "node_picks";
+const MESH_GRAPH_KEY: &str = "mesh_graph";
+const MESH_GRAPH_PATH_KEY: &str = "mesh_graph_path";
 const SHORTCUTS: [(&str, &str); 18] = [
     ("Ctrl+S / Ctrl+Shift+S / Ctrl+O / Ctrl+N", "Save / Save As / Open / New"),
     ("Ctrl+Z", "Undo"),
@@ -1094,6 +1107,8 @@ impl eframe::App for App {
         if let Ok(s) = serde_json::to_string(&self.editor.picks) {
             storage.set_string(PICKS_KEY, s);
         }
+        storage.set_string(MESH_GRAPH_KEY, self.mesh_ws.graph.to_json());
+        storage.set_string(MESH_GRAPH_PATH_KEY, self.mesh_ws.path.as_ref().map_or(String::new(), |p| p.to_string_lossy().into_owned()));
         if let Ok(s) = serde_json::to_string(&self.recent) {
             storage.set_string(RECENT_KEY, s);
         }
@@ -1265,7 +1280,9 @@ impl eframe::App for App {
         }
         // File shortcuts work even with a text field focused (Ctrl+S would otherwise do nothing there).
         let (ctrl_s, ctrl_o, ctrl_shift) = ui.input(|i| (i.modifiers.command && i.key_pressed(egui::Key::S), i.modifiers.command && i.key_pressed(egui::Key::O), i.modifiers.shift));
-        if ctrl_s {
+        if self.workspace == meshworkspace::Workspace::Mesh {
+            // The mesh graph tab handles its own keys.
+        } else if ctrl_s {
             self.save(ctrl_shift);
         } else if ctrl_o {
             self.open();
@@ -1273,7 +1290,7 @@ impl eframe::App for App {
             self.request(Pending::New);
         }
         // Ctrl+Z / Ctrl+Y (or Ctrl+Shift+Z), unless a text field has the keyboard.
-        if !ui.ctx().egui_wants_keyboard_input() {
+        if !ui.ctx().egui_wants_keyboard_input() && self.workspace == meshworkspace::Workspace::Noise {
             let (z, y, shift) = ui.input(|i| (i.modifiers.command && i.key_pressed(egui::Key::Z), i.modifiers.command && i.key_pressed(egui::Key::Y), i.modifiers.shift));
             if y || (z && shift) {
                 self.undo(true);
@@ -1384,9 +1401,17 @@ impl eframe::App for App {
                         ui.close();
                     }
                 });
+                ui.separator();
+                ui.selectable_value(&mut self.workspace, meshworkspace::Workspace::Noise, "Noise graph");
+                ui.selectable_value(&mut self.workspace, meshworkspace::Workspace::Mesh, "Mesh graph");
+                ui.separator();
                 ui.weak(&self.status);
             });
         });
+        if self.workspace == meshworkspace::Workspace::Mesh {
+            self.mesh_workspace_ui(ui);
+            return;
+        }
         // The side panel: viewport settings in tabs on top, the selected node's settings in the bottom half.
         egui::Panel::right("props").default_size(320.0).show(ui, |ui| {
             let half = ui.available_height() * 0.5;

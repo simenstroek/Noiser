@@ -17,6 +17,8 @@ fn type_color(t: PortType) -> Color32 {
     match t {
         PortType::Float => Color32::from_rgb(100, 165, 255),
         PortType::Vector => Color32::from_rgb(255, 205, 70),
+        PortType::Mesh => Color32::from_rgb(240, 150, 70),
+        PortType::Image => Color32::from_rgb(235, 110, 170),
     }
 }
 
@@ -46,6 +48,10 @@ pub struct Editor {
     pan: Vec2,
     zoom: f32,
     pub selected: BTreeSet<NodeId>,
+    /// The mesh graph's editor: its add menus offer the mesh nodes.
+    pub mesh_mode: bool,
+    /// A node was double-clicked this frame (the app opens what it refers to).
+    pub opened: Option<NodeId>,
     /// Snap nodes to a 20-unit grid when a drag ends (a preference).
     pub snap: bool,
     /// Where a Ctrl+right-drag that cuts wires started.
@@ -85,6 +91,8 @@ impl Default for Editor {
             pan: Vec2::new(40.0, 40.0),
             zoom: 1.0,
             selected: BTreeSet::new(),
+            mesh_mode: false,
+            opened: None,
             snap: false,
             cut_start: None,
             cut_armed: false,
@@ -162,6 +170,12 @@ fn input_label(kind: &NodeKind, port: usize) -> &'static str {
         (NodeKind::Normal { .. }, _) => "Field",
         (NodeKind::OutDensity, _) => "Density",
         (NodeKind::OutNormal, _) => "Normal",
+        (NodeKind::LoadMesh(_) | NodeKind::NoiseGraph(_), _) => "Position",
+        (NodeKind::Remesh { .. }, _) => "Field",
+        (NodeKind::AutoUv(_) | NodeKind::OutMesh(_), _) => "Mesh",
+        (NodeKind::Bake(_), 0) => "Mesh",
+        (NodeKind::Bake(_), _) => "Field",
+        (NodeKind::OutImage(_), _) => "Image",
         _ => "",
     }
 }
@@ -172,7 +186,9 @@ fn header_tint(kind: &NodeKind) -> Color32 {
     match kind {
         NodeKind::Noise(_) | NodeKind::Pattern(_) | NodeKind::Grid { .. } => Color32::from_rgb(50, 95, 70),
         NodeKind::Math { .. } | NodeKind::Remap { .. } | NodeKind::Mix { .. } | NodeKind::Curve { .. } | NodeKind::Normal { .. } => Color32::from_rgb(55, 70, 110),
-        NodeKind::OutDensity | NodeKind::OutNormal => Color32::from_rgb(80, 60, 95),
+        NodeKind::OutDensity | NodeKind::OutNormal | NodeKind::OutMesh(_) | NodeKind::OutImage(_) => Color32::from_rgb(80, 60, 95),
+        NodeKind::LoadMesh(_) | NodeKind::NoiseGraph(_) => Color32::from_rgb(50, 95, 70),
+        NodeKind::Remesh { .. } | NodeKind::AutoUv(_) | NodeKind::Bake(_) => Color32::from_rgb(50, 100, 110),
         _ => Color32::from_rgb(78, 78, 84),
     }
 }
@@ -183,8 +199,12 @@ fn node_button(ui: &mut egui::Ui, label: &str, kind: &NodeKind) -> egui::Respons
 }
 
 pub fn has_output(kind: &NodeKind) -> bool {
-    !matches!(kind, NodeKind::OutDensity | NodeKind::OutNormal)
+    !matches!(kind, NodeKind::OutDensity | NodeKind::OutNormal | NodeKind::OutMesh(_) | NodeKind::OutImage(_))
 }
+
+/// Whether the add menus offer the mesh graph's nodes (and leave out the noise graph's outputs) instead of the
+/// noise graph's: set by the editor each frame from `Editor::mesh_mode`.
+static MESH_MODE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// One-line summary shown in the node body for nodes without inputs.
 fn summary(kind: &NodeKind) -> String {
@@ -201,6 +221,24 @@ fn summary(kind: &NodeKind) -> String {
 
 /// Nodes offered by the add menus.
 fn palette() -> Vec<(&'static str, NodeKind)> {
+    let mesh_mode = MESH_MODE.load(std::sync::atomic::Ordering::Relaxed);
+    let mut all = noise_palette();
+    if mesh_mode {
+        all.retain(|(_, k)| !matches!(k, NodeKind::OutDensity | NodeKind::OutNormal));
+        all.extend([
+            ("Load Mesh", NodeKind::LoadMesh(Default::default())),
+            ("Noise Graph", NodeKind::NoiseGraph(Default::default())),
+            ("Remesh", NodeKind::Remesh { triangles: 20_000 }),
+            ("Auto UVs", NodeKind::AutoUv(Default::default())),
+            ("Bake", NodeKind::Bake(Default::default())),
+            ("Mesh Output", NodeKind::OutMesh(Default::default())),
+            ("Image Output", NodeKind::OutImage(Default::default())),
+        ]);
+    }
+    all
+}
+
+fn noise_palette() -> Vec<(&'static str, NodeKind)> {
     let noises = NoiseKind::ALL.map(|kind| (kind.name(), NodeKind::Noise(NoiseParams { kind, ..Default::default() })));
     noises
         .into_iter()
@@ -346,12 +384,12 @@ impl Editor {
         let n_in = kind.input_count();
         let top_left = self.to_screen(origin, pos);
         let top = body_top(kind);
-        let n_out = if matches!(kind, NodeKind::Separate) { 3 } else { 1 };
+        let n_out = kind.output_count().max(1);
         let h = (top + ROW_H * n_in.max(n_out) as f32 + 6.0) * z;
         let rect = Rect::from_min_size(top_left, Vec2::new(NODE_W * z, h));
         let inputs = (0..n_in).map(|i| Pos2::new(rect.left(), rect.top() + (top + ROW_H * (i as f32 + 0.5)) * z)).collect();
-        let outputs: Vec<Pos2> = if matches!(kind, NodeKind::Separate) {
-            (0..3).map(|k| Pos2::new(rect.right(), rect.top() + (top + ROW_H * (k as f32 + 0.5)) * z)).collect()
+        let outputs: Vec<Pos2> = if kind.output_count() > 1 {
+            (0..kind.output_count()).map(|k| Pos2::new(rect.right(), rect.top() + (top + ROW_H * (k as f32 + 0.5)) * z)).collect()
         } else if has_output(kind) {
             vec![Pos2::new(rect.right(), rect.top() + HEADER_H * 0.5 * z)]
         } else {
@@ -361,6 +399,7 @@ impl Editor {
     }
 
     pub fn show(&mut self, ui: &mut egui::Ui, graph: &mut Graph, tiling: &BTreeMap<NodeId, Tiling>) {
+        MESH_MODE.store(self.mesh_mode, std::sync::atomic::Ordering::Relaxed);
         // Most edits land after the nodes were drawn this frame, and egui only redraws on input,
         // so redraw once more whenever the graph, selection, preview or menu changed.
         let before = (graph.clone(), self.selected.clone(), self.preview, self.pin_menu.is_some());
@@ -486,6 +525,9 @@ impl Editor {
         for (&id, node) in &graph.nodes {
             let l = &layouts[&id];
             let resp = ui.interact(l.rect, ui.scope_id().with(("node", id)), Sense::click_and_drag());
+            if resp.double_clicked() {
+                self.opened = Some(id);
+            }
             if resp.clicked() || resp.drag_started() {
                 let additive = ui.input(|i| i.modifiers.shift || i.modifiers.command);
                 if additive && resp.clicked() {
@@ -640,13 +682,17 @@ impl Editor {
                     });
                 }
             }
-            let split = matches!(node.kind, NodeKind::Separate);
+            let split = node.kind.output_count() > 1;
             for (k, p) in l.outputs.iter().copied().enumerate() {
-                // Each output of a Separate node is a float; every other node has one output of its own type.
-                let color = if split { type_color(PortType::Float) } else { type_color(graph.output_type(id)) };
+                // Each output of a Separate node is a float, of a Bake node an image; every other node has one output of its own type.
+                let color = if matches!(node.kind, NodeKind::Separate) { type_color(PortType::Float) } else { type_color(graph.output_type(id)) };
                 painter.circle(p, PORT_R * z, color, Stroke::new(1.0, Color32::from_gray(220)));
                 if split {
-                    painter.text(p - Vec2::new(10.0 * z, 0.0), egui::Align2::RIGHT_CENTER, ["X", "Y", "Z"][k], small.clone(), Color32::from_gray(210));
+                    let name = match &node.kind {
+                        NodeKind::Bake(b) => b.channels.get(k).map_or("", |c| c.name()),
+                        _ => ["X", "Y", "Z"][k.min(2)],
+                    };
+                    painter.text(p - Vec2::new(10.0 * z, 0.0), egui::Align2::RIGHT_CENTER, name, small.clone(), Color32::from_gray(210));
                 }
                 let pr = ui.interact(Rect::from_center_size(p, Vec2::splat(PORT_R * 3.0 * z)), ui.scope_id().with(("out", id, k)), Sense::drag());
                 if pr.drag_started() {
