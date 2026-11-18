@@ -31,6 +31,8 @@ pub struct Report {
     /// Distance from the true surface (set by `with_surface_error`), in the mesh's units.
     pub mean_error: Option<f32>,
     pub max_error: Option<f32>,
+    /// The 99th percentile of the distance (the maximum is often one stray vertex).
+    pub p99_error: Option<f32>,
     /// Triangles whose normal points against the field's gradient at their centre (inside out), if measured.
     pub inverted: Option<usize>,
 }
@@ -51,7 +53,7 @@ impl fmt::Display for Report {
             write!(f, "\nopen edges {}, non-manifold edges {}", self.boundary_edges, self.non_manifold_edges)?;
         }
         if let (Some(mean), Some(max)) = (self.mean_error, self.max_error) {
-            write!(f, "\ndistance from the true surface: mean {mean:.5}, max {max:.5}")?;
+            write!(f, "\ndistance from the true surface: mean {mean:.5}, 99th percentile {:.5}, max {max:.5}", self.p99_error.unwrap_or(max))?;
         }
         if let Some(n) = self.inverted {
             write!(f, "\n{n} triangle(s) face against the field")?;
@@ -211,6 +213,7 @@ impl Report {
         if !errors.is_empty() {
             self.mean_error = Some(errors.iter().sum::<f32>() / errors.len() as f32);
             self.max_error = Some(errors.iter().cloned().fold(0.0, f32::max));
+            self.p99_error = Some(quantile(&mut errors.clone(), 0.99));
         }
         self
     }
