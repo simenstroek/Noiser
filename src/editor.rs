@@ -168,6 +168,11 @@ fn header_tint(kind: &NodeKind) -> Color32 {
     }
 }
 
+/// A menu entry filled with the colour of the node's header.
+fn node_button(ui: &mut egui::Ui, label: &str, kind: &NodeKind) -> egui::Response {
+    ui.add(egui::Button::new(egui::RichText::new(label).color(Color32::WHITE)).fill(header_tint(kind)))
+}
+
 pub fn has_output(kind: &NodeKind) -> bool {
     !matches!(kind, NodeKind::OutDensity | NodeKind::OutNormal)
 }
@@ -411,7 +416,7 @@ impl Editor {
             }
             let enter = search.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
             for (i, (label, kind)) in palette_matching(&self.menu_search).into_iter().enumerate() {
-                if ui.button(label).clicked() || (enter && i == 0) {
+                if node_button(ui, label, &kind).clicked() || (enter && i == 0) {
                     let id = graph.add(kind, [self.menu_at.x, self.menu_at.y]);
                     self.selected = BTreeSet::from([id]);
                     ui.close();
@@ -828,7 +833,7 @@ impl Editor {
             egui::Frame::menu(ui.style()).show(ui, |ui| {
                 ui.weak("New node");
                 for (label, kind) in wire_choices(menu.wire, &self.picks) {
-                    if ui.button(label).clicked() {
+                    if node_button(ui, label, &kind).clicked() {
                         picked = Some((label, kind));
                     }
                 }
