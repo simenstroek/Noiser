@@ -259,9 +259,12 @@ impl App {
             crate::row(ui, &mut s.res, d.res, |ui, v| {
                 ui.add(egui::DragValue::new(v).range(32..=1024).speed(4.0).suffix(" samples")).on_hover_text("Samples along the longest side of the exported region. The mesh gets as much detail as this allows.");
             });
+            if s.uv.is_some() {
+                s.format = Format::Obj;
+            }
             crate::row(ui, &mut s.format, d.format, |ui, v| {
                 ui.selectable_value(v, Format::Obj, "OBJ");
-                ui.selectable_value(v, Format::Ply, "PLY (binary)").on_hover_text("Much smaller and faster to write than OBJ for big meshes.");
+                ui.add_enabled_ui(s.uv.is_none(), |ui| ui.selectable_value(v, Format::Ply, "PLY (binary)").on_hover_text("Much smaller and faster to write than OBJ for big meshes. Not available with UVs."));
             });
             crate::row(ui, &mut s.cull, d.cull, |ui, v| {
                 ui.add(egui::Slider::new(v, 0.0..=0.25).fixed_decimals(3).text("remove small parts"))
@@ -276,6 +279,48 @@ impl App {
                     ui.add(egui::DragValue::new(n).range(200..=2_000_000).speed(100.0).suffix(" triangles"));
                 }
             });
+            crate::row(ui, &mut s.uv, d.uv, |ui, v| {
+                let mut on = v.is_some() || s.bake.is_some();
+                if ui.checkbox(&mut on, "UVs").on_hover_text("Unwrap the mesh into an atlas of islands packed in the 0 to 1 square, with no overlaps. Written with OBJ meshes. Baking maps needs UVs.").changed() {
+                    *v = on.then(Default::default);
+                    if !on {
+                        s.bake = None;
+                    }
+                }
+            });
+            if let Some(uv) = &mut s.uv {
+                ui.indent("uv settings", |ui| {
+                    ui.add(egui::DragValue::new(&mut uv.resolution).range(256..=8192).speed(32.0).suffix(" px atlas")).on_hover_text("The texture size the atlas is packed for; it sets how much padding between islands is worth in texels.");
+                    ui.add(egui::DragValue::new(&mut uv.smoothing).range(0..=60).speed(0.5).prefix("chart smoothing ")).on_hover_text("Rounds of smoothing applied to the surface the islands are cut from. A bumpy surface otherwise breaks into hundreds of tiny islands; the UVs still map the true surface.");
+                    ui.checkbox(&mut uv.absorb_tiny, "fold tiny islands into neighbours");
+                });
+            }
+            crate::row(ui, &mut s.bake, d.bake, |ui, v| {
+                let mut on = v.is_some();
+                if ui.checkbox(&mut on, "bake maps").on_hover_text("Sample normal, occlusion and other maps straight from the displaced surface onto the new mesh's UVs: no high-poly mesh is needed. PNG files are written next to the mesh.").changed() {
+                    *v = on.then(Default::default);
+                }
+            });
+            if s.bake.is_some() && s.uv.is_none() {
+                s.uv = Some(Default::default());
+            }
+            if let Some(b) = &mut s.bake {
+                ui.indent("bake settings", |ui| {
+                    egui::ComboBox::from_id_salt("bake size").selected_text(format!("{0} × {0}", b.size)).show_ui(ui, |ui| {
+                        for n in [512u32, 1024, 2048, 4096] {
+                            ui.selectable_value(&mut b.size, n, format!("{n} × {n}"));
+                        }
+                    });
+                    ui.add(egui::DragValue::new(&mut b.padding).range(0..=64).prefix("padding ").suffix(" px"));
+                    for c in crate::bake::Channel::ALL {
+                        let mut on = b.channels.contains(&c);
+                        if ui.checkbox(&mut on, c.name()).changed() {
+                            if on { b.channels.push(c) } else { b.channels.retain(|x| *x != c) }
+                        }
+                    }
+                    ui.checkbox(&mut b.green_up, "normal map green up (Blender, Unity, glTF)").on_hover_text("Off: green down, as Unreal expects.");
+                });
+            }
             let grid = meshexport::Grid::plan(lo, hi, displace, reach, s.res);
             let [nx, ny, nz] = grid.dims;
             if s.remesh.is_some() {

@@ -12,7 +12,7 @@ use std::path::PathBuf;
 pub const USAGE: &str = "usage: noiser --headless GRAPH.noisegraph --batch-out DIR (--batch-file F.obj ... | --batch-dir SRC)
   [--export-noiser OUT.noiser] [--export-shader OUT.hlsl|glsl|wgsl] [--manifest meshes.json] [--param name=value ...] [--set 3.scale=8 ...] [--amount 0.25] [--amount-var 0.2] [--tile 1.0] [--size 1.0] [--seed 0] [--seed-mode same|increment|random]
   [--res 256] [--grid-res 128] [--format obj|ply] [--cull 0.01] [--mask KIND ...]
-  [--combine union|intersect|smooth-union|smooth-intersect] [--combine-smooth 0.1] [--object-units] [--report] [--remesh TRIANGLES] [--uv] [--uv-res 2048] [--uv-cost 4] [--uv-smooth 20] [--uv-merge 3]
+  [--combine union|intersect|smooth-union|smooth-intersect] [--combine-smooth 0.1] [--object-units] [--report] [--remesh TRIANGLES] [--uv] [--uv-res 2048] [--uv-cost 4] [--uv-smooth 10] [--uv-merge 3]
   [--bake normal,occlusion,curvature,depth,thickness,position|all] [--bake-size 2048] [--bake-pad 8] [--green-up]";
 
 /// One mesh of a `--manifest`: the file and any settings that differ from the command line for that mesh.
