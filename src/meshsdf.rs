@@ -381,7 +381,7 @@ impl MeshQuery {
 }
 
 /// How the separate parts of a mesh (pieces that share no vertices) are put together.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum CombineMode {
     /// Solid where any part is (a single winding-number query over the whole mesh).
     #[default]
@@ -420,7 +420,8 @@ impl CombineMode {
 }
 
 /// The part-combining settings: the mode and, for the smooth ones, the blend width in normalized mesh units.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct Combine {
     pub mode: CombineMode,
     pub smooth: f32,

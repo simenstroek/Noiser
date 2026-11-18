@@ -126,6 +126,13 @@ pub fn title(kind: &NodeKind) -> String {
         NodeKind::Noise(n) => n.kind.name().into(),
         NodeKind::OutDensity => "Density Output".into(),
         NodeKind::OutNormal => "Normal Output".into(),
+        NodeKind::LoadMesh(p) => std::path::Path::new(&p.path).file_stem().map_or("Load Mesh".into(), |s| s.to_string_lossy().into_owned()),
+        NodeKind::NoiseGraph(p) => std::path::Path::new(&p.file).file_stem().map_or("Noise Graph".into(), |s| s.to_string_lossy().into_owned()),
+        NodeKind::Remesh { .. } => "Remesh".into(),
+        NodeKind::AutoUv(_) => "Auto UVs".into(),
+        NodeKind::Bake(_) => "Bake".into(),
+        NodeKind::OutMesh(p) => format!("Mesh: {}", p.name),
+        NodeKind::OutImage(p) => format!("Image: {}", p.name),
     }
 }
 

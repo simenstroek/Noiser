@@ -1677,6 +1677,38 @@ fn remesh_a_real_mesh() {
     eprintln!("remeshed to {tris} in {:?}:\n{}", t.elapsed(), crate::meshquality::report(&out).with_surface_error(&out, &mut field));
 }
 
+// ---- mesh graph ---------------------------------------------------------------------
+
+/// Two noise graphs used as nodes of a mesh graph, added together, compile into one shader and give what each does
+/// alone: amplitude times its own density at the position times its frequency.
+#[test]
+fn a_mesh_graph_of_two_noise_graphs_matches_the_standalone_graphs() {
+    let Some(gpu) = gpu() else { return eprintln!("no GPU adapter; skipping") };
+    let a = noise_graph(NoiseParams { kind: NoiseKind::Perlin, scale: 3.0, octaves: 2, seed: Some(1), ..Default::default() });
+    let b = noise_graph(NoiseParams { kind: NoiseKind::Simplex, scale: 5.0, octaves: 3, seed: Some(9), ..Default::default() });
+    let mut g = Graph::default();
+    let n1 = g.add(NodeKind::NoiseGraph(crate::meshgraph::NoiseGraphParams { embedded: a.to_json(), frequency: 2.0, amplitude: 0.5, ..Default::default() }), [0.0; 2]);
+    let n2 = g.add(NodeKind::NoiseGraph(crate::meshgraph::NoiseGraphParams { embedded: b.to_json(), frequency: 3.0, amplitude: 0.25, ..Default::default() }), [0.0; 2]);
+    let add = g.add(NodeKind::Math { op: crate::graph::MathOp::Add, a: 0.0, b: 0.0, c: 0.5 }, [0.0; 2]);
+    let out = g.add(NodeKind::OutDensity, [0.0; 2]);
+    g.connect(n1, add, 0);
+    g.connect(n2, add, 1);
+    g.connect(add, out, 0);
+    let lowered = crate::meshgraph::lowered_mesh(&g).unwrap();
+    assert!(lowered.nodes.len() > g.nodes.len(), "the noise graphs were copied in");
+    let pts = points(64, 5);
+    let combined = crate::export::Evaluator::new(&gpu.device, &gpu.queue, &lowered, 0).unwrap().eval_points(&pts);
+    let ea = crate::export::Evaluator::new(&gpu.device, &gpu.queue, &a, 0).unwrap().eval_points(&pts.iter().map(|p| p.map(|v| v * 2.0)).collect::<Vec<_>>());
+    let eb = crate::export::Evaluator::new(&gpu.device, &gpu.queue, &b, 0).unwrap().eval_points(&pts.iter().map(|p| p.map(|v| v * 3.0)).collect::<Vec<_>>());
+    for i in 0..pts.len() {
+        near(combined[i], 0.5 * ea[i] + 0.25 * eb[i], &format!("point {i}"));
+    }
+    // A graph that cannot be read is an error that names the file.
+    let mut bad = Graph::default();
+    bad.add(NodeKind::NoiseGraph(crate::meshgraph::NoiseGraphParams { file: "no/such/file.noisegraph".into(), ..Default::default() }), [0.0; 2]);
+    assert!(crate::meshgraph::lowered_mesh(&bad).unwrap_err().contains("no/such/file"));
+}
+
 // ---- batch pipeline ---------------------------------------------------------------
 
 mod batch_tests {

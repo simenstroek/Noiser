@@ -38,6 +38,8 @@ pub const EVAL_BINDINGS: &str = "struct U { seed: u32 }
 pub struct Compiled {
     pub wgsl: String,
     pub params: Vec<f32>,
+    /// The loaded-mesh nodes (mesh graph), in the order of the `mesh_dist_0`, `mesh_dist_1`... functions they call.
+    pub mesh_slots: Vec<NodeId>,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -74,6 +76,7 @@ struct Gen<'a> {
     building: BTreeSet<NodeId>,
     /// Noise kinds used, each getting its own fBm function.
     kinds: BTreeSet<NoiseKind>,
+    mesh_slots: Vec<NodeId>,
     out: String,
 }
 
@@ -155,7 +158,8 @@ pub fn compile_with(g: &Graph, caches: &BTreeMap<NodeId, u32>) -> Result<Compile
         }
     }
 
-    let mut cg = Gen { g, caches, slots, types: BTreeMap::new(), done: BTreeSet::new(), building: BTreeSet::new(), kinds: BTreeSet::new(), out: String::new() };
+    let mesh_slots: Vec<NodeId> = g.nodes.iter().filter(|(_, n)| matches!(n.kind, NodeKind::LoadMesh(_))).map(|(id, _)| *id).collect();
+    let mut cg = Gen { g, caches, slots, types: BTreeMap::new(), done: BTreeSet::new(), building: BTreeSet::new(), kinds: BTreeSet::new(), mesh_slots: mesh_slots.clone(), out: String::new() };
     let density = g.find(|k| *k == NodeKind::OutDensity).and_then(|o| g.input_from(o, 0));
     let normal = g.find(|k| *k == NodeKind::OutNormal).and_then(|o| g.input_from(o, 0));
     // One output of a Separate node is a component of the vector its function returns.
@@ -199,7 +203,7 @@ pub fn compile_with(g: &Graph, caches: &BTreeMap<NodeId, u32>) -> Result<Compile
     }
     wgsl += &cg.kinds.iter().map(|&k| fbm_function(k, general_worley)).collect::<String>();
     wgsl += &cg.out;
-    Ok(Compiled { wgsl, params })
+    Ok(Compiled { wgsl, params, mesh_slots })
 }
 
 /// Body of a function returning the normalized tetrahedral gradient (IQ) of the float field `sample(q)`.
@@ -316,6 +320,13 @@ impl Gen<'_> {
             NodeKind::Float(_) => (Ty::F, format!("P[{s}]")),
             NodeKind::Vec3(_) => (Ty::V, format!("vec3f(P[{s}], P[{}], P[{}])", s + 1, s + 2)),
             NodeKind::Position => (Ty::V, "p".into()),
+            // A loaded mesh: the shader prelude of the evaluator defines mesh_dist_N(p) for each slot.
+            NodeKind::LoadMesh(_) => {
+                let slot = self.mesh_slots.iter().position(|&n| n == id).unwrap_or(0);
+                (Ty::F, format!("mesh_dist_{slot}({})", self.operand(id, 0, Ty::V, "p")))
+            }
+            NodeKind::NoiseGraph(_) => return Err("a Noise Graph node must be lowered first (meshgraph::lowered_mesh)".into()),
+            NodeKind::Remesh { .. } | NodeKind::AutoUv(_) | NodeKind::Bake(_) | NodeKind::OutMesh(_) | NodeKind::OutImage(_) => return Err("this node does not produce a field".into()),
             // Never reached (readers look through them), but the match must be complete.
             NodeKind::NamedReroute { .. } | NodeKind::NamedRerouteUse { .. } => (Ty::F, "0.0".into()),
             NodeKind::Reroute => {

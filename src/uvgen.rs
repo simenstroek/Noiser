@@ -40,7 +40,8 @@ impl UvMesh {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct UvParams {
 
     /// The texture the atlas is packed for, in texels (square).

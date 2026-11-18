@@ -623,9 +623,33 @@ pub enum NodeKind {
     Noise(NoiseParams),
     OutDensity,
     OutNormal,
+    /// Mesh graph: a mesh file as a field (its signed distance). Input: position (defaults to world position).
+    LoadMesh(crate::meshgraph::LoadMeshParams),
+    /// Mesh graph: a noise graph as a node. Input: position (defaults to world position).
+    NoiseGraph(crate::meshgraph::NoiseGraphParams),
+    /// Mesh graph: the surface of a field as an adaptive triangle mesh of about `triangles` triangles.
+    Remesh { triangles: u32 },
+    /// Mesh graph: UVs for a mesh.
+    AutoUv(crate::uvgen::UvParams),
+    /// Mesh graph: maps baked onto a mesh (input 0) from a field (input 1); one image output per map.
+    Bake(crate::bake::Settings),
+    /// Mesh graph: writes a mesh.
+    OutMesh(crate::meshgraph::OutParams),
+    /// Mesh graph: writes an image.
+    OutImage(crate::meshgraph::OutParams),
 }
 
 impl NodeKind {
+    /// How many output pins the node has (a Bake node has one image per map, Separate XYZ three).
+    pub fn output_count(&self) -> usize {
+        match self {
+            NodeKind::Separate => 3,
+            NodeKind::Bake(s) => s.channels.len().max(1),
+            NodeKind::OutDensity | NodeKind::OutNormal | NodeKind::OutMesh(_) | NodeKind::OutImage(_) => 0,
+            _ => 1,
+        }
+    }
+
     pub fn input_count(&self) -> usize {
         match self {
             NodeKind::Float(_) | NodeKind::Vec3(_) | NodeKind::Position => 0,
@@ -637,6 +661,8 @@ impl NodeKind {
             NodeKind::Separate => 1,
             NodeKind::Curve { .. } => 1,
             NodeKind::Normal { .. } | NodeKind::Noise(_) | NodeKind::Grid { .. } | NodeKind::Pattern(_) | NodeKind::OutDensity | NodeKind::OutNormal => 1,
+            NodeKind::LoadMesh(_) | NodeKind::NoiseGraph(_) | NodeKind::Remesh { .. } | NodeKind::AutoUv(_) | NodeKind::OutMesh(_) | NodeKind::OutImage(_) => 1,
+            NodeKind::Bake(_) => 2,
         }
     }
 
@@ -1100,6 +1126,8 @@ impl Graph {
         use Tiling::*;
         let t = match &self.nodes[&id].kind {
             NodeKind::Float(_) | NodeKind::Vec3(_) => Const,
+            NodeKind::LoadMesh(_) => Broken("a loaded mesh does not tile".into()),
+            NodeKind::NoiseGraph(_) | NodeKind::Remesh { .. } | NodeKind::AutoUv(_) | NodeKind::Bake(_) | NodeKind::OutMesh(_) | NodeKind::OutImage(_) => Const,
             NodeKind::Position => Coord,
             NodeKind::Reroute | NodeKind::NamedReroute { .. } => input(0, memo, stack).unwrap_or(Const),
             NodeKind::NamedRerouteUse { name } => match self.named_declaration(name).and_then(|d| self.input(d, 0)) {
@@ -1317,7 +1345,7 @@ impl Graph {
         let r = match &self.nodes[&id].kind {
             NodeKind::Float(v) => (*v, *v),
             NodeKind::Vec3(v) => (v.iter().cloned().fold(f32::MAX, f32::min), v.iter().cloned().fold(f32::MIN, f32::max)),
-            NodeKind::Position => UNBOUNDED,
+            NodeKind::Position | NodeKind::LoadMesh(_) | NodeKind::NoiseGraph(_) | NodeKind::Remesh { .. } | NodeKind::AutoUv(_) | NodeKind::Bake(_) | NodeKind::OutMesh(_) | NodeKind::OutImage(_) => UNBOUNDED,
             NodeKind::Separate => match self.input(id, 0) {
                 Some(src) => self.range_of(src, stack),
                 None => (0.0, 0.0),

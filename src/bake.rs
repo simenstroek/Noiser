@@ -13,7 +13,7 @@
 use crate::mesh::V3;
 use crate::uvgen::UvMesh;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Channel {
     /// Tangent-space normal map.
     Normal,
@@ -49,7 +49,8 @@ impl Channel {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct Settings {
     /// Texture size in texels (square).
     pub size: u32,
