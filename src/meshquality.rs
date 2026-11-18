@@ -239,13 +239,15 @@ pub struct UvReport {
     pub max_stretch: f32,
     /// Texel density (UV size per surface size) of the 95th over the 5th percentile triangle: 1 means even.
     pub density_spread: f32,
+    /// Triangles wound the other way in UV space than most of their island (mirrored or folded over).
+    pub flipped: usize,
 }
 
 impl fmt::Display for UvReport {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f, "UVs: {} triangles, {} vertices, {} island(s), {} tiny, {} single-triangle", self.triangles, self.vertices, self.islands, self.tiny_islands, self.single_triangle_islands)?;
         writeln!(f, "coverage {:.1}% of the 0 to 1 square, overlap {:.3}%", 100.0 * self.coverage, 100.0 * self.overlap_fraction)?;
-        write!(f, "stretch (1 = none): mean {:.2}, 95th percentile {:.2}, max {:.2}; texel density spread {:.1}x", self.mean_stretch, self.p95_stretch, self.max_stretch, self.density_spread)
+        write!(f, "stretch (1 = none): mean {:.2}, 95th percentile {:.2}, max {:.2}; texel density spread {:.1}x; {} flipped", self.mean_stretch, self.p95_stretch, self.max_stretch, self.density_spread, self.flipped)
     }
 }
 
@@ -300,6 +302,17 @@ pub fn uv_report(mesh: &crate::uvgen::UvMesh, res: usize) -> UvReport {
         stretch.push((big / small).sqrt().min(1000.0));
         density.push((big * small).sqrt().sqrt());
     }
+    // Winding per island: the sign most of its triangles have; the others are flipped.
+    let mut signs: HashMap<u32, (i64, i64)> = HashMap::new();
+    for (t, tri) in mesh.triangles.iter().enumerate() {
+        let a2 = {
+            let q = uv(tri);
+            (q[1][0] - q[0][0]) * (q[2][1] - q[0][1]) - (q[2][0] - q[0][0]) * (q[1][1] - q[0][1])
+        };
+        let e = signs.entry(island[t]).or_default();
+        if a2 > 0.0 { e.0 += 1 } else if a2 < 0.0 { e.1 += 1 }
+    }
+    r.flipped = signs.values().map(|(p, n)| *p.min(n) as usize).sum();
     r.islands = area.len();
     r.tiny_islands = area.values().filter(|(a, _)| *a < 2e-4).count();
     r.single_triangle_islands = area.values().filter(|(_, c)| *c == 1).count();
