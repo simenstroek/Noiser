@@ -688,6 +688,14 @@ fn row<T: PartialEq>(ui: &mut egui::Ui, value: &mut T, default: T, widget: impl 
     });
 }
 
+/// The output multiplier of a Noise or Pattern node (saves a Multiply node, for example for a warp offset).
+fn amount_row(ui: &mut egui::Ui, amount: &mut f32) {
+    row(ui, amount, 1.0, |ui, v| {
+        ui.add(egui::DragValue::new(v).range(-1000.0..=1000.0).speed(0.005).prefix("amount × "))
+            .on_hover_text("The node's output is multiplied by this: 0.01 gives a small offset for domain warping without a Multiply node.");
+    });
+}
+
 /// The tabs of the side panel.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 enum SideTab {
@@ -917,7 +925,10 @@ fn node_props(ui: &mut egui::Ui, kind: &mut NodeKind, names: &[String]) {
             }
             ui.weak("Drag the points in the plot, double-click to add one, right-click a point to remove it. Before the first point and after the last, the output holds the end value.");
         }
-        NodeKind::Pattern(p) => pattern_props(ui, p),
+        NodeKind::Pattern(p) => {
+            pattern_props(ui, p);
+            amount_row(ui, &mut p.amount);
+        }
         NodeKind::Grid { counts, corners } => {
             row(ui, counts, [8.0; 3], |ui, v| {
                 for (c, label) in v.iter_mut().zip(["X ", "Y ", "Z "]) {
@@ -974,6 +985,7 @@ fn node_props(ui: &mut egui::Ui, kind: &mut NodeKind, names: &[String]) {
                     *seed = None;
                 }
             });
+            amount_row(ui, &mut n.amount);
         }
         NodeKind::Position => _ = ui.label("World position. Feeds noise inputs by default."),
         NodeKind::Reroute => _ = ui.weak("A waypoint on a wire: it passes its input through unchanged."),
@@ -1693,9 +1705,10 @@ fn pattern_props(ui: &mut egui::Ui, p: &mut graph::PatternParams) {
     });
     if p.kind != before {
         // A new kind starts from its own defaults, keeping only the seed override.
-        let seed = p.seed;
+        let (seed, amount) = (p.seed, p.amount);
         *p = graph::PatternParams::for_kind(p.kind);
         p.seed = seed;
+        p.amount = amount;
     }
     let d = graph::PatternParams::for_kind(p.kind);
     match p.kind {

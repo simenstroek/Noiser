@@ -406,6 +406,21 @@ fn noises_stay_in_signed_range() {
     }
 }
 
+#[test]
+fn amount_multiplies_the_output() {
+    let Some(gpu) = gpu() else { return eprintln!("no GPU adapter; skipping") };
+    let pts = points(2000, 5);
+    for kind in [NoiseKind::Perlin, NoiseKind::Worley] {
+        let base = eval(&gpu, &noise_graph(NoiseParams { kind, ..Default::default() }), &pts);
+        let scaled = eval(&gpu, &noise_graph(NoiseParams { kind, amount: 0.01, ..Default::default() }), &pts);
+        for (b, s) in base.iter().zip(&scaled) {
+            assert!((b * 0.01 - s).abs() < 1e-6, "{b} * 0.01 != {s}");
+        }
+    }
+    let g = noise_graph(NoiseParams { amount: 0.01, ..Default::default() });
+    assert!(crate::noiser_file::ops(&g, 1).unwrap().to_string().contains("multiply"));
+}
+
 /// Writes `target/blender/hash.json`: hash01 for a spread of cells and seeds, so
 /// `blender/check_hash.py` can confirm Blender's White Noise node gives the same values.
 #[test]

@@ -22,6 +22,8 @@ fn kind_name(k: NoiseKind) -> &'static str {
 /// The op list for everything upstream of the outputs, in evaluation order (inputs first).
 /// `seed` is the global seed; each noise op carries its resolved seed.
 pub fn ops(g: &Graph, seed: u32) -> Result<Value, String> {
+    let lowered = g.lowered();
+    let g = &lowered;
     // A reference to what feeds an input: the op id, or for one output of a Separate node the id of the
     // single-component `separate` op written for it (1000000 + 3 * node + port).
     let reference = |to: NodeId, port: usize| g.input_from(to, port).map(|(src, fp)| if matches!(g.nodes[&src].kind, NodeKind::Separate) { 1_000_000 + src as u64 * 3 + fp.min(2) as u64 } else { src as u64 });

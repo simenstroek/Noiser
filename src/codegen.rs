@@ -84,6 +84,8 @@ pub fn compile(g: &Graph) -> Result<Compiled, String> {
 /// Like `compile`, but nodes in `caches` read their baked texture (`cache_sample(slot, p)`)
 /// instead of evaluating their upstream graph. Preview only.
 pub fn compile_with(g: &Graph, caches: &BTreeMap<NodeId, u32>) -> Result<Compiled, String> {
+    let lowered = g.lowered();
+    let g = &lowered;
     // Parameter slots, in node-id order.
     let mut slots = BTreeMap::new();
     let mut params = Vec::new();

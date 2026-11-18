@@ -157,6 +157,17 @@ fn input_label(kind: &NodeKind, port: usize) -> &'static str {
     }
 }
 
+/// Header colour by role: generators (noise, patterns, grid) green, math and shaping (math, remap, mix, curve,
+/// normal) blue, plumbing (values, position, vector split/join, reroutes) grey, outputs purple.
+fn header_tint(kind: &NodeKind) -> Color32 {
+    match kind {
+        NodeKind::Noise(_) | NodeKind::Pattern(_) | NodeKind::Grid { .. } => Color32::from_rgb(50, 95, 70),
+        NodeKind::Math { .. } | NodeKind::Remap { .. } | NodeKind::Mix { .. } | NodeKind::Curve { .. } | NodeKind::Normal { .. } => Color32::from_rgb(55, 70, 110),
+        NodeKind::OutDensity | NodeKind::OutNormal => Color32::from_rgb(80, 60, 95),
+        _ => Color32::from_rgb(78, 78, 84),
+    }
+}
+
 pub fn has_output(kind: &NodeKind) -> bool {
     !matches!(kind, NodeKind::OutDensity | NodeKind::OutNormal)
 }
@@ -483,7 +494,7 @@ impl Editor {
             let r = CornerRadius::same((5.0 * z) as u8);
             painter.rect_filled(l.rect, r, Color32::from_gray(48));
             let header = Rect::from_min_size(l.rect.min, Vec2::new(l.rect.width(), HEADER_H * z));
-            let header_color = if node.muted { Color32::from_gray(60) } else if has_output(&node.kind) { Color32::from_rgb(55, 70, 95) } else { Color32::from_rgb(80, 60, 95) };
+            let header_color = if node.muted { Color32::from_gray(60) } else { header_tint(&node.kind) };
             painter.rect_filled(header, CornerRadius { nw: r.nw, ne: r.ne, sw: 0, se: 0 }, header_color);
             let cacheable = matches!(node.kind, NodeKind::Noise(_) | NodeKind::Math { .. } | NodeKind::Remap { .. } | NodeKind::Mix { .. } | NodeKind::Separate | NodeKind::Curve { .. } | NodeKind::Grid { .. } | NodeKind::Pattern(_));
             // Keep the title clear of the header buttons.

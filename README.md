@@ -49,7 +49,8 @@ a node that breaks tiling gets an orange outline and says why in the details pan
   gives a vector.
 - **Separate XYZ** and **Combine XYZ** (take a vector apart, build one; domain warping is Position + a Combine of noises), **Remap** (with optional clamp), **Mix** (blend A into B by a factor), **Curve** (a response curve through up to 16 points; linear, smooth, step or cubic), **Value**, **Position**, **Normal** (gradient of a field).
 - **Outputs**: Density and Normal.
-- Pins and wires are blue for floats and yellow for vectors.
+- Every Noise and Pattern node has an *amount* that multiplies its output (0.01 for a small warp offset, no Multiply node needed).
+- Pins and wires are blue for floats and yellow for vectors. Node headers are green for generators (noise, patterns, grid), blue for math and shaping, grey for plumbing (values, position, separate/combine, reroutes) and purple for outputs.
 
 **Layout.** The side panel has the viewport settings in tabs (3D view, Material, Lighting, Slice, Mesh) above the selected node's settings.
 

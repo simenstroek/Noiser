@@ -280,6 +280,9 @@ pub struct NoiseParams {
     pub distortion: f32,
     /// Overrides the global seed when set.
     pub seed: Option<u32>,
+    /// The output is multiplied by this (see `Graph::lowered`).
+    #[serde(default = "one")]
+    pub amount: f32,
 }
 
 /// Which regular pattern a `Pattern` node makes.
@@ -384,6 +387,8 @@ pub struct PatternParams {
     pub width: f32,
     /// Checker, Stripes: how soft the edges are, 0 (hard) to 1.
     pub softness: f32,
+    /// The output is multiplied by this (see `Graph::lowered`).
+    pub amount: f32,
 }
 
 impl Default for PatternParams {
@@ -413,6 +418,7 @@ impl PatternParams {
             iterations: 3,
             width: 0.5,
             softness: 0.1,
+            amount: 1.0,
         };
         match kind {
             PatternKind::Bricks => base,
@@ -552,6 +558,7 @@ impl Default for NoiseParams {
             roughness: 0.5,
             distortion: 0.0,
             seed: None,
+            amount: 1.0,
         }
     }
 }
@@ -740,6 +747,40 @@ pub struct Frame {
 }
 
 impl Graph {
+    /// The graph with every Noise and Pattern `amount` written out as a Multiply node, so codegen, the
+    /// `.noiser` writer and the other hosts never see it. The Multiply takes the node's id (and so its
+    /// cache, eye preview and readers); the noise itself moves to a new id and takes over the position wire.
+    /// A muted node is left alone: bypassing it ignores the amount too.
+    pub fn lowered(&self) -> Graph {
+        let mut g = self.clone();
+        for (id, n) in &self.nodes {
+            let amount = match &n.kind {
+                NodeKind::Noise(p) => p.amount,
+                NodeKind::Pattern(p) => p.amount,
+                _ => continue,
+            };
+            if amount == 1.0 || n.muted {
+                continue;
+            }
+            let mut inner = n.clone();
+            inner.cache = None;
+            match &mut inner.kind {
+                NodeKind::Noise(p) => p.amount = 1.0,
+                NodeKind::Pattern(p) => p.amount = 1.0,
+                _ => {}
+            }
+            let new = g.nodes.keys().next_back().map_or(0, |k| k + 1);
+            g.nodes.insert(new, inner);
+            for e in g.edges.iter_mut().filter(|e| e.to == *id) {
+                e.to = new;
+            }
+            let m = g.nodes.get_mut(id).unwrap();
+            m.kind = NodeKind::Math { op: MathOp::Multiply, a: 0.0, b: amount, c: default_smooth() };
+            g.connect(new, *id, 0);
+        }
+        g
+    }
+
     pub fn add(&mut self, kind: NodeKind, pos: [f32; 2]) -> NodeId {
         let id = self.nodes.keys().next_back().map_or(0, |k| k + 1);
         self.nodes.insert(id, Node { kind, pos, cache: None, muted: false, label: None });
@@ -1294,7 +1335,7 @@ impl Graph {
             },
             NodeKind::Normal { .. } => (-1.0, 1.0),
             // noise.wgsl keeps every kind within [-1, 1] (Perlin and Simplex are clamped).
-            NodeKind::Noise(n) => if n.normalize { (0.0, 1.0) } else { (-1.0, 1.0) },
+            NodeKind::Noise(n) => scaled(if n.normalize { (0.0, 1.0) } else { (-1.0, 1.0) }, n.amount),
             NodeKind::Math { op, a, b, c } => {
                 let mut operand = |port: usize, default: f32| match self.input(id, port) {
                     Some(src) => self.range_of(src, stack),
@@ -1340,12 +1381,17 @@ impl Graph {
                 let p = curve_points(points);
                 (p.iter().map(|q| q[1]).fold(f32::MAX, f32::min), p.iter().map(|q| q[1]).fold(f32::MIN, f32::max))
             }
-            NodeKind::Grid { .. } | NodeKind::Pattern(_) => (-1.0, 1.0),
+            NodeKind::Grid { .. } => (-1.0, 1.0),
+            NodeKind::Pattern(p) => scaled((-1.0, 1.0), p.amount),
             NodeKind::OutDensity | NodeKind::OutNormal => UNBOUNDED,
         };
         stack.pop();
         r
     }
+}
+
+fn scaled((lo, hi): Range, k: f32) -> Range {
+    ((lo * k).min(hi * k), (lo * k).max(hi * k))
 }
 
 fn math_range(op: MathOp, (a0, a1): Range, (b0, b1): Range, (_, k1): Range) -> Range {
