@@ -1,0 +1,71 @@
+# Game-resolution mesh pipeline: plan
+
+Goal: from a mesh plus a noise graph, export a game-ready mesh (1k to 100k triangles, good triangles, automatic UVs) and baked textures sampled straight from the SDF function, with no high-poly intermediate. A separate mesh graph comes last.
+
+Decisions (agreed): build order is remesh, UVs, bake, then the mesh graph. Native C/C++ crates are fine (xatlas, meshoptimizer). Organic surfaces only, so no crease preservation. Unreal-style output: tangent-space normals (mikktspace), 16-bit PNG, 1k to 4k, optional packed ORM.
+
+## Foundations (do first)
+
+**F1. Point evaluator.** Today `MeshEvaluator::layers` evaluates the displaced field on a regular grid, slab by slab (`src/meshexport.rs`). The remesher and the baker need arbitrary points in, `(distance, gradient, optional channels)` out, in large GPU batches. This is the "field" abstraction: everything after it sees only `Field::eval(points) -> Vec<Sample>`. The mesh graph later replaces what is behind it and nothing else.
+
+**F2. Quality report** (`src/meshquality.rs`, plus `--report` in headless). Objective numbers for any mesh and any UV set, so every algorithm is scored the same way:
+- Mesh: triangle count, min and median angle, share of triangles under 20 degrees, aspect ratio, normal deviation between neighbours, max and mean distance to the true SDF surface (exact, from F1), and a watertight and manifold check.
+- UVs, modelled on `nemi_uv_toolkit/tests/uv_quality.py`: coverage of 0..1 (target 70% or more), island count, micro-islands (a size threshold), overlap area (must be zero), stretch and area distortion.
+
+Fixed test set: the rock, the monkey, a sphere and the 5-part rock.
+
+## Phase 1: adaptive remesh (`src/remesh.rs`)
+
+1. Coarse start: the existing surface-nets extraction at low resolution (this is why grid resolution stops limiting detail).
+2. Incremental isotropic remeshing: split long edges, collapse short ones, flip toward the Delaunay criterion, relax tangentially, and after every step project each vertex back onto the exact SDF surface with a few gradient steps from F1.
+3. Size field: target edge length from local curvature with an error bound (small triangles where the surface bends, large on flats). A single scale knob moves the triangle count; binary search on it hits a requested count within a few percent.
+4. Low-poly mode (about 1k): silhouette-driven simplification with meshoptimizer's error-bounded simplifier on the remeshed result, then a cleanup pass. The detail goes into the bake, so this mode does not try to follow the noise.
+5. Done when, on the test set at 1k, 5k, 20k and 100k: triangle count within 5% of the request, under 5% of triangles below 20 degrees, max distance to the true surface under a stated fraction of the bounding radius, and zero non-manifold edges. Thresholds get fixed after the first measurements.
+
+## Phase 2: UVs (`src/uvgen.rs`)
+
+1. xatlas through a Rust binding, with chart options tuned (normal deviation weight, maximum chart area, boundary length).
+2. Merge pass for micro-islands: fold islands under the size threshold into the neighbour they share the longest border with when stretch stays under a limit; re-pack.
+3. Repack at the end for coverage, with padding to match the texture size.
+4. Existing UVs (stretch goal): read `vt` / `TEXCOORD_0` in the loaders. For each new triangle, pick one source triangle (nearest to the centroid) and take every corner's UV from it, duplicating vertices along seams so nothing stretches across two islands. Then a relax step. Expect it to work only for mild displacement; the report says when it does not.
+5. Done when, on the test set: zero overlap, coverage of 70% or more, island count and micro-island count under limits we set from the first measurements. Compare against the Blender addon's numbers on the same meshes.
+
+## Phase 3: bake from the SDF (`src/bake.rs`)
+
+1. Rasterize the low mesh into its UV atlas, giving for each texel a surface point and an interpolated normal. A GPU compute pass or a CPU rasterizer, whichever is simpler to verify first.
+2. Snap each point onto the true surface with F1, starting from the low-poly point. If the gap is larger than a threshold (big silhouette error at 1k), fall back to marching along the low-poly normal (a cage ray). Compare both on the test set before choosing.
+3. Channels: normal (tangent space with mikktspace so it matches the engine), occlusion, curvature, depth, thickness, position, and custom. The first six reuse the mask code. Custom is a new graph output node, "Texture output (name)", which any value node can feed.
+4. Island padding by dilating outward after the bake; 16-bit PNG output; packed ORM option.
+5. Done when: baked normals from the 1k mesh, viewed on the 1k mesh, match the displaced SDF's own normals within a tolerance (checked numerically, by re-evaluating at random texels), there are no seam artefacts beyond the dilation width, and a render with the maps shows no visible gaps.
+
+## Phase 4: the mesh graph (design after phase 3)
+
+A second graph kind with field-valued nodes: load mesh, combine (the union/intersect/smooth modes already built), displace by a noise graph with a mask, and Lerp between fields. Mask terms (normal, curvature and the rest) become value nodes, so "blend a rough and a smooth rock graph by normal" is a Lerp. Texture output nodes feed phase 3. Detailed design waits until the F1 interface is settled, because the graph compiles down to that interface.
+
+Agreed shape:
+- Wire types: Field (GPU-evaluable distance plus values), Mesh (with optional UVs), Image (float RGBA, named channels), Value (float, Vec3). Field nodes compile to one shader and stay live; operation nodes (Remesh, Auto UVs, Transfer UVs, Baker) run on a Run button, cache by input and settings, and show progress.
+- Baker: one source field, optional named custom inputs, checkboxes for normal, occlusion, curvature, depth, thickness, position. One image output per enabled channel.
+- Image nodes between Baker and Output: split and combine channels, per-pixel math (the existing Math nodes broadcast over images), invert, remap, resize, dilate. Use case: store a normal map's R and G, drop B (rebuilt in the shader) and put other data in B and A. Data maps stay linear (no sRGB).
+- Output: image or mesh (pin type follows the selector; switching disconnects), naming with `{name}` and suffixes for batches, format options (PNG 8 or 16 bit, EXR, mesh formats).
+- Load Noiser Graph: reference to a `.noisegraph` file with an embedded snapshot and an Embed (detach) option. Double-click opens or switches to that graph's tab.
+- Saving: Ctrl+S writes the mesh graph and every dirty noise graph it references, and refreshes every embedded snapshot. Before a noise graph file is overwritten, the old version goes to `<name>.history/` with a timestamp. A referenced file is the source of truth; the snapshot is only the fallback when the file is missing or changed on disk (then ask: use file, use snapshot, or keep both). Embedded (detached) graphs live only in the mesh graph file.
+
+## References in the Unreal 5.8 source (`E:\Unreal Engine\UE_5.8`)
+
+Read for the algorithms; Epic's licence does not allow copying code into this repo, so we reimplement. Paths are under `Engine\Plugins\Runtime\GeometryProcessing\Source\` unless noted.
+
+- Remeshing: `DynamicMesh\Private\Remesher.cpp` (761 lines) and `QueueRemesher.cpp`: split/collapse/flip/smooth/reproject with one uniform target edge length (min 1.0x, max 3.0x of it). No curvature size field, so our adaptive size field is an addition, not a port.
+- Simplification: `MeshSimplificationQuadrics.cpp`, `MeshClusterSimplifier.cpp`.
+- UV generation: `DynamicMesh\Private\Parameterization\PatchBasedMeshUVGenerator.cpp`. Its steps: split into many small patches (by normal-weighted clustering), merge patches while stretch stays under a threshold and the normal deviation under 45 degrees, unwrap with ExpMap, align, pack. This is the closest match to what you described and gives direct control over island count.
+- UV relax and solver: `Solvers\Internal\MeshUVSolver.cpp`.
+- Packing: `Engine\Source\Runtime\GeometryCore\Private\Parameterization\UVPacking.cpp` (1076 lines).
+- xatlas: UE vendors it at `GeometryAlgorithms\Private\ThirdParty\xatlas` (MIT licence), so it is an Epic-approved fallback.
+- Baking: `DynamicMesh\Private\Sampling\MeshMapBaker.cpp`, as the model for evaluator and dilation structure.
+- Tangents: `GeometryAlgorithms\Public\DynamicMeshMikkTWrapper.h`.
+
+## Risks
+
+- A hand-written remesher is the largest piece of new code. The metrics from F2 are what make it tractable; build them before the algorithm.
+- xatlas gives zero overlap and good packing but many charts on organic meshes; island count is a tuning problem, not a guarantee.
+- Bake cost: 4k by 4k texels times about 7 field evaluations each (value plus gradient) per channel. Fine on a GPU, but needs batching and a progress bar.
+- At 1k triangles the noise is mostly in the normal map, so snapping from the low mesh to the true surface can be far; that is what the cage-ray fallback in phase 3 is for.

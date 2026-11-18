@@ -1432,6 +1432,33 @@ mod mesh_export_tests {
     }
 
     #[test]
+    fn the_point_evaluator_gives_distance_and_gradient_and_scores_an_export() {
+        let Some(gpu) = gpu() else { return eprintln!("no GPU adapter; skipping") };
+        // No displacement: the field is the sphere's own distance, and its gradient points outwards.
+        let (_sdf, ev, _tex) = evaluator(&gpu, &single_node_graph(NodeKind::Float(0.0)), 0);
+        let flat = Displace { amount: 0.0, tile_size: 1.0, prim_size: 1.0, mask: crate::meshmask::PackedMask::NONE };
+        let pts = [[1.5, 0.0, 0.0], [0.0, 0.0, 0.5], [0.0, -1.3, 0.0], [0.6, 0.6, 0.6]];
+        for (p, s) in pts.iter().zip(ev.points(flat, &pts, 0.02)) {
+            assert!((s[0] - (radius(*p) - 1.0)).abs() < 0.03, "distance at {p:?} is {}", s[0]);
+            let g = radius([s[1], s[2], s[3]]);
+            let along = (s[1] * p[0] + s[2] * p[1] + s[3] * p[2]) / (g * radius(*p));
+            assert!((g - 1.0).abs() < 0.1 && along > 0.98, "gradient at {p:?} is {s:?}");
+        }
+        // With noise: a job's own vertices lie on the surface as far as the point evaluator can tell.
+        let noise = noise_graph(NoiseParams { scale: 3.0, octaves: 3, ..Default::default() });
+        let (_sdf, ev, _tex) = evaluator(&gpu, &noise, 0);
+        let d = Displace { amount: 0.12, tile_size: 1.0, prim_size: 1.0, mask: crate::meshmask::PackedMask::NONE };
+        let j = job(&ev, d, 0.12, 96);
+        let h = j.grid().h;
+        let m = j.extract(&Default::default());
+        let report = crate::meshquality::report(&m).with_surface_error(&m, &mut |pts| ev.points(d, pts, 0.002));
+        eprintln!("{report}");
+        assert!(report.max_error.unwrap() < 0.6 * h, "max error {:?} against sample spacing {h}", report.max_error);
+        assert!(report.mean_error.unwrap() < 0.15 * h, "mean error {:?}", report.mean_error);
+        assert!(report.triangles == m.triangles.len() && report.components >= 1 && report.min_angle > 0.0);
+    }
+
+    #[test]
     fn shape_size_and_normalization_are_undone_in_the_written_file() {
         let Some(gpu) = gpu() else { return eprintln!("no GPU adapter; skipping") };
         let (_sdf, ev, _tex) = evaluator(&gpu, &single_node_graph(NodeKind::Float(0.0)), 0);

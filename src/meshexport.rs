@@ -83,16 +83,35 @@ struct X { grid_min: vec3f, h: f32, mesh_origin: vec3f, mesh_voxel: f32, nx: u32
 @group(0) @binding(4) var<uniform> x: X;
 @group(0) @binding(5) var<storage, read_write> out: array<f32>;
 @group(0) @binding(6) var mesh_tex: texture_3d<f32>;
+@group(0) @binding(7) var<storage, read> pts: array<vec4f>;
+@group(0) @binding(8) var<storage, read_write> samples: array<vec4f>;
+
+// The displaced field at `p` (the preview's space); beyond x.band of the mesh the noise is skipped.
+fn field_at(p: vec3f) -> f32 {
+    let base = mesh_sdf_at(mesh_tex, p / x.prim_size, x.mesh_origin, x.mesh_voxel) * x.prim_size;
+    if (abs(base) > x.band) { return base; }
+    let m = mesh_mask(mesh_tex, p / x.prim_size, x.mesh_origin, x.mesh_voxel, x.mesh_lo, x.mesh_hi, x.mask, x.mask_n);
+    return base - x.amount * m * graph_density(p / x.tile_size);
+}
 
 @compute @workgroup_size(4, 4, 4)
 fn main(@builtin(global_invocation_id) id: vec3u) {
     if (id.x >= x.nx || id.y >= x.ny || id.z >= x.count) { return; }
     let p = x.grid_min + vec3f(f32(id.x), f32(id.y), f32(x.z0 + id.z)) * x.h;
-    let at = (id.z * x.ny + id.y) * x.nx + id.x;
-    let base = mesh_sdf_at(mesh_tex, p / x.prim_size, x.mesh_origin, x.mesh_voxel) * x.prim_size;
-    if (abs(base) > x.band) { out[at] = base; return; }
-    let m = mesh_mask(mesh_tex, p / x.prim_size, x.mesh_origin, x.mesh_voxel, x.mesh_lo, x.mesh_hi, x.mask, x.mask_n);
-    out[at] = base - x.amount * m * graph_density(p / x.tile_size);
+    out[(id.z * x.ny + id.y) * x.nx + id.x] = field_at(p);
+}
+
+// The distance and its gradient (central differences over x.h) at each of x.count points.
+@compute @workgroup_size(64)
+fn points(@builtin(global_invocation_id) id: vec3u) {
+    if (id.x >= x.count) { return; }
+    let p = pts[id.x].xyz;
+    let e = x.h;
+    let g = vec3f(
+        field_at(p + vec3f(e, 0.0, 0.0)) - field_at(p - vec3f(e, 0.0, 0.0)),
+        field_at(p + vec3f(0.0, e, 0.0)) - field_at(p - vec3f(0.0, e, 0.0)),
+        field_at(p + vec3f(0.0, 0.0, e)) - field_at(p - vec3f(0.0, 0.0, e))) / (2.0 * e);
+    samples[id.x] = vec4f(field_at(p), g);
 }
 ";
 
@@ -128,6 +147,11 @@ pub struct MeshEvaluator {
     queue: wgpu::Queue,
     pipeline: wgpu::ComputePipeline,
     bgl: wgpu::BindGroupLayout,
+    // Used by the remesher and the baker (see docs/game-mesh-plan.md); only tests call `points` so far.
+    #[allow(dead_code)]
+    points_pipeline: wgpu::ComputePipeline,
+    #[allow(dead_code)]
+    points_bgl: wgpu::BindGroupLayout,
     uniforms: wgpu::Buffer,
     params: wgpu::Buffer,
     blue: wgpu::Buffer,
@@ -172,6 +196,33 @@ impl MeshEvaluator {
                 },
             ],
         });
+        let texture = |binding| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::COMPUTE,
+            ty: wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Float { filterable: false }, view_dimension: wgpu::TextureViewDimension::D3, multisampled: false },
+            count: None,
+        };
+        let points_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: None,
+            entries: &[
+                buffer(0, wgpu::BufferBindingType::Uniform),
+                buffer(1, ro),
+                buffer(3, ro),
+                buffer(4, wgpu::BufferBindingType::Uniform),
+                texture(6),
+                buffer(7, ro),
+                buffer(8, wgpu::BufferBindingType::Storage { read_only: false }),
+            ],
+        });
+        let points_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: None, bind_group_layouts: &[Some(&points_bgl)], immediate_size: 0 });
+        let points_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("mesh points"),
+            layout: Some(&points_layout),
+            module: &module,
+            entry_point: Some("points"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: None, bind_group_layouts: &[Some(&bgl)], immediate_size: 0 });
         let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("mesh export"),
@@ -187,6 +238,8 @@ impl MeshEvaluator {
             queue: queue.clone(),
             pipeline,
             bgl,
+            points_pipeline,
+            points_bgl,
             uniforms: init(bytemuck::bytes_of(&[seed, 0, 0, 0]), wgpu::BufferUsages::UNIFORM),
             params: init(bytemuck::cast_slice(&c.params), wgpu::BufferUsages::STORAGE),
             blue: init(bytemuck::cast_slice(&crate::bluenoise::tables()), wgpu::BufferUsages::STORAGE),
@@ -253,6 +306,74 @@ impl MeshEvaluator {
         dev.poll(wgpu::PollType::wait_indefinitely()).expect("poll");
         let view = read.get_mapped_range(..).expect("mapped");
         bytemuck::cast_slice(&view).to_vec()
+    }
+
+    /// The displaced field at arbitrary points of the preview's space: (distance, gradient x, y, z) for each,
+    /// the gradient by central differences over `eps`. The noise is never skipped, so any point is exact
+    /// (unlike `layers`, which trusts the band). Done in chunks so any number of points works.
+    #[allow(dead_code)]
+    pub fn points(&self, d: Displace, points: &[V3], eps: f32) -> Vec<[f32; 4]> {
+        use wgpu::util::DeviceExt;
+        const CHUNK: usize = 1 << 20;
+        let dev = &self.device;
+        let mut all = Vec::with_capacity(points.len());
+        for chunk in points.chunks(CHUNK) {
+            let block = Block {
+                grid_min: [0.0; 3],
+                h: eps,
+                mesh_origin: self.mesh_origin,
+                mesh_voxel: self.mesh_voxel,
+                nx: 0,
+                ny: 0,
+                z0: 0,
+                count: chunk.len() as u32,
+                amount: d.amount,
+                tile_size: d.tile_size,
+                prim_size: d.prim_size,
+                _pad: 0.0,
+                mesh_lo: self.mesh_bounds.0,
+                mask_n: d.mask.count,
+                mesh_hi: self.mesh_bounds.1,
+                band: f32::MAX,
+                mask: std::array::from_fn(|i| d.mask.terms[i]),
+            };
+            let block = dev.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: None, contents: bytemuck::bytes_of(&block), usage: wgpu::BufferUsages::UNIFORM });
+            let input: Vec<[f32; 4]> = chunk.iter().map(|p| [p[0], p[1], p[2], 0.0]).collect();
+            let input = dev.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: None, contents: bytemuck::cast_slice(&input), usage: wgpu::BufferUsages::STORAGE });
+            let bytes = (chunk.len() * 16) as u64;
+            let out = dev.create_buffer(&wgpu::BufferDescriptor { label: None, size: bytes, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC, mapped_at_creation: false });
+            let read = dev.create_buffer(&wgpu::BufferDescriptor { label: None, size: bytes, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+            fn entry(binding: u32, b: &wgpu::Buffer) -> wgpu::BindGroupEntry<'_> {
+                wgpu::BindGroupEntry { binding, resource: b.as_entire_binding() }
+            }
+            let bind = dev.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: None,
+                layout: &self.points_bgl,
+                entries: &[
+                    entry(0, &self.uniforms),
+                    entry(1, &self.params),
+                    entry(3, &self.blue),
+                    entry(4, &block),
+                    wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(&self.mesh) },
+                    entry(7, &input),
+                    entry(8, &out),
+                ],
+            });
+            let mut enc = dev.create_command_encoder(&Default::default());
+            {
+                let mut pass = enc.begin_compute_pass(&Default::default());
+                pass.set_pipeline(&self.points_pipeline);
+                pass.set_bind_group(0, &bind, &[]);
+                pass.dispatch_workgroups((chunk.len() as u32).div_ceil(64), 1, 1);
+            }
+            enc.copy_buffer_to_buffer(&out, 0, &read, 0, bytes);
+            self.queue.submit([enc.finish()]);
+            read.map_async(wgpu::MapMode::Read, .., |r| r.expect("map point samples"));
+            dev.poll(wgpu::PollType::wait_indefinitely()).expect("poll");
+            let view = read.get_mapped_range(..).expect("mapped");
+            all.extend_from_slice(bytemuck::cast_slice::<u8, [f32; 4]>(&view));
+        }
+        all
     }
 }
 
