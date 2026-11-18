@@ -446,6 +446,12 @@ struct VsOut { @builtin(position) pos: vec4f, @location(0) uv: vec2f };
 /// Adds TIMESTAMP_QUERY (GPU timing) and FLOAT32_FILTERABLE (smooth caches) to eframe's device request when supported.
 pub fn request_timestamps(mut cfg: egui_wgpu::WgpuConfiguration) -> egui_wgpu::WgpuConfiguration {
     if let egui_wgpu::WgpuSetup::CreateNew(new) = &mut cfg.wgpu_setup {
+        // Never probe OpenGL: Noiser needs Vulkan or DX12, and some AMD GL drivers (atio6axx.dll)
+        // segfault during adapter enumeration, killing the app before a window appears.
+        // WGPU_BACKEND still overrides this.
+        if wgpu::Backends::from_env().is_none() {
+            new.instance_descriptor.backends = wgpu::Backends::PRIMARY;
+        }
         let base = new.device_descriptor.clone();
         new.device_descriptor = Arc::new(move |adapter| {
             let mut d = base(adapter);
