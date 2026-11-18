@@ -937,7 +937,7 @@ fn node_props(ui: &mut egui::Ui, kind: &mut NodeKind) {
 
 const PICKS_KEY: &str = "node_picks";
 const SHORTCUTS: [(&str, &str); 17] = [
-    ("Ctrl+S / Ctrl+Shift+S / Ctrl+O", "Save / Save As / Open"),
+    ("Ctrl+S / Ctrl+Shift+S / Ctrl+O / Ctrl+N", "Save / Save As / Open / New"),
     ("Ctrl+Z", "Undo"),
     ("Ctrl+Y / Ctrl+Shift+Z", "Redo"),
     ("Ctrl+D", "Duplicate the selected nodes at the cursor (graph editor)"),
@@ -1142,6 +1142,8 @@ impl eframe::App for App {
             self.save(ctrl_shift);
         } else if ctrl_o {
             self.open();
+        } else if ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::N)) {
+            self.request(Pending::New);
         }
         // Ctrl+Z / Ctrl+Y (or Ctrl+Shift+Z), unless a text field has the keyboard.
         if !ui.ctx().egui_wants_keyboard_input() {
@@ -1170,7 +1172,7 @@ impl eframe::App for App {
                     }
                 });
                 ui.menu_button("File", |ui| {
-                    if ui.button("New").clicked() {
+                    if ui.add(egui::Button::new("New").shortcut_text("Ctrl+N")).clicked() {
                         self.request(Pending::New);
                     }
                     ui.menu_button("New from template", |ui| {
