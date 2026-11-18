@@ -91,7 +91,8 @@ pub struct MaskTerm {
 impl MaskTerm {
     pub fn new(kind: MaskKind) -> MaskTerm {
         let (lo, hi) = kind.default_range();
-        MaskTerm { kind, weight: 1.0, lo, hi, invert: false, axis: 1, negative: false }
+        // Position and Normal start along Y; a vertex colour starts on the red channel (axis 0).
+        MaskTerm { kind, weight: 1.0, lo, hi, invert: false, axis: if kind == MaskKind::VertexColor { 0 } else { 1 }, negative: false }
     }
 }
 
@@ -145,6 +146,13 @@ impl MaskSettings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_new_vertex_colour_term_reads_red() {
+        let p = MaskSettings { terms: vec![MaskTerm::new(MaskKind::VertexColor)] }.pack();
+        assert_eq!(p.terms[1][..3], [1.0, 0.0, 0.0]);
+        assert_eq!(p.terms[0][0], MaskKind::VertexColor.code() as f32);
+    }
 
     #[test]
     fn packing_and_range() {

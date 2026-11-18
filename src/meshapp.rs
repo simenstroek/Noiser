@@ -449,7 +449,9 @@ impl App {
                             }
                         });
                         if t.kind != before {
-                            (t.lo, t.hi) = t.kind.default_range();
+                            // A new kind starts from its own defaults (range, axis or channel, direction).
+                            let fresh = MaskTerm::new(t.kind);
+                            (t.lo, t.hi, t.axis, t.negative) = (fresh.lo, fresh.hi, fresh.axis, fresh.negative);
                         }
                         if ui.small_button("×").on_hover_text("Remove this term").clicked() {
                             remove = Some(i);
