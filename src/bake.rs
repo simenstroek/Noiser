@@ -235,6 +235,7 @@ fn rasterize(mesh: &UvMesh, size: usize) -> Vec<Texel> {
         }
         let span = |c: usize| (q.iter().map(|p| p[c]).fold(f32::MAX, f32::min).floor().max(0.0) as usize, (q.iter().map(|p| p[c]).fold(f32::MIN, f32::max).ceil().max(0.0) as usize).min(size));
         let ((x0, x1), (y0, y1)) = (span(0), span(1));
+        let before = out.len();
         for y in y0..y1 {
             for x in x0..x1 {
                 let (cx, cy) = (x as f32 + 0.5, y as f32 + 0.5);
@@ -247,6 +248,16 @@ fn rasterize(mesh: &UvMesh, size: usize) -> Vec<Texel> {
                     taken[y * size + x] = true;
                     out.push(Texel { index: (y * size + x) as u32, tri: f as u32, b: [b1, b2] });
                 }
+            }
+        }
+        // A triangle too small to cover a texel centre still gets the texel under its centroid, sampled at the centroid,
+        // so tiny islands are baked rather than filled in from their neighbours.
+        if out.len() == before {
+            let (cx, cy) = ((q[0][0] + q[1][0] + q[2][0]) / 3.0, (q[0][1] + q[1][1] + q[2][1]) / 3.0);
+            let (x, y) = (cx.floor() as i64, cy.floor() as i64);
+            if x >= 0 && y >= 0 && (x as usize) < size && (y as usize) < size && !taken[y as usize * size + x as usize] {
+                taken[y as usize * size + x as usize] = true;
+                out.push(Texel { index: (y as usize * size + x as usize) as u32, tri: f as u32, b: [1.0 / 3.0, 1.0 / 3.0] });
             }
         }
     }
