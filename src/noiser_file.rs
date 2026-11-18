@@ -22,17 +22,36 @@ fn kind_name(k: NoiseKind) -> &'static str {
 /// The op list for everything upstream of the outputs, in evaluation order (inputs first).
 /// `seed` is the global seed; each noise op carries its resolved seed.
 pub fn ops(g: &Graph, seed: u32) -> Result<Value, String> {
-    let out = |k: NodeKind| g.find(|n| *n == k).and_then(|o| g.input(o, 0));
+    // A reference to what feeds an input: the op id, or for one output of a Separate node the id of the
+    // single-component `separate` op written for it (1000000 + 3 * node + port).
+    let reference = |to: NodeId, port: usize| g.input_from(to, port).map(|(src, fp)| if matches!(g.nodes[&src].kind, NodeKind::Separate) { 1_000_000 + src as u64 * 3 + fp.min(2) as u64 } else { src as u64 });
+    let out = |k: NodeKind| g.find(|n| *n == k).and_then(|o| reference(o, 0));
     let (density, normal) = (out(NodeKind::OutDensity), out(NodeKind::OutNormal));
     let mut order = Vec::new();
     let (mut seen, mut visiting) = (BTreeSet::new(), BTreeSet::new());
-    for root in density.into_iter().chain(normal) {
-        topo(g, root, &mut seen, &mut visiting, &mut order)?;
+    for o in [NodeKind::OutDensity, NodeKind::OutNormal] {
+        if let Some((root, _)) = g.find(|n| *n == o).and_then(|o| g.input_from(o, 0)) {
+            topo(g, root, &mut seen, &mut visiting, &mut order)?;
+        }
     }
-    let input = |id: NodeId, port: usize| g.input(id, port).map_or(Value::Null, |s| json!(s));
+    let input = |id: NodeId, port: usize| reference(id, port).map_or(Value::Null, |s| json!(s));
     let ops: Vec<Value> = order
         .iter()
         .map(|&id| {
+            if matches!(g.nodes[&id].kind, NodeKind::Separate) {
+                // One single-component op per output in use.
+                let mut used: Vec<usize> = g.edges.iter().filter(|e| e.from == id).map(|e| e.from_port.min(2)).collect();
+                used.sort();
+                used.dedup();
+                return Value::Array(
+                    used.into_iter()
+                        .map(|fp| {
+                            let name = ["x", "y", "z"][fp];
+                            json!({"op": "separate", "vector": input(id, 0), "component": name, "id": 1_000_000 + id as u64 * 3 + fp as u64, "type": "float"})
+                        })
+                        .collect(),
+                );
+            }
             let ty = if g.yields_vector(id) { "vector" } else { "float" };
             let mut op = match &g.nodes[&id].kind {
                 NodeKind::Position => json!({"op": "position"}),
@@ -62,7 +81,7 @@ pub fn ops(g: &Graph, seed: u32) -> Result<Value, String> {
                         MathOp::Greater => "greater",
                     };
                     // An unconnected operand is its constant.
-                    let operand = |port, c: f32| g.input(id, port).map_or(json!(c), |s| json!({"node": s}));
+                    let operand = |port, c: f32| reference(id, port).map_or(json!(c), |s| json!({"node": s}));
                     let mut o = json!({"op": "math", "fn": f, "a": operand(0, *a), "b": operand(1, *b)});
                     if op.is_smooth() {
                         o["k"] = operand(2, *c);
@@ -70,25 +89,22 @@ pub fn ops(g: &Graph, seed: u32) -> Result<Value, String> {
                     o
                 }
                 NodeKind::Remap { vals, clamp } => {
-                    let operand = |port: usize| g.input(id, port).map_or(json!(vals[port]), |s| json!({"node": s}));
+                    let operand = |port: usize| reference(id, port).map_or(json!(vals[port]), |s| json!({"node": s}));
                     json!({"op": "remap", "value": operand(0), "from_min": operand(1), "from_max": operand(2),
                            "to_min": operand(3), "to_max": operand(4), "clamp": clamp})
                 }
-                NodeKind::Separate { component } => {
-                    let name = ["x", "y", "z"][(*component as usize).min(2)];
-                    json!({"op": "separate", "vector": input(id, 0), "component": name})
-                }
+                NodeKind::Separate => unreachable!("written above"),
                 NodeKind::Combine { vals } => {
-                    let operand = |port: usize| g.input(id, port).map_or(json!(vals[port]), |s| json!({"node": s}));
+                    let operand = |port: usize| reference(id, port).map_or(json!(vals[port]), |s| json!({"node": s}));
                     json!({"op": "combine", "x": operand(0), "y": operand(1), "z": operand(2)})
                 }
                 NodeKind::Mix { vals, clamp } => {
-                    let operand = |port: usize| g.input(id, port).map_or(json!(vals[port]), |s| json!({"node": s}));
+                    let operand = |port: usize| reference(id, port).map_or(json!(vals[port]), |s| json!({"node": s}));
                     json!({"op": "mix", "factor": operand(0), "a": operand(1), "b": operand(2), "clamp": clamp})
                 }
                 NodeKind::Curve { points, mode } => {
                     let sorted = crate::graph::curve_points(points);
-                    json!({"op": "curve", "value": g.input(id, 0).map_or(json!(0.0), |s| json!({"node": s})), "points": sorted, "mode": mode.label().to_lowercase()})
+                    json!({"op": "curve", "value": reference(id, 0).map_or(json!(0.0), |s| json!({"node": s})), "points": sorted, "mode": mode.label().to_lowercase()})
                 }
                 NodeKind::Grid { counts, corners } => {
                     json!({"op": "grid", "position": input(id, 0), "counts": counts, "reference": if *corners { "corner" } else { "center" }})
@@ -135,6 +151,10 @@ pub fn ops(g: &Graph, seed: u32) -> Result<Value, String> {
             op["type"] = json!(ty);
             op
         })
+        .flat_map(|v| match v {
+            Value::Array(ops) => ops,
+            op => vec![op],
+        })
         .collect();
     Ok(json!({"format": "noiser", "version": VERSION, "ops": ops, "outputs": {"density": density, "normal": normal}}))
 }
@@ -147,7 +167,7 @@ fn topo(g: &Graph, id: NodeId, seen: &mut BTreeSet<NodeId>, visiting: &mut BTree
         return Err("graph has a cycle".into());
     }
     for port in 0..g.nodes[&id].kind.input_count() {
-        if let Some(src) = g.input(id, port) {
+        if let Some((src, _)) = g.input_from(id, port) {
             topo(g, src, seen, visiting, order)?;
         }
     }

@@ -105,7 +105,6 @@ pub fn compile_with(g: &Graph, caches: &BTreeMap<NodeId, u32>) -> Result<Compile
                     params.extend(p.get(i).copied().unwrap_or(*p.last().unwrap()));
                 }
             }
-            NodeKind::Separate { component } => params.push(*component as f32),
             NodeKind::Combine { vals } => params.extend(vals),
             NodeKind::Mix { vals, clamp } => {
                 params.extend(vals);
@@ -155,22 +154,30 @@ pub fn compile_with(g: &Graph, caches: &BTreeMap<NodeId, u32>) -> Result<Compile
     }
 
     let mut cg = Gen { g, caches, slots, types: BTreeMap::new(), done: BTreeSet::new(), building: BTreeSet::new(), kinds: BTreeSet::new(), out: String::new() };
-    let density = g.find(|k| *k == NodeKind::OutDensity).and_then(|o| g.input(o, 0));
-    let normal = g.find(|k| *k == NodeKind::OutNormal).and_then(|o| g.input(o, 0));
+    let density = g.find(|k| *k == NodeKind::OutDensity).and_then(|o| g.input_from(o, 0));
+    let normal = g.find(|k| *k == NodeKind::OutNormal).and_then(|o| g.input_from(o, 0));
+    // One output of a Separate node is a component of the vector its function returns.
+    let component = |src: NodeId, port: usize| if matches!(g.nodes[&src].kind, NodeKind::Separate) { Some(["x", "y", "z"][port.min(2)]) } else { None };
 
     let density_expr = match density {
-        Some(src) => {
+        Some((src, port)) => {
             let ty = cg.cone(src)?;
-            convert(&format!("c{src}(p)"), ty, Ty::F)
+            match component(src, port) {
+                Some(c) => format!("c{src}(p).{c}"),
+                None => convert(&format!("c{src}(p)"), ty, Ty::F),
+            }
         }
         None => "0.0".into(),
     };
     writeln!(cg.out, "fn graph_density(p: vec3f) -> f32 {{ return {density_expr}; }}").unwrap();
 
     let normal_expr = match normal {
-        Some(src) => {
+        Some((src, port)) => {
             let ty = cg.cone(src)?;
-            format!("safe_normalize({})", convert(&format!("c{src}(p)"), ty, Ty::V))
+            match component(src, port) {
+                Some(c) => format!("safe_normalize(vec3f(c{src}(p).{c}))"),
+                None => format!("safe_normalize({})", convert(&format!("c{src}(p)"), ty, Ty::V)),
+            }
         }
         None => "tetra_grad_density(p)".into(),
     };
@@ -280,10 +287,21 @@ impl Gen<'_> {
 
     /// The input on `port` as an expression of type `want`, or `fallback` when unconnected.
     fn operand(&self, id: NodeId, port: usize, want: Ty, fallback: &str) -> String {
-        match self.g.input(id, port) {
-            Some(src) => convert(&format!("v{src}"), self.types[&src], want),
+        match self.source(id, port) {
+            Some((expr, ty)) => convert(&expr, ty, want),
             None => fallback.to_string(),
         }
+    }
+
+    /// The expression feeding input `port` of `id` and its type. A Separate node holds its input vector, and
+    /// the output port picks a component.
+    fn source(&self, id: NodeId, port: usize) -> Option<(String, Ty)> {
+        let (src, from_port) = self.g.input_from(id, port)?;
+        Some(if matches!(self.g.nodes[&src].kind, NodeKind::Separate) {
+            (format!("v{src}.{}", ["x", "y", "z"][from_port.min(2)]), Ty::F)
+        } else {
+            (format!("v{src}"), self.types[&src])
+        })
     }
 
     fn node_expr(&mut self, id: NodeId) -> Result<String, String> {
@@ -297,11 +315,11 @@ impl Gen<'_> {
             NodeKind::Vec3(_) => (Ty::V, format!("vec3f(P[{s}], P[{}], P[{}])", s + 1, s + 2)),
             NodeKind::Position => (Ty::V, "p".into()),
             NodeKind::Reroute => {
-                let ty = self.g.input(id, 0).map_or(Ty::F, |src| self.types[&src]);
+                let ty = self.source(id, 0).map_or(Ty::F, |(_, ty)| ty);
                 (ty, self.operand(id, 0, ty, &convert("0.0", Ty::F, ty)))
             }
             NodeKind::Math { op, .. } => {
-                let in_ty = |port| self.g.input(id, port).map_or(Ty::F, |src| self.types[&src]);
+                let in_ty = |port| self.source(id, port).map_or(Ty::F, |(_, ty)| ty);
                 // Dot takes vectors and gives a float; everything else is a vector if any input is.
                 let opty = if *op == MathOp::Dot || in_ty(0) == Ty::V || in_ty(1) == Ty::V { Ty::V } else { Ty::F };
                 let ty = if *op == MathOp::Dot { Ty::F } else { opty };
@@ -337,10 +355,8 @@ impl Gen<'_> {
                 let x: Vec<String> = (0..5).map(|p| self.operand(id, p, Ty::F, &format!("P[{}]", s + p))).collect();
                 (Ty::F, format!("remap({}, {}, {}, {}, {}, P[{}] > 0.5)", x[0], x[1], x[2], x[3], x[4], s + 5))
             }
-            NodeKind::Separate { component } => {
-                let v = self.operand(id, 0, Ty::V, "vec3f(0.0)");
-                (Ty::F, format!("{v}.{}", ["x", "y", "z"][(*component as usize).min(2)]))
-            }
+            // The vector itself; readers take the component their pin names (see `source`).
+            NodeKind::Separate => (Ty::V, self.operand(id, 0, Ty::V, "vec3f(0.0)")),
             NodeKind::Combine { .. } => {
                 let x: Vec<String> = (0..3).map(|p| self.operand(id, p, Ty::F, &format!("P[{}]", s + p))).collect();
                 (Ty::V, format!("vec3f({}, {}, {})", x[0], x[1], x[2]))
@@ -373,13 +389,14 @@ impl Gen<'_> {
             }
             NodeKind::Normal { flip } => {
                 let sign = if *flip { "-" } else { "" };
-                match self.g.input(id, 0) {
-                    Some(src) => {
+                match self.g.input_from(id, 0) {
+                    Some((src, from_port)) => {
                         // The input's cone function was written during topo(); add its gradient once.
-                        let gname = format!("g{src}");
+                        let part = if matches!(self.g.nodes[&src].kind, NodeKind::Separate) { Some(["x", "y", "z"][from_port.min(2)]) } else { None };
+                        let gname = format!("g{src}{}", part.map_or(String::new(), |c| format!("_{c}")));
                         if !self.out.contains(&format!("fn {gname}(")) {
-                            let ty = self.types[&src];
-                            let body = tetra_body(|q| convert(&format!("c{src}({q})"), ty, Ty::F));
+                            let ty = if part.is_some() { Ty::F } else { self.types[&src] };
+                            let body = tetra_body(|q| convert(&format!("c{src}({q}){}", part.map_or(String::new(), |c| format!(".{c}"))), ty, Ty::F));
                             writeln!(self.out, "fn {gname}(p: vec3f) -> vec3f {{ {body} }}").unwrap();
                         }
                         (Ty::V, format!("{sign}{gname}(p)"))
@@ -418,7 +435,7 @@ pub(crate) fn random_graph(rnd: &mut impl FnMut(usize) -> usize) -> Graph {
             8 => K::Pattern(PatternParams::for_kind(PatternKind::ALL[rnd(8)])),
             9 => K::Normal { flip: rnd(2) == 0 },
             10 => K::Reroute,
-            11 => K::Separate { component: rnd(3) as u32 },
+            11 => K::Separate,
             12 => K::Combine { vals: [0.5, 1.0, -1.0] },
             _ => K::Noise(NoiseParams {
                 kind: crate::graph::NoiseKind::ALL[rnd(5)],
@@ -435,14 +452,18 @@ pub(crate) fn random_graph(rnd: &mut impl FnMut(usize) -> usize) -> Graph {
     for to in 1..count as u32 {
         for port in 0..g.nodes[&to].kind.input_count() {
             if rnd(10) < 6 {
-                g.connect(rnd(to as usize) as u32, to, port);
+                let from = rnd(to as usize) as u32;
+                let from_port = if matches!(g.nodes[&from].kind, K::Separate) { rnd(3) } else { 0 };
+                g.connect_from(from, from_port, to, port);
             }
         }
     }
     let out = g.add(K::OutDensity, [0.0; 2]);
     let normal_out = g.add(K::OutNormal, [0.0; 2]);
     g.connect(count as u32 - 1, out, 0);
-    g.connect(rnd(count) as u32, normal_out, 0);
+    let normal_src = rnd(count) as u32;
+    let normal_port = if matches!(g.nodes[&normal_src].kind, K::Separate) { rnd(3) } else { 0 };
+    g.connect_from(normal_src, normal_port, normal_out, 0);
     g
 }
 

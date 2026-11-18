@@ -48,6 +48,8 @@ pub struct Editor {
     pub selected: BTreeSet<NodeId>,
     /// Snap nodes to a 20-unit grid when a drag ends (a preference).
     pub snap: bool,
+    /// Which output pin of the node the wire being dragged started from (Separate XYZ has three).
+    wire_port: usize,
     /// Frame all nodes on the next draw (set when a graph is opened, so it is in view).
     pub frame_next: bool,
     /// A node was dragged since the pointer went down (so releasing may splice it into a wire).
@@ -78,6 +80,7 @@ impl Default for Editor {
             zoom: 1.0,
             selected: BTreeSet::new(),
             snap: false,
+            wire_port: 0,
             frame_next: false,
             node_dragged: false,
             preview: None,
@@ -101,7 +104,7 @@ pub fn title(kind: &NodeKind) -> String {
         NodeKind::Math { .. } => "Math".into(), // the operator is the dropdown on the node
         NodeKind::Remap { .. } => "Remap".into(),
         NodeKind::Mix { .. } => "Mix".into(),
-        NodeKind::Separate { .. } => "Separate XYZ".into(),
+        NodeKind::Separate => "Separate XYZ".into(),
         NodeKind::Combine { .. } => "Combine XYZ".into(),
         NodeKind::Curve { .. } => "Curve".into(),
         NodeKind::Grid { .. } => "Grid".into(),
@@ -122,7 +125,7 @@ fn input_label(kind: &NodeKind, port: usize) -> &'static str {
         (NodeKind::Math { .. }, _) => "Blend",
         (NodeKind::Reroute, _) => "In",
         (NodeKind::Curve { .. }, _) => "Value",
-        (NodeKind::Separate { .. }, _) => "Vector",
+        (NodeKind::Separate, _) => "Vector",
         (NodeKind::Combine { .. }, 0) => "X",
         (NodeKind::Combine { .. }, 1) => "Y",
         (NodeKind::Combine { .. }, _) => "Z",
@@ -153,7 +156,6 @@ fn summary(kind: &NodeKind) -> String {
         NodeKind::Float(v) => format!("{v:.3}"),
         NodeKind::Vec3(v) => format!("{:.2}, {:.2}, {:.2}", v[0], v[1], v[2]),
         NodeKind::Position => "world position".into(),
-        NodeKind::Separate { component } => format!("{} of a vector", ["X", "Y", "Z"][(*component as usize).min(2)]),
         NodeKind::Reroute => "passes its input on".into(),
         _ => String::new(),
     }
@@ -168,7 +170,7 @@ fn palette() -> Vec<(&'static str, NodeKind)> {
             ("Value", NodeKind::Float(1.0)),
             ("Math", NodeKind::Math { op: MathOp::Add, a: 0.0, b: 0.0, c: 0.5 }),
             ("Remap", NodeKind::Remap { vals: [0.0, 0.0, 1.0, 0.0, 1.0], clamp: false }),
-            ("Separate XYZ", NodeKind::Separate { component: 1 }),
+            ("Separate XYZ", NodeKind::Separate),
             ("Combine XYZ", NodeKind::Combine { vals: [0.0; 3] }),
             ("Mix", NodeKind::Mix { vals: [0.5, 0.0, 1.0], clamp: true }),
             ("Reroute", NodeKind::Reroute),
@@ -220,7 +222,9 @@ fn body_top(kind: &NodeKind) -> f32 {
 struct Layout {
     rect: Rect,
     inputs: Vec<Pos2>,
+    /// The first output (what most code needs) and all of them (Separate XYZ has three).
     output: Option<Pos2>,
+    outputs: Vec<Pos2>,
 }
 
 impl Editor {
@@ -302,11 +306,18 @@ impl Editor {
         let n_in = kind.input_count();
         let top_left = self.to_screen(origin, pos);
         let top = body_top(kind);
-        let h = (top + ROW_H * n_in.max(1) as f32 + 6.0) * z;
+        let n_out = if matches!(kind, NodeKind::Separate) { 3 } else { 1 };
+        let h = (top + ROW_H * n_in.max(n_out) as f32 + 6.0) * z;
         let rect = Rect::from_min_size(top_left, Vec2::new(NODE_W * z, h));
         let inputs = (0..n_in).map(|i| Pos2::new(rect.left(), rect.top() + (top + ROW_H * (i as f32 + 0.5)) * z)).collect();
-        let output = has_output(kind).then(|| Pos2::new(rect.right(), rect.top() + HEADER_H * 0.5 * z));
-        Layout { rect, inputs, output }
+        let outputs: Vec<Pos2> = if matches!(kind, NodeKind::Separate) {
+            (0..3).map(|k| Pos2::new(rect.right(), rect.top() + (top + ROW_H * (k as f32 + 0.5)) * z)).collect()
+        } else if has_output(kind) {
+            vec![Pos2::new(rect.right(), rect.top() + HEADER_H * 0.5 * z)]
+        } else {
+            Vec::new()
+        };
+        Layout { rect, inputs, output: outputs.first().copied(), outputs }
     }
 
     pub fn show(&mut self, ui: &mut egui::Ui, graph: &mut Graph, tiling: &BTreeMap<NodeId, Tiling>) {
@@ -393,7 +404,7 @@ impl Editor {
             graph.nodes.iter().map(|(&id, n)| (id, self.layout(origin, &n.kind, n.pos))).collect();
         // Wires under nodes.
         for e in &graph.edges {
-            if let (Some(a), Some(b)) = (layouts[&e.from].output, layouts[&e.to].inputs.get(e.port)) {
+            if let (Some(a), Some(b)) = (layouts[&e.from].outputs.get(e.from_port).copied().or(layouts[&e.from].output), layouts[&e.to].inputs.get(e.port)) {
                 painter.add(bezier(a, *b, Stroke::new(2.0 * self.zoom, type_color(graph.output_type(e.from)))));
             }
         }
@@ -437,7 +448,7 @@ impl Editor {
             let header = Rect::from_min_size(l.rect.min, Vec2::new(l.rect.width(), HEADER_H * z));
             let header_color = if node.muted { Color32::from_gray(60) } else if has_output(&node.kind) { Color32::from_rgb(55, 70, 95) } else { Color32::from_rgb(80, 60, 95) };
             painter.rect_filled(header, CornerRadius { nw: r.nw, ne: r.ne, sw: 0, se: 0 }, header_color);
-            let cacheable = matches!(node.kind, NodeKind::Noise(_) | NodeKind::Math { .. } | NodeKind::Remap { .. } | NodeKind::Mix { .. } | NodeKind::Separate { .. } | NodeKind::Curve { .. } | NodeKind::Grid { .. } | NodeKind::Pattern(_));
+            let cacheable = matches!(node.kind, NodeKind::Noise(_) | NodeKind::Math { .. } | NodeKind::Remap { .. } | NodeKind::Mix { .. } | NodeKind::Separate | NodeKind::Curve { .. } | NodeKind::Grid { .. } | NodeKind::Pattern(_));
             // Keep the title clear of the header buttons.
             let title_clip = header.with_max_x(header.right() - (if cacheable { 48.0 } else { 28.0 }) * z);
             painter.with_clip_rect(title_clip).text(header.left_center() + Vec2::new(8.0 * z, 0.0), egui::Align2::LEFT_CENTER, &{ let name = node.label.clone().filter(|l| !l.is_empty()).unwrap_or_else(|| title(&node.kind)); if node.muted { format!("{name} (muted)") } else { name } }, font.clone(), if node.muted { Color32::from_gray(150) } else { Color32::WHITE });
@@ -560,17 +571,25 @@ impl Editor {
                         // Pull the existing link off its input.
                         Some(src) => {
                             detach = Some((id, port));
+                            self.wire_port = graph.input_from(id, port).map_or(0, |(_, fp)| fp);
                             Wire::FromOutput(src)
                         }
                         None => Wire::FromInput(id, port),
                     });
                 }
             }
-            if let Some(p) = l.output {
-                painter.circle(p, PORT_R * z, type_color(graph.output_type(id)), Stroke::new(1.0, Color32::from_gray(220)));
-                let pr = ui.interact(Rect::from_center_size(p, Vec2::splat(PORT_R * 3.0 * z)), ui.scope_id().with(("out", id)), Sense::drag());
+            let split = matches!(node.kind, NodeKind::Separate);
+            for (k, p) in l.outputs.iter().copied().enumerate() {
+                // Each output of a Separate node is a float; every other node has one output of its own type.
+                let color = if split { type_color(PortType::Float) } else { type_color(graph.output_type(id)) };
+                painter.circle(p, PORT_R * z, color, Stroke::new(1.0, Color32::from_gray(220)));
+                if split {
+                    painter.text(p - Vec2::new(10.0 * z, 0.0), egui::Align2::RIGHT_CENTER, ["X", "Y", "Z"][k], small.clone(), Color32::from_gray(210));
+                }
+                let pr = ui.interact(Rect::from_center_size(p, Vec2::splat(PORT_R * 3.0 * z)), ui.scope_id().with(("out", id, k)), Sense::drag());
                 if pr.drag_started() {
                     self.wire = Some(Wire::FromOutput(id));
+                    self.wire_port = k;
                 }
             }
         }
@@ -644,7 +663,7 @@ impl Editor {
             );
             match wire {
                 Wire::FromOutput(from) => {
-                    if let Some(a) = layouts.get(&from).and_then(|l| l.output) {
+                    if let Some(a) = layouts.get(&from).and_then(|l| l.outputs.get(self.wire_port).copied().or(l.output)) {
                         painter.add(bezier(a, p, drag_stroke));
                     }
                 }
@@ -661,15 +680,15 @@ impl Editor {
                         let hit = layouts.iter().find_map(|(&id, l)| l.inputs.iter().position(near).map(|port| (id, port)));
                         match hit {
                             // Refuse links that would make a cycle.
-                            Some((to, port)) if !graph.depends_on(from, to) => graph.connect(from, to, port),
+                            Some((to, port)) if !graph.depends_on(from, to) => graph.connect_from(from, self.wire_port, to, port),
                             Some(_) => {}
                             None => self.open_pin_menu(origin, canvas, &layouts, p, wire),
                         }
                     }
                     Wire::FromInput(to, port) => {
-                        let hit = layouts.iter().find(|(_, l)| l.output.as_ref().is_some_and(near)).map(|(&id, _)| id);
+                        let hit = layouts.iter().find_map(|(&id, l)| l.outputs.iter().position(near).map(|k| (id, k)));
                         match hit {
-                            Some(from) if !graph.depends_on(from, to) => graph.connect(from, to, port),
+                            Some((from, k)) if !graph.depends_on(from, to) => graph.connect_from(from, k, to, port),
                             Some(_) => {}
                             None => self.open_pin_menu(origin, canvas, &layouts, p, wire),
                         }
@@ -779,7 +798,7 @@ impl Editor {
             };
             let id = graph.add(kind, pos);
             match wire {
-                Wire::FromOutput(from) => graph.connect(from, id, 0),
+                Wire::FromOutput(from) => graph.connect_from(from, self.wire_port, id, 0),
                 Wire::FromInput(to, port) => graph.connect(id, to, port),
             }
             *self.picks.entry(label.to_string()).or_default() += 1;
@@ -872,9 +891,9 @@ fn merge(graph: &mut Graph, src: &Graph, nodes: &BTreeSet<NodeId>, at: [f32; 2])
         }
         map.insert(*old, id);
     }
-    let internal: Vec<_> = src.edges.iter().filter_map(|e| Some((*map.get(&e.from)?, *map.get(&e.to)?, e.port))).collect();
-    for (from, to, port) in internal {
-        graph.connect(from, to, port);
+    let internal: Vec<_> = src.edges.iter().filter_map(|e| Some((*map.get(&e.from)?, e.from_port, *map.get(&e.to)?, e.port))).collect();
+    for (from, from_port, to, port) in internal {
+        graph.connect_from(from, from_port, to, port);
     }
     map.into_values().collect()
 }

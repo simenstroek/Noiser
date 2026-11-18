@@ -858,14 +858,7 @@ fn node_props(ui: &mut egui::Ui, kind: &mut NodeKind) {
                 ui.weak("1 − |a|. Ridge of noise gives ridged noise; Absolute gives billow.");
             }
         }
-        NodeKind::Separate { component } => {
-            ui.horizontal(|ui| {
-                for (c, name) in [(0, "X"), (1, "Y"), (2, "Z")] {
-                    ui.selectable_value(component, c, name);
-                }
-            });
-            ui.weak("One component of the vector, as a float. An unconnected vector is 0.");
-        }
+        NodeKind::Separate => _ = ui.weak("Splits a vector into X, Y and Z floats: drag from the pin of the component you want. An unconnected vector is 0."),
         NodeKind::Combine { .. } => _ = ui.weak("A vector from three floats. Unconnected inputs use the values on the node."),
         NodeKind::Mix { clamp, .. } => {
             row(ui, clamp, true, |ui, c| _ = ui.checkbox(c, "limit the factor to 0..1"));
@@ -1283,23 +1276,10 @@ impl eframe::App for App {
                 ui.weak(&self.status);
             });
         });
-        // The side panel holds the viewport settings, one tab at a time.
+        // The side panel: viewport settings in tabs on top, the selected node's settings in the bottom half.
         egui::Panel::right("props").default_size(320.0).show(ui, |ui| {
-            ui.horizontal_wrapped(|ui| {
-                for (tab, name) in SideTab::ALL {
-                    ui.selectable_value(&mut self.side_tab, tab, name);
-                }
-            });
-            ui.separator();
-            egui::ScrollArea::vertical().show(ui, |ui| match self.side_tab {
-                SideTab::Mesh => self.mesh_props(ui),
-                tab => preview_props(ui, &mut self.pv, self.mesh.is_some(), tab),
-            });
-        });
-        self.graph.prune_edges(); // a Math node switched away from smooth min/max loses its third input
-        // The graph editor, with the selected node's settings as a panel on its right edge (one frame).
-        egui::Panel::bottom("graph").resizable(true).default_size(330.0).show(ui, |ui| {
-            egui::Panel::right("node props").default_size(300.0).show(ui, |ui| {
+            let half = ui.available_height() * 0.5;
+            egui::Panel::bottom("node props").default_size(half).min_size(120.0).resizable(true).show(ui, |ui| {
                 egui::ScrollArea::vertical().show(ui, |ui| {
                 let sel: Vec<_> = self.editor.selected.iter().copied().collect();
                 match sel.as_slice() {
@@ -1329,6 +1309,19 @@ impl eframe::App for App {
                 }
                 });
             });
+            ui.horizontal_wrapped(|ui| {
+                for (tab, name) in SideTab::ALL {
+                    ui.selectable_value(&mut self.side_tab, tab, name);
+                }
+            });
+            ui.separator();
+            egui::ScrollArea::vertical().show(ui, |ui| match self.side_tab {
+                SideTab::Mesh => self.mesh_props(ui),
+                tab => preview_props(ui, &mut self.pv, self.mesh.is_some(), tab),
+            });
+        });
+        self.graph.prune_edges(); // a Math node switched away from smooth min/max loses its third input
+        egui::Panel::bottom("graph").resizable(true).default_size(330.0).show(ui, |ui| {
             self.editor.show(ui, &mut self.graph, &tiling);
         });
         // One undo step per finished gesture: wait until the pointer is released.

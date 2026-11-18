@@ -506,6 +506,20 @@ impl NoiseParams {
 /// Files saved before Voronoi, Voronoi Fractal and Worley became one node: Voronoi is Worley with
 /// the cell-value feature, Voronoi Fractal adds fractal, and a Worley that had octaves keeps them.
 fn migrate_noise_kinds(v: &mut serde_json::Value) {
+    // Separate XYZ used to be one node per component ({"Separate": {"component": c}}); it now has three outputs.
+    let separates: Vec<(u64, u64)> = v
+        .get("nodes")
+        .and_then(|n| n.as_object())
+        .map(|nodes| nodes.iter().filter_map(|(id, n)| Some((id.parse().ok()?, n.pointer("/kind/Separate/component")?.as_u64().unwrap_or(0)))).collect())
+        .unwrap_or_default();
+    for (id, component) in separates {
+        v["nodes"][id.to_string()]["kind"] = "Separate".into();
+        if let Some(edges) = v.get_mut("edges").and_then(|e| e.as_array_mut()) {
+            for e in edges.iter_mut().filter(|e| e.get("from").and_then(|f| f.as_u64()) == Some(id)) {
+                e["from_port"] = component.into();
+            }
+        }
+    }
     let Some(nodes) = v.get_mut("nodes").and_then(|n| n.as_object_mut()) else { return };
     for node in nodes.values_mut() {
         let Some(p) = node.pointer_mut("/kind/Noise").and_then(|p| p.as_object_mut()) else { continue };
@@ -558,8 +572,8 @@ pub enum NodeKind {
     /// Linear map of input 0 from [from min, from max] to [to min, to max]; the other four inputs
     /// are those bounds. `vals` holds the unconnected defaults of all five inputs.
     Remap { vals: [f32; 5], clamp: bool },
-    /// One component (0 X, 1 Y, 2 Z) of a vector input, as a float.
-    Separate { component: u32 },
+    /// Splits a vector input into three float outputs (output ports 0 X, 1 Y, 2 Z: see `Edge::from_port`).
+    Separate,
     /// A vector from three floats; `vals` holds the unconnected defaults of X, Y and Z.
     Combine { vals: [f32; 3] },
     /// Blends A into B: `a + (b - a) * factor`, the factor limited to 0..1 when `clamp`. Inputs are
@@ -599,7 +613,7 @@ impl NodeKind {
             NodeKind::Math { op, .. } => if op.is_smooth() { 3 } else if op.is_unary() { 1 } else { 2 },
             NodeKind::Remap { .. } => 5,
             NodeKind::Mix { .. } | NodeKind::Combine { .. } => 3,
-            NodeKind::Separate { .. } => 1,
+            NodeKind::Separate => 1,
             NodeKind::Curve { .. } => 1,
             NodeKind::Normal { .. } | NodeKind::Noise(_) | NodeKind::Grid { .. } | NodeKind::Pattern(_) | NodeKind::OutDensity | NodeKind::OutNormal => 1,
         }
@@ -660,12 +674,19 @@ pub struct Node {
     pub label: Option<String>,
 }
 
-/// Every node has a single output, so an edge is "output of `from` → input `port` of `to`".
+/// An edge is "output `from_port` of `from` → input `port` of `to`". Nearly every node has one output (port 0);
+/// Separate XYZ has three.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Edge {
     pub from: NodeId,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub from_port: usize,
     pub to: NodeId,
     pub port: usize,
+}
+
+fn is_zero(n: &usize) -> bool {
+    *n == 0
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -696,7 +717,29 @@ impl Graph {
     /// Connects `from` into input `port` of `to`, replacing any existing link on that input.
     pub fn connect(&mut self, from: NodeId, to: NodeId, port: usize) {
         self.edges.retain(|e| !(e.to == to && e.port == port));
-        self.edges.push(Edge { from, to, port });
+        self.edges.push(Edge { from, from_port: 0, to, port });
+    }
+
+    /// Like `connect`, from output `from_port` of `from`.
+    pub fn connect_from(&mut self, from: NodeId, from_port: usize, to: NodeId, port: usize) {
+        self.connect(from, to, port);
+        if let Some(e) = self.edges.last_mut() {
+            e.from_port = from_port;
+        }
+    }
+
+    /// The node feeding `port` of `to` and which of its outputs, looking through muted nodes and reroutes.
+    pub fn input_from(&self, to: NodeId, port: usize) -> Option<(NodeId, usize)> {
+        let e = self.edges.iter().find(|e| e.to == to && e.port == port)?;
+        let (mut src, mut from_port) = (e.from, e.from_port);
+        for _ in 0..=self.nodes.len() {
+            if !self.nodes.get(&src).is_some_and(|n| n.muted || n.kind == NodeKind::Reroute) {
+                return Some((src, from_port));
+            }
+            let e = self.edges.iter().find(|e| e.to == src && e.port == 0)?;
+            (src, from_port) = (e.from, e.from_port);
+        }
+        None
     }
 
     pub fn remove(&mut self, id: NodeId) {
@@ -965,7 +1008,7 @@ impl Graph {
             NodeKind::Position => Coord,
             NodeKind::Reroute => input(0, memo, stack).unwrap_or(Const),
             // One coordinate of a position is still position-like (it shifts by whole numbers with the tile).
-            NodeKind::Separate { .. } => input(0, memo, stack).unwrap_or(Const),
+            NodeKind::Separate => input(0, memo, stack).unwrap_or(Const),
             NodeKind::Combine { .. } => {
                 // A whole position feeding one of the float inputs is averaged to a single number, which shifts by
                 // a third per tile: not a coordinate any more (Separate XYZ takes one exact component).
@@ -1118,7 +1161,7 @@ impl Graph {
     /// The type an input expects; for Math it follows what is connected.
     pub fn input_type(&self, id: NodeId, port: usize) -> PortType {
         match &self.nodes[&id].kind {
-            NodeKind::Noise(_) | NodeKind::Grid { .. } | NodeKind::Pattern(_) | NodeKind::OutNormal | NodeKind::Separate { .. } => PortType::Vector,
+            NodeKind::Noise(_) | NodeKind::Grid { .. } | NodeKind::Pattern(_) | NodeKind::OutNormal | NodeKind::Separate => PortType::Vector,
             NodeKind::Math { op, .. } if port < 2 => {
                 let vector = *op == MathOp::Dot || (0..2).any(|p| self.input(id, p).is_some_and(|s| self.yields_vector(s)));
                 if vector { PortType::Vector } else { PortType::Float }
@@ -1176,7 +1219,7 @@ impl Graph {
             NodeKind::Float(v) => (*v, *v),
             NodeKind::Vec3(v) => (v.iter().cloned().fold(f32::MAX, f32::min), v.iter().cloned().fold(f32::MIN, f32::max)),
             NodeKind::Position => UNBOUNDED,
-            NodeKind::Separate { .. } => match self.input(id, 0) {
+            NodeKind::Separate => match self.input(id, 0) {
                 Some(src) => self.range_of(src, stack),
                 None => (0.0, 0.0),
             },
@@ -1648,7 +1691,7 @@ mod tests {
         let g = Graph::default_graph();
         assert_eq!(Graph::from_json(&g.to_json()).unwrap(), g);
         let mut bad = g.clone();
-        bad.edges.push(Edge { from: 0, to: 2, port: 5 });
+        bad.edges.push(Edge { from: 0, from_port: 0, to: 2, port: 5 });
         assert!(Graph::from_json(&bad.to_json()).is_err());
     }
 }
@@ -1713,5 +1756,17 @@ mod frame_tests {
         let mut g = Graph::default_graph();
         g.add(NodeKind::Noise(NoiseParams { scale: 2.5, ..NoiseParams::default() }), [0.0; 2]);
         assert_eq!(g.tiling_problem_upstream(), None);
+    }
+
+    #[test]
+    fn old_single_component_separate_nodes_become_output_pins() {
+        let old = r#"{"nodes": {"0": {"kind": "Position", "pos": [0,0]}, "1": {"kind": {"Separate": {"component": 2}}, "pos": [0,0]}, "2": {"kind": "OutDensity", "pos": [0,0]}},
+                       "edges": [{"from": 0, "to": 1, "port": 0}, {"from": 1, "to": 2, "port": 0}]}"#;
+        let g = Graph::from_json(old).unwrap();
+        assert_eq!(g.nodes[&1].kind, NodeKind::Separate);
+        assert_eq!(g.input_from(2, 0), Some((1, 2)), "the old Z component is output pin 2");
+        let again = Graph::from_json(&g.to_json()).unwrap();
+        assert_eq!(again.input_from(2, 0), Some((1, 2)));
+        assert!(!Graph::default_graph().to_json().contains("from_port"));
     }
 }
