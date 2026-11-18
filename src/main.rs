@@ -182,6 +182,8 @@ struct App {
     shortcuts_open: bool,
     prefs: Prefs,
     prefs_open: bool,
+    /// Which tab of the side panel is showing.
+    side_tab: SideTab,
     /// A New / Open that is waiting for the user to decide about unsaved changes.
     pending: Option<Pending>,
     about_open: bool,
@@ -307,6 +309,7 @@ impl App {
             shortcuts_open: false,
             prefs: prefs.clone(),
             prefs_open: false,
+            side_tab: SideTab::default(),
             pending: None,
             about_open: false,
             title: String::new(),
@@ -664,9 +667,26 @@ fn row<T: PartialEq>(ui: &mut egui::Ui, value: &mut T, default: T, widget: impl 
     });
 }
 
-fn preview_props(ui: &mut egui::Ui, pv: &mut Preview, mesh_loaded: bool) {
+/// The tabs of the side panel.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+enum SideTab {
+    #[default]
+    View3d,
+    Material,
+    Lighting,
+    Slice,
+    Mesh,
+}
+
+impl SideTab {
+    const ALL: [(SideTab, &'static str); 5] = [(SideTab::View3d, "3D view"), (SideTab::Material, "Material"), (SideTab::Lighting, "Lighting"), (SideTab::Slice, "Slice"), (SideTab::Mesh, "Mesh")];
+}
+
+/// The viewport settings of one tab (the Mesh tab is drawn by `App::mesh_props`).
+fn preview_props(ui: &mut egui::Ui, pv: &mut Preview, mesh_loaded: bool, tab: SideTab) {
     let d = Preview::default();
-    ui.heading("3D view");
+    match tab {
+        SideTab::View3d => {
     row(ui, &mut pv.cloud, d.cloud, |ui, v| {
         ui.selectable_value(v, false, "Solid");
         ui.selectable_value(v, true, "Cloud");
@@ -699,14 +719,17 @@ fn preview_props(ui: &mut egui::Ui, pv: &mut Preview, mesh_loaded: bool) {
             });
         });
         row(ui, &mut pv.max_steps, d.max_steps, |ui, v| _ = ui.add(egui::Slider::new(v, 32..=600).logarithmic(true).text("max march steps")));
-        ui.separator();
-        ui.heading("Material (viewport only)");
+        }
+        }
+        SideTab::Material => {
+            ui.weak("Viewport only: never exported.");
         row(ui, &mut pv.color, d.color, |ui, v| _ = ui.color_edit_button_rgb(v));
         row(ui, &mut pv.specular, d.specular, |ui, v| _ = ui.add(egui::Slider::new(v, 0.0..=1.0).text("specular")));
         row(ui, &mut pv.roughness, d.roughness, |ui, v| _ = ui.add(egui::Slider::new(v, 0.05..=1.0).text("roughness")));
         row(ui, &mut pv.shadows, d.shadows, |ui, v| _ = ui.checkbox(v, "soft shadows"));
-        ui.separator();
-        ui.heading("Lighting (viewport only)");
+        }
+        SideTab::Lighting => {
+            ui.weak("Viewport only: never exported.");
         ui.horizontal(|ui| {
             for (name, preset) in Lighting::PRESETS {
                 if ui.button(name).clicked() {
@@ -732,9 +755,8 @@ fn preview_props(ui: &mut egui::Ui, pv: &mut Preview, mesh_loaded: bool) {
             ui.color_edit_button_rgb(v);
             ui.label("sky bottom");
         });
-    }
-    ui.separator();
-    ui.heading("Slice view");
+        }
+        SideTab::Slice => {
     row(ui, &mut pv.slice_axis, d.slice_axis, |ui, v| {
         ui.label("axis");
         for (i, name) in ["X", "Y", "Z"].iter().enumerate() {
@@ -747,6 +769,9 @@ fn preview_props(ui: &mut egui::Ui, pv: &mut Preview, mesh_loaded: bool) {
         ui.selectable_value(v, true, "Heatmap");
     });
     row(ui, &mut pv.tiles_2x2, d.tiles_2x2, |ui, v| _ = ui.checkbox(v, "show 2×2 tiles"));
+        }
+        SideTab::Mesh => {}
+    }
 }
 
 /// The per-node cache controls: preview-only, so they sit apart from the node's own parameters.
@@ -1258,8 +1283,24 @@ impl eframe::App for App {
                 ui.weak(&self.status);
             });
         });
+        // The side panel holds the viewport settings, one tab at a time.
         egui::Panel::right("props").default_size(320.0).show(ui, |ui| {
-            egui::ScrollArea::vertical().show(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                for (tab, name) in SideTab::ALL {
+                    ui.selectable_value(&mut self.side_tab, tab, name);
+                }
+            });
+            ui.separator();
+            egui::ScrollArea::vertical().show(ui, |ui| match self.side_tab {
+                SideTab::Mesh => self.mesh_props(ui),
+                tab => preview_props(ui, &mut self.pv, self.mesh.is_some(), tab),
+            });
+        });
+        self.graph.prune_edges(); // a Math node switched away from smooth min/max loses its third input
+        // The graph editor, with the selected node's settings as a panel on its right edge (one frame).
+        egui::Panel::bottom("graph").resizable(true).default_size(330.0).show(ui, |ui| {
+            egui::Panel::right("node props").default_size(300.0).show(ui, |ui| {
+                egui::ScrollArea::vertical().show(ui, |ui| {
                 let sel: Vec<_> = self.editor.selected.iter().copied().collect();
                 match sel.as_slice() {
                     [id] if self.graph.nodes.contains_key(id) => {
@@ -1286,13 +1327,8 @@ impl eframe::App for App {
                     [] => _ = ui.weak("Select a node to edit it."),
                     _ => _ = ui.weak(format!("{} nodes selected", sel.len())),
                 }
-                ui.separator();
-                preview_props(ui, &mut self.pv, self.mesh.is_some());
-                self.mesh_props(ui);
+                });
             });
-        });
-        self.graph.prune_edges(); // a Math node switched away from smooth min/max loses its third input
-        egui::Panel::bottom("graph").resizable(true).default_size(330.0).show(ui, |ui| {
             self.editor.show(ui, &mut self.graph, &tiling);
         });
         // One undo step per finished gesture: wait until the pointer is released.
