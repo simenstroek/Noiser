@@ -1136,6 +1136,25 @@ impl Graph {
         }
     }
 
+    /// Why the result of the outputs does not tile, if some node feeding them breaks tiling.
+    pub fn tiling_problem_upstream(&self) -> Option<String> {
+        let tiling = self.tiling();
+        let mut seen = BTreeSet::new();
+        let mut stack: Vec<NodeId> = [NodeKind::OutDensity, NodeKind::OutNormal].iter().filter_map(|k| self.find(|n| n == k)).collect();
+        while let Some(id) = stack.pop() {
+            if !seen.insert(id) {
+                continue;
+            }
+            if let Some(Tiling::Broken(why)) = tiling.get(&id) {
+                return Some(why.clone());
+            }
+            for port in 0..self.nodes.get(&id).map_or(0, |n| n.kind.input_count()) {
+                stack.extend(self.input(id, port));
+            }
+        }
+        None
+    }
+
     /// The interval a node's output stays within (infinite ends when unbounded); vectors use one interval for all components.
     pub fn node_range(&self, id: NodeId) -> Range {
         if self.nodes.contains_key(&id) { self.range_of(id, &mut Vec::new()) } else { (0.0, 0.0) }
@@ -1673,5 +1692,19 @@ mod frame_tests {
         assert!(!g.to_json().contains("label"));
         g.nodes.get_mut(&1).unwrap().label = Some("Base noise".into());
         assert_eq!(Graph::from_json(&g.to_json()).unwrap().nodes[&1].label.as_deref(), Some("Base noise"));
+    }
+
+    #[test]
+    fn the_export_warning_finds_a_broken_node_upstream_of_the_outputs() {
+        let mut g = Graph::default_graph(); // Position -> Noise (scale 8?) -> Density
+        assert_eq!(g.tiling_problem_upstream(), None);
+        if let NodeKind::Noise(p) = &mut g.nodes.get_mut(&1).unwrap().kind {
+            p.scale = 2.5; // a fractional scale breaks tiling
+        }
+        assert!(g.tiling_problem_upstream().is_some());
+        // A broken node that nothing reads is not a problem.
+        let mut g = Graph::default_graph();
+        g.add(NodeKind::Noise(NoiseParams { scale: 2.5, ..NoiseParams::default() }), [0.0; 2]);
+        assert_eq!(g.tiling_problem_upstream(), None);
     }
 }

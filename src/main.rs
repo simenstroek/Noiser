@@ -402,6 +402,9 @@ impl App {
             for w in s.warnings() {
                 ui.colored_label(editor::ORANGE, format!("⚠ {w}"));
             }
+            if let Some(why) = self.graph.tiling_problem_upstream() {
+                ui.colored_label(editor::ORANGE, format!("⚠ The result does not tile: {why}"));
+            }
             ui.separator();
             match &self.export_job {
                 Some(job) => {
