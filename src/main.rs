@@ -830,7 +830,7 @@ fn cache_props(ui: &mut egui::Ui, graph: &mut Graph, id: graph::NodeId, tiling: 
 }
 
 /// Properties of one node.
-fn node_props(ui: &mut egui::Ui, kind: &mut NodeKind) {
+fn node_props(ui: &mut egui::Ui, kind: &mut NodeKind, names: &[String]) {
     match kind {
         NodeKind::Float(_) | NodeKind::Vec3(_) => {
             let is_vec = matches!(kind, NodeKind::Vec3(_));
@@ -963,6 +963,21 @@ fn node_props(ui: &mut egui::Ui, kind: &mut NodeKind) {
         }
         NodeKind::Position => _ = ui.label("World position. Feeds noise inputs by default."),
         NodeKind::Reroute => _ = ui.weak("A waypoint on a wire: it passes its input through unchanged."),
+        NodeKind::NamedReroute { name } => {
+            ui.add(egui::TextEdit::singleline(name).hint_text("name"));
+            ui.weak("Passes its input on and gives it a name: add a Use named reroute node anywhere and pick this name, no wire needed.");
+        }
+        NodeKind::NamedRerouteUse { name } => {
+            ui.weak("Reads the named reroute with this name, without a wire.");
+            egui::ComboBox::from_label("name").selected_text(name.clone()).show_ui(ui, |ui| {
+                for n in names {
+                    ui.selectable_value(name, n.clone(), n);
+                }
+            });
+            if names.is_empty() {
+                ui.colored_label(editor::ORANGE, "No named reroute exists yet: add one and name it.");
+            }
+        }
         NodeKind::OutDensity | NodeKind::OutNormal => {}
     }
 }
@@ -1340,6 +1355,7 @@ impl eframe::App for App {
                 let sel: Vec<_> = self.editor.selected.iter().copied().collect();
                 match sel.as_slice() {
                     [id] if self.graph.nodes.contains_key(id) => {
+                        let names = self.graph.declared_names();
                         let node = self.graph.nodes.get_mut(id).unwrap();
                         let has_output_kind = editor::has_output(&node.kind);
                         ui.heading(editor::title(&node.kind));
@@ -1347,7 +1363,7 @@ impl eframe::App for App {
                         if ui.add(egui::TextEdit::singleline(&mut label).hint_text("Label (shown on the node)").desired_width(f32::INFINITY)).changed() {
                             node.label = Some(label).filter(|l| !l.is_empty());
                         }
-                        node_props(ui, &mut node.kind);
+                        node_props(ui, &mut node.kind, &names);
                         // Below the controls: appearing above them mid-drag shifted the slider out from
                         // under the cursor and ended the drag.
                         if let Some(Tiling::Broken(why)) = tiling.get(id) {
@@ -1909,7 +1925,7 @@ mod curve_ui_tests {
     #[test]
     fn the_curve_panel_draws_and_lists_every_point() {
         let kind = NodeKind::Curve { points: vec![[0.0, 0.0], [0.5, 1.0], [1.0, 0.2]], mode: graph::CurveMode::Cubic };
-        let mut h = Harness::builder().with_size(egui::Vec2::new(400.0, 600.0)).build_ui_state(|ui, kind: &mut NodeKind| node_props(ui, kind), kind);
+        let mut h = Harness::builder().with_size(egui::Vec2::new(400.0, 600.0)).build_ui_state(|ui, kind: &mut NodeKind| node_props(ui, kind, &[]), kind);
         h.run();
         assert!(h.get_all_by_label("x").count() >= 3, "a remove button per point");
         h.get_by_label("Cubic");
@@ -1918,7 +1934,7 @@ mod curve_ui_tests {
     #[test]
     fn dragging_a_point_in_the_curve_plot_moves_it() {
         let kind = NodeKind::Curve { points: vec![[0.0, 0.0], [0.5, 1.0], [1.0, 0.2]], mode: graph::CurveMode::Linear };
-        let mut h = Harness::builder().with_size(egui::Vec2::new(400.0, 600.0)).with_step_dt(1.0 / 60.0).build_ui_state(|ui, kind: &mut NodeKind| node_props(ui, kind), kind);
+        let mut h = Harness::builder().with_size(egui::Vec2::new(400.0, 600.0)).with_step_dt(1.0 / 60.0).build_ui_state(|ui, kind: &mut NodeKind| node_props(ui, kind, &[]), kind);
         h.run();
         let label = h.get_by_label("Interpolation").rect();
         let (left, top) = (label.left(), label.bottom() + ui_spacing());

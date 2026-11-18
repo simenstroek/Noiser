@@ -56,6 +56,7 @@ pub fn ops(g: &Graph, seed: u32) -> Result<Value, String> {
             let mut op = match &g.nodes[&id].kind {
                 NodeKind::Position => json!({"op": "position"}),
                 // A passthrough, written as adding zero.
+                NodeKind::NamedReroute { .. } | NodeKind::NamedRerouteUse { .. } => unreachable!("readers look through named reroutes"),
                 NodeKind::Reroute => json!({"op": "math", "fn": "add", "a": input(id, 0), "b": 0.0}),
                 NodeKind::Float(v) => json!({"op": "value", "value": v}),
                 NodeKind::Vec3(v) => json!({"op": "value", "value": v}),

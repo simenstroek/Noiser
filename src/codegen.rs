@@ -314,6 +314,8 @@ impl Gen<'_> {
             NodeKind::Float(_) => (Ty::F, format!("P[{s}]")),
             NodeKind::Vec3(_) => (Ty::V, format!("vec3f(P[{s}], P[{}], P[{}])", s + 1, s + 2)),
             NodeKind::Position => (Ty::V, "p".into()),
+            // Never reached (readers look through them), but the match must be complete.
+            NodeKind::NamedReroute { .. } | NodeKind::NamedRerouteUse { .. } => (Ty::F, "0.0".into()),
             NodeKind::Reroute => {
                 let ty = self.source(id, 0).map_or(Ty::F, |(_, ty)| ty);
                 (ty, self.operand(id, 0, ty, &convert("0.0", Ty::F, ty)))
@@ -423,7 +425,7 @@ pub(crate) fn random_graph(rnd: &mut impl FnMut(usize) -> usize) -> Graph {
     let mut g = Graph::default();
     let count = 3 + rnd(6);
     for i in 0..count {
-        let kind = match rnd(14) {
+        let kind = match rnd(16) {
             0 => K::Float(rnd(5) as f32 - 2.0),
             1 => K::Vec3([rnd(3) as f32, 0.5, -1.0]),
             2 => K::Position,
@@ -437,6 +439,8 @@ pub(crate) fn random_graph(rnd: &mut impl FnMut(usize) -> usize) -> Graph {
             10 => K::Reroute,
             11 => K::Separate,
             12 => K::Combine { vals: [0.5, 1.0, -1.0] },
+            13 => K::NamedReroute { name: format!("n{i}") },
+            14 => K::NamedRerouteUse { name: "none".into() },
             _ => K::Noise(NoiseParams {
                 kind: crate::graph::NoiseKind::ALL[rnd(5)],
                 feature: [WorleyFeature::F1, WorleyFeature::F2, WorleyFeature::F2MinusF1, WorleyFeature::CellValue, WorleyFeature::Edges][rnd(5)],
@@ -447,6 +451,15 @@ pub(crate) fn random_graph(rnd: &mut impl FnMut(usize) -> usize) -> Graph {
         };
         let id = g.add(kind, [i as f32 * 50.0, 0.0]);
         g.nodes.get_mut(&id).unwrap().muted = rnd(7) == 0;
+    }
+    // A use reads a declaration with a lower id (or nothing), so names cannot make cycles either.
+    let decls: Vec<(u32, String)> = g.nodes.iter().filter_map(|(id, n)| if let K::NamedReroute { name } = &n.kind { Some((*id, name.clone())) } else { None }).collect();
+    for (id, n) in g.nodes.iter_mut() {
+        if let K::NamedRerouteUse { name } = &mut n.kind {
+            if let Some((_, d)) = decls.iter().rev().find(|(did, _)| did < id) {
+                *name = d.clone();
+            }
+        }
     }
     // Links only from earlier to later nodes, so there are no cycles.
     for to in 1..count as u32 {

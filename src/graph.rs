@@ -597,6 +597,11 @@ pub enum NodeKind {
     Position,
     /// A waypoint on a wire: passes its input through (every reader skips it, like a muted node).
     Reroute,
+    /// The named end of a wire (Unreal's named reroute): passes its input on, and any `NamedRerouteUse` with the
+    /// same name reads it without a wire.
+    NamedReroute { name: String },
+    /// Reads the value of the `NamedReroute` with its name (the lowest node id wins when there are several).
+    NamedRerouteUse { name: String },
     /// Input: the field to differentiate. Output: unit gradient (points low → high unless flipped).
     Normal { flip: bool },
     /// Input: position (defaults to world position).
@@ -609,7 +614,8 @@ impl NodeKind {
     pub fn input_count(&self) -> usize {
         match self {
             NodeKind::Float(_) | NodeKind::Vec3(_) | NodeKind::Position => 0,
-            NodeKind::Reroute => 1,
+            NodeKind::Reroute | NodeKind::NamedReroute { .. } => 1,
+            NodeKind::NamedRerouteUse { .. } => 0,
             NodeKind::Math { op, .. } => if op.is_smooth() { 3 } else if op.is_unary() { 1 } else { 2 },
             NodeKind::Remap { .. } => 5,
             NodeKind::Mix { .. } | NodeKind::Combine { .. } => 3,
@@ -757,15 +763,35 @@ impl Graph {
     /// The node feeding `port` of `to` and which of its outputs, looking through muted nodes and reroutes.
     pub fn input_from(&self, to: NodeId, port: usize) -> Option<(NodeId, usize)> {
         let e = self.edges.iter().find(|e| e.to == to && e.port == port)?;
-        let (mut src, mut from_port) = (e.from, e.from_port);
-        for _ in 0..=self.nodes.len() {
-            if !self.nodes.get(&src).is_some_and(|n| n.muted || n.kind == NodeKind::Reroute) {
-                return Some((src, from_port));
-            }
-            let e = self.edges.iter().find(|e| e.to == src && e.port == 0)?;
+        self.follow(e.from, e.from_port)
+    }
+
+    /// Looks through muted nodes, reroutes and named reroutes (a use jumps to its declaration's source).
+    fn follow(&self, mut src: NodeId, mut from_port: usize) -> Option<(NodeId, usize)> {
+        for _ in 0..=2 * self.nodes.len() {
+            let Some(n) = self.nodes.get(&src) else { return Some((src, from_port)) };
+            let next_from = match &n.kind {
+                NodeKind::NamedRerouteUse { name } => self.named_declaration(name)?,
+                k if n.muted || matches!(k, NodeKind::Reroute | NodeKind::NamedReroute { .. }) => src,
+                _ => return Some((src, from_port)),
+            };
+            let e = self.edges.iter().find(|e| e.to == next_from && e.port == 0)?;
             (src, from_port) = (e.from, e.from_port);
         }
-        None
+        None // a loop
+    }
+
+    /// The declaration a name refers to.
+    pub fn named_declaration(&self, name: &str) -> Option<NodeId> {
+        self.nodes.iter().find(|(_, n)| matches!(&n.kind, NodeKind::NamedReroute { name: d } if d == name)).map(|(id, _)| *id)
+    }
+
+    /// The names declared by named reroutes, sorted.
+    pub fn declared_names(&self) -> Vec<String> {
+        let mut v: Vec<String> = self.nodes.values().filter_map(|n| if let NodeKind::NamedReroute { name } = &n.kind { Some(name.clone()) } else { None }).collect();
+        v.sort();
+        v.dedup();
+        v
     }
 
     pub fn remove(&mut self, id: NodeId) {
@@ -800,14 +826,7 @@ impl Graph {
 
     /// The node feeding `port` of `to`, looking through muted nodes (which pass their first input on).
     pub fn input(&self, to: NodeId, port: usize) -> Option<NodeId> {
-        let mut src = self.edges.iter().find(|e| e.to == to && e.port == port)?.from;
-        for _ in 0..=self.nodes.len() {
-            if !self.nodes.get(&src).is_some_and(|n| n.muted || n.kind == NodeKind::Reroute) {
-                return Some(src);
-            }
-            src = self.edges.iter().find(|e| e.to == src && e.port == 0)?.from;
-        }
-        None // a loop of muted nodes
+        self.input_from(to, port).map(|(src, _)| src)
     }
 
     pub fn find(&self, pred: impl Fn(&NodeKind) -> bool) -> Option<NodeId> {
@@ -886,7 +905,8 @@ impl Graph {
     pub fn yields_vector(&self, id: NodeId) -> bool {
         match &self.nodes[&id].kind {
             NodeKind::Vec3(_) | NodeKind::Position | NodeKind::Normal { .. } | NodeKind::Combine { .. } => true,
-            NodeKind::Reroute => self.input(id, 0).is_some_and(|s| self.yields_vector(s)),
+            NodeKind::Reroute | NodeKind::NamedReroute { .. } => self.input(id, 0).is_some_and(|s| self.yields_vector(s)),
+            NodeKind::NamedRerouteUse { name } => self.named_declaration(name).and_then(|d| self.input(d, 0)).is_some_and(|s| self.yields_vector(s)),
             NodeKind::Math { op, .. } => *op != MathOp::Dot && (0..2).any(|p| self.input(id, p).is_some_and(|s| self.yields_vector(s))),
             _ => false,
         }
@@ -1032,7 +1052,11 @@ impl Graph {
         let t = match &self.nodes[&id].kind {
             NodeKind::Float(_) | NodeKind::Vec3(_) => Const,
             NodeKind::Position => Coord,
-            NodeKind::Reroute => input(0, memo, stack).unwrap_or(Const),
+            NodeKind::Reroute | NodeKind::NamedReroute { .. } => input(0, memo, stack).unwrap_or(Const),
+            NodeKind::NamedRerouteUse { name } => match self.named_declaration(name).and_then(|d| self.input(d, 0)) {
+                Some(src) => self.tiling_of(src, memo, stack),
+                None => Const,
+            },
             // One coordinate of a position is still position-like (it shifts by whole numbers with the tile).
             NodeKind::Separate => input(0, memo, stack).unwrap_or(Const),
             NodeKind::Combine { .. } => {
@@ -1260,7 +1284,11 @@ impl Graph {
                 }
                 r
             }
-            NodeKind::Reroute => match self.input(id, 0) {
+            NodeKind::Reroute | NodeKind::NamedReroute { .. } => match self.input(id, 0) {
+                Some(src) => self.range_of(src, stack),
+                None => (0.0, 0.0),
+            },
+            NodeKind::NamedRerouteUse { name } => match self.named_declaration(name).and_then(|d| self.input(d, 0)) {
                 Some(src) => self.range_of(src, stack),
                 None => (0.0, 0.0),
             },
@@ -1794,5 +1822,25 @@ mod frame_tests {
         let again = Graph::from_json(&g.to_json()).unwrap();
         assert_eq!(again.input_from(2, 0), Some((1, 2)));
         assert!(!Graph::default_graph().to_json().contains("from_port"));
+    }
+
+    #[test]
+    fn a_named_reroute_use_reads_its_declaration_without_a_wire() {
+        let mut g = Graph::default_graph(); // 0 Position -> 1 Noise -> 2 OutDensity
+        let decl = g.add(NodeKind::NamedReroute { name: "base".into() }, [0.0; 2]);
+        let usage = g.add(NodeKind::NamedRerouteUse { name: "base".into() }, [0.0; 2]);
+        let add = g.add(NodeKind::Math { op: MathOp::Add, a: 0.0, b: 1.0, c: 0.5 }, [0.0; 2]);
+        g.connect(1, decl, 0);
+        g.connect(usage, add, 0);
+        g.connect(add, 2, 0);
+        assert_eq!(g.input(add, 0), Some(1), "the use resolves through the declaration to the noise");
+        assert_eq!(g.declared_names(), vec!["base".to_string()]);
+        assert_eq!(g.density_range(), (0.0, 2.0), "ranges follow it too");
+        // An unknown name reads nothing.
+        if let NodeKind::NamedRerouteUse { name } = &mut g.nodes.get_mut(&usage).unwrap().kind {
+            *name = "missing".into();
+        }
+        assert_eq!(g.input(add, 0), None);
+        assert!(!Graph::from_json(&g.to_json()).unwrap().nodes.is_empty());
     }
 }
