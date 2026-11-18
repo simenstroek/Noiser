@@ -204,7 +204,29 @@ def perlin_call(b, x, period, seed):
     return n.outputs[0]
 
 
+def white_noise(b, op, q):
+    """white(x, period, seed): the x component of the cell's hash, as -1 to 1."""
+    if op["distortion"] != 0.0:
+        raise Unsupported("white noise with distortion")
+    scale = op["scale"]
+    period = int(scale) if float(scale).is_integer() else 0
+    x = b.vmath("SCALE", q, scale)
+    cell = b.vmath("FLOOR", x)
+    pv = b.combine(float(period), float(period), float(period))
+    cell = b.vmath("SUBTRACT", cell, b.vmath("MULTIPLY", pv, b.vmath("FLOOR", b.vmath("DIVIDE", cell, pv))))
+    seed_mul = b.imath("MULTIPLY", op["seed"], 0x9E3779B9)
+    h = pcg_hash3(b, b.separate(cell), seed_mul)
+    v = b.math("MULTIPLY_ADD", h[0], 2.0)
+    v.node.inputs[2].default_value = -1.0
+    if op["normalize"]:
+        v = b.math("MULTIPLY_ADD", v, 0.5)
+        v.node.inputs[2].default_value = 0.5
+    return v
+
+
 def noise(b, op, q):
+    if op["kind"] == "white":
+        return white_noise(b, op, q)
     if op["kind"] != "perlin":
         raise Unsupported(f"{op['kind']} noise (use Noiser's VDB export for now)")
     scale, octaves, lac = op["scale"], max(op["octaves"], 1), op["lacunarity"]
