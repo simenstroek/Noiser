@@ -691,7 +691,7 @@ fn row<T: PartialEq>(ui: &mut egui::Ui, value: &mut T, default: T, widget: impl 
 /// The output multiplier of a Noise or Pattern node (saves a Multiply node, for example for a warp offset).
 fn amount_row(ui: &mut egui::Ui, amount: &mut f32) {
     row(ui, amount, 1.0, |ui, v| {
-        ui.add(egui::DragValue::new(v).range(-1000.0..=1000.0).speed(0.005).prefix("amount × "))
+        ui.add(egui::DragValue::new(v).range(-1000.0..=1000.0).speed(0.005).prefix("amplitude × "))
             .on_hover_text("The node's output is multiplied by this: 0.01 gives a small offset for domain warping without a Multiply node.");
     });
 }
@@ -968,7 +968,7 @@ fn node_props(ui: &mut egui::Ui, kind: &mut NodeKind, names: &[String]) {
                 }
                 row(ui, &mut n.fractal, d.fractal, |ui, v| _ = ui.checkbox(v, "fractal (octaves)"));
             }
-            row(ui, &mut n.scale, d.scale, |ui, v| _ = ui.add(egui::Slider::new(v, 0.5..=32.0).text("scale (cells/tile)")));
+            row(ui, &mut n.scale, d.scale, |ui, v| _ = ui.add(egui::Slider::new(v, 0.5..=32.0).text("frequency (cells/tile)")));
             row(ui, &mut n.normalize, d.normalize, |ui, v| _ = ui.checkbox(v, "normalize 0-1"));
             if n.uses_octaves() {
                 row(ui, &mut n.octaves, d.octaves, |ui, v| _ = ui.add(egui::Slider::new(v, 1..=8).text("octaves")));
