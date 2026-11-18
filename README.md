@@ -2,7 +2,8 @@
 
 A node-based editor for **tiling 3D noise**. You build a graph of noises, patterns and math, watch it
 as a raymarched shape and as a 2D slice while you work, and export it as 2D or 3D textures, an
-OpenVDB volume, or a portable `.noiser` math-function file that other software can evaluate.
+OpenVDB volume, or a portable `.noiser` math-function file that other software can evaluate. The same graph can
+also displace low-polygon meshes (single files or whole batches, from the app or a script) into high-resolution ones.
 
 Everything is evaluated on the GPU (Rust, egui, wgpu). Resolution never limits the detail: the graph
 stays a function, and exports sample it at whatever resolution you ask for.
