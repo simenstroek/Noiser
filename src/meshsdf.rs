@@ -234,6 +234,11 @@ impl MeshQuery {
         q
     }
 
+    /// Whether the surface is an open sheet (a terrain, a leaf) rather than an enclosed solid.
+    pub fn is_open(&self) -> bool {
+        self.open
+    }
+
     /// Whether the surface is open: far from the mesh the winding number of a closed surface is a
     /// whole number (0, 1, 2...), while a sheet gives about one half on either side.
     fn looks_open(&self, mesh: &Mesh) -> bool {

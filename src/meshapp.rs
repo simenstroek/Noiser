@@ -60,6 +60,8 @@ impl App {
         std::thread::spawn(move || {
             let baked = crate::meshformats::load(&path).map(|mesh| {
                 let (normalized, norm) = mesh.normalized();
+                // Open sheets (terrains) need a finer grid to look right; a default setting is raised for them.
+                let res = if res == DEFAULT_RES && crate::meshsdf::MeshQuery::new(&normalized).is_open() { 2 * DEFAULT_RES } else { res };
                 let sdf = MeshSdf::build(&normalized, res, pad, &AtomicU32::new(0));
                 Baked { name, normalized: Arc::new(normalized), norm, sdf, res, pad, new_file: true }
             });
@@ -106,6 +108,7 @@ impl App {
         self.mesh_gen += 1;
         if b.new_file {
             self.pv.prim = MESH_PRIM;
+            self.mesh_res = b.res; // shows what was actually baked
         }
     }
 
