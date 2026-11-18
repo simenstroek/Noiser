@@ -1365,7 +1365,8 @@ impl eframe::App for App {
         egui::Panel::right("props").default_size(320.0).show(ui, |ui| {
             let half = ui.available_height() * 0.5;
             egui::Panel::bottom("node props").default_size(half).min_size(120.0).resizable(true).show(ui, |ui| {
-                egui::ScrollArea::vertical().show(ui, |ui| {
+                // Not shrinking to the content keeps the panel's top edge where the user put it.
+                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
                 let sel: Vec<_> = self.editor.selected.iter().copied().collect();
                 match sel.as_slice() {
                     [id] if self.graph.nodes.contains_key(id) => {
