@@ -47,7 +47,7 @@ Agreed shape:
 - Baker: one source field, optional named custom inputs, checkboxes for normal, occlusion, curvature, depth, thickness, position. One image output per enabled channel.
 - Image nodes between Baker and Output: split and combine channels, per-pixel math (the existing Math nodes broadcast over images), invert, remap, resize, dilate. Use case: store a normal map's R and G, drop B (rebuilt in the shader) and put other data in B and A. Data maps stay linear (no sRGB).
 - Output: image or mesh (pin type follows the selector; switching disconnects), naming with `{name}` and suffixes for batches, format options (PNG 8 or 16 bit, EXR, mesh formats).
-- Load Noiser Graph: reference to a `.noisegraph` file with an embedded snapshot and an Embed (detach) option. Double-click opens or switches to that graph's tab.
+- Load Noiser Graph: reference to a `.noisegraph` file with an embedded snapshot and an Embed (detach) option. Double-click switches to the Noise graph tab with that graph loaded. The app gets two tabs, Noise graph and Mesh graph; several open noise graphs at once (a tab each) is deliberately left for later.
 - Saving: Ctrl+S writes the mesh graph and every dirty noise graph it references, and refreshes every embedded snapshot. Before a noise graph file is overwritten, the old version goes to `<name>.history/` with a timestamp. A referenced file is the source of truth; the snapshot is only the fallback when the file is missing or changed on disk (then ask: use file, use snapshot, or keep both). Embedded (detached) graphs live only in the mesh graph file.
 
 ## References in the Unreal 5.8 source (`E:\Unreal Engine\UE_5.8`)
