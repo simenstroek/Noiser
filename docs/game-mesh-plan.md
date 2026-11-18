@@ -69,3 +69,15 @@ Read for the algorithms; Epic's licence does not allow copying code into this re
 - xatlas gives zero overlap and good packing but many charts on organic meshes; island count is a tuning problem, not a guarantee.
 - Bake cost: 4k by 4k texels times about 7 field evaluations each (value plus gradient) per channel. Fine on a GPU, but needs batching and a progress bar.
 - At 1k triangles the noise is mostly in the normal map, so snapping from the low mesh to the true surface can be far; that is what the cage-ray fallback in phase 3 is for.
+
+## Status (2026-11-18, evening)
+
+Done, tested and pushed: the point evaluator (`MeshEvaluator::points` and `distances`), the quality reports (`meshquality.rs`: triangle shape, folds, topology, distance to the true surface, UV coverage, islands, overlap, stretch), the adaptive remesher (`remesh.rs`), UV generation (`uvgen.rs`) and the baker (`bake.rs`). All of it is reachable from the Mesh tab's export window and from headless (`--remesh N --uv --bake all`). Not yet: the mesh graph (phase 4), UV transfer from the input mesh, the custom bake channel.
+
+What was learned:
+- Start the remesher from marching tetrahedra, not surface nets: surface nets leave non-manifold edges that block the edge operations. The extractor is `surface::marching_tets`.
+- Noise finer than the triangles makes naive projection fold the surface. Three guards fix it: a vertex moves at most half an edge per step, no operation may create a fold (neighbouring normals more than about 125 degrees apart), and sizes are bounded to 1/4 to 5 times the uniform edge length so a crease does not eat the triangle budget. Blurring the field was tried and made things worse.
+- The count converges by re-solving the error budget each round against a measured correction factor (the equilateral estimate is about 1.5 times too low).
+- The p95 neighbour-normal angle is a poor metric on hard-edged inputs (a true 90 degree crease is correct); fold edges and the distance to the true surface are the useful numbers.
+- xatlas on a bumpy surface cuts hundreds of tiny charts; charting a smoothed copy of the surface (same triangles, Taubin smoothing) removes most of them. A pure Rust unwrapper (uvunwrap) gave the same island counts and was dropped. Tiny islands that remain are mostly in hidden crevices and on undersides.
+- The baker was checked by rendering the 4k-triangle monkey with its baked normal map against a 100k-triangle reference: the detail matches, so the tangent frame and green channel convention (green down, Unreal) are right.
