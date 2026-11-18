@@ -263,6 +263,43 @@ def worley_call(b, x, period, seed, feature):
     return clamped(affine(F1, 2.0))
 
 
+def simplex_call(b, x, period, seed):
+    """simplex(x, period, seed) of the format document, node by node."""
+    xs = b.separate(x)
+    u = b.combine(b.math("ADD", xs[1], xs[2]), b.math("ADD", xs[0], xs[2]), b.math("ADD", xs[0], xs[1]))
+    i0 = b.vmath("FLOOR", u)
+    fs = b.separate(b.vmath("SUBTRACT", u, i0))
+    ge = lambda a, c: b.math("SUBTRACT", 1.0, b.math("LESS_THAN", a, c))  # a >= c
+    g = [ge(fs[0], fs[1]), ge(fs[1], fs[2]), b.math("GREATER_THAN", fs[2], fs[0])]  # the last one is strict
+    l = [b.math("SUBTRACT", 1.0, v) for v in g]
+    lzxy = [l[2], l[0], l[1]]
+    o1 = b.combine(*(b.math("MINIMUM", g[k], lzxy[k]) for k in range(3)))
+    o2 = b.combine(*(b.math("MAXIMUM", g[k], lzxy[k]) for k in range(3)))
+    pv = b.combine(float(period), float(period), float(period))
+    seed_mul = b.imath("MULTIPLY", seed, 0x9E3779B9)
+
+    def corner(c):
+        half = lambda w: b.math("MULTIPLY", b.vmath("DOT_PRODUCT", c, w, out=1), 0.5)
+        v = b.combine(half((-1.0, 1.0, 1.0)), half((1.0, -1.0, 1.0)), half((1.0, 1.0, -1.0)))
+        d = b.vmath("SUBTRACT", x, v)
+        w = b.math("MAXIMUM", b.math("SUBTRACT", 0.5, b.vmath("DOT_PRODUCT", d, d, out=1)), 0.0)
+        w2 = b.math("MULTIPLY", w, w)
+        w4 = b.math("MULTIPLY", w2, w2)
+        vw = b.vmath("SUBTRACT", v, b.vmath("MULTIPLY", pv, b.vmath("FLOOR", b.vmath("DIVIDE", v, pv))))
+        s = b.separate(vw)
+        cell = (b.math("ADD", s[1], s[2]), b.math("ADD", s[0], s[2]), b.math("ADD", s[0], s[1]))
+        h = b.combine(*pcg_hash3(b, cell, seed_mul))
+        grad = b.vmath("NORMALIZE", b.vmath("SUBTRACT", b.vmath("MULTIPLY", h, (2.0, 2.0, 2.0)), (1.0, 1.0, 1.0)))
+        return b.math("MULTIPLY", w4, b.vmath("DOT_PRODUCT", grad, d, out=1))
+
+    corners = [i0, b.vmath("ADD", i0, o1), b.vmath("ADD", i0, o2), b.vmath("ADD", i0, (1.0, 1.0, 1.0))]
+    total = None
+    for c in corners:
+        t = corner(c)
+        total = t if total is None else b.math("ADD", total, t)
+    return b.math("MINIMUM", b.math("MAXIMUM", b.math("MULTIPLY", total, 90.0), -1.0), 1.0)
+
+
 def noise(b, op, q):
     if op["kind"] == "white":
         return white_noise(b, op, q)
@@ -270,6 +307,8 @@ def noise(b, op, q):
         if op.get("metric", "euclidean") != "euclidean" or op.get("jitter", 1.0) != 1.0 or op["feature"] not in ("f1", "f2", "f2_minus_f1"):
             raise Unsupported("worley with another metric, jitter or feature than f1, f2, f2_minus_f1")
         base = lambda x, period, seed: worley_call(b, x, period, seed, op["feature"])
+    elif op["kind"] == "simplex":
+        base = lambda x, period, seed: simplex_call(b, x, period, seed)
     elif op["kind"] == "perlin":
         base = lambda x, period, seed: perlin_call(b, x, period, seed)
     else:

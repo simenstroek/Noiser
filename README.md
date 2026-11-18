@@ -65,7 +65,7 @@ tiling 3D texture for the preview, and the nodes it covers get a green outline. 
   [`tools/noiser_reference.py`](tools/noiser_reference.py) is a Python implementation of every noise kind written from that
   text (it matches the GPU to 1e-6), as a starting point for ports to other tools. A Blender
   extension that builds Geometry Nodes groups from it is in [`blender/`](blender) (math, remap, mix, linear curves,
-  separate/combine, grid, Perlin and white noise so far; other nodes are reported as unsupported, and `blender/check_file.py`
+  separate/combine, grid, and Perlin, simplex, white and (default) worley noise so far; other nodes are reported as unsupported, and `blender/check_file.py`
   checks it against the file's own test vectors).
 
 **Crash recovery.** Rolling backups; after a crash you are offered the last one on the next start. A panic is also written to `crash.log` in Noiser's data folder (`%APPDATA%\Noiser\data` on Windows); please attach it to bug reports.

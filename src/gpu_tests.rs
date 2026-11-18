@@ -897,7 +897,7 @@ fn write_random_noiser_files() {
         let file = crate::noiser_file::ops(&g, 1).unwrap();
         // Only what the add-on builds: no patterns, normals, non-linear curves, or noise other than Perlin.
         let ok = file["ops"].as_array().unwrap().iter().all(|o| match o["op"].as_str().unwrap() {
-            "noise" => o["kind"] == "perlin" || o["kind"] == "white" || o["kind"] == "worley",
+            "noise" => o["kind"] == "perlin" || o["kind"] == "white" || o["kind"] == "worley" || o["kind"] == "simplex",
             "position" | "value" | "math" | "remap" | "mix" | "separate" | "combine" => true,
             "curve" => o["mode"] == "linear",
             "grid" => true,
