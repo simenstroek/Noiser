@@ -440,7 +440,7 @@ impl Editor {
             let cacheable = matches!(node.kind, NodeKind::Noise(_) | NodeKind::Math { .. } | NodeKind::Remap { .. } | NodeKind::Mix { .. } | NodeKind::Separate { .. } | NodeKind::Curve { .. } | NodeKind::Grid { .. } | NodeKind::Pattern(_));
             // Keep the title clear of the header buttons.
             let title_clip = header.with_max_x(header.right() - (if cacheable { 48.0 } else { 28.0 }) * z);
-            painter.with_clip_rect(title_clip).text(header.left_center() + Vec2::new(8.0 * z, 0.0), egui::Align2::LEFT_CENTER, &if node.muted { format!("{} (muted)", title(&node.kind)) } else { title(&node.kind) }, font.clone(), if node.muted { Color32::from_gray(150) } else { Color32::WHITE });
+            painter.with_clip_rect(title_clip).text(header.left_center() + Vec2::new(8.0 * z, 0.0), egui::Align2::LEFT_CENTER, &{ let name = node.label.clone().filter(|l| !l.is_empty()).unwrap_or_else(|| title(&node.kind)); if node.muted { format!("{name} (muted)") } else { name } }, font.clone(), if node.muted { Color32::from_gray(150) } else { Color32::WHITE });
             let is_covered = covered.contains(&id);
             let outline = if let Some(why) = &broken {
                 resp.on_hover_text(format!("Does not tile: {why}"));
@@ -829,6 +829,9 @@ fn merge(graph: &mut Graph, src: &Graph, nodes: &BTreeSet<NodeId>, at: [f32; 2])
     let mut map = BTreeMap::new();
     for (old, n) in &picked {
         let id = graph.add(n.kind.clone(), [n.pos[0] + at[0] - c[0], n.pos[1] + at[1] - c[1]]);
+        if let Some(copy) = graph.nodes.get_mut(&id) {
+            (copy.muted, copy.label, copy.cache) = (n.muted, n.label.clone(), n.cache);
+        }
         map.insert(*old, id);
     }
     let internal: Vec<_> = src.edges.iter().filter_map(|e| Some((*map.get(&e.from)?, *map.get(&e.to)?, e.port))).collect();
@@ -942,6 +945,15 @@ mod tests {
         assert!(other.edges.iter().any(|e| e.from == ids[0] && e.to == ids[1]));
         assert!(paste_text(&mut other, "not a graph", [0.0; 2]).is_empty());
         assert!(clipboard_text(&g, &BTreeSet::from([2])).is_none());
+        // Labels and mute travel with a copy.
+        let mut labelled = Graph::default_graph();
+        labelled.nodes.get_mut(&1).unwrap().label = Some("Base".into());
+        labelled.nodes.get_mut(&1).unwrap().muted = true;
+        let mut dst = Graph::default();
+        let pasted = paste_text(&mut dst, &clipboard_text(&labelled, &BTreeSet::from([1])).unwrap(), [0.0; 2]);
+        let copy = &dst.nodes[pasted.iter().next().unwrap()];
+        assert!(copy.muted && copy.label.as_deref() == Some("Base"));
+        
     }
 
     /// Drag a wire from Position's output onto empty space, then pick Math from the menu.

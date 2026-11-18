@@ -655,6 +655,9 @@ pub struct Node {
     /// Bypassed: whatever reads this node gets its first input instead (or nothing if that is unconnected).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub muted: bool,
+    /// A name shown in the node header instead of its type (for organizing a big graph).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
 }
 
 /// Every node has a single output, so an edge is "output of `from` → input `port` of `to`".
@@ -686,7 +689,7 @@ pub struct Frame {
 impl Graph {
     pub fn add(&mut self, kind: NodeKind, pos: [f32; 2]) -> NodeId {
         let id = self.nodes.keys().next_back().map_or(0, |k| k + 1);
-        self.nodes.insert(id, Node { kind, pos, cache: None, muted: false });
+        self.nodes.insert(id, Node { kind, pos, cache: None, muted: false, label: None });
         id
     }
 
@@ -1660,5 +1663,13 @@ mod frame_tests {
         g.frames.push(Frame { title: "A".into(), pos: [1.0, 2.0], size: [3.0, 4.0] });
         assert_eq!(Graph::from_json(&g.to_json()).unwrap().frames, g.frames);
         assert!(Graph::from_json(&Graph::default_graph().to_json()).unwrap().frames.is_empty());
+    }
+
+    #[test]
+    fn labels_survive_a_save_and_empty_ones_are_not_written() {
+        let mut g = Graph::default_graph();
+        assert!(!g.to_json().contains("label"));
+        g.nodes.get_mut(&1).unwrap().label = Some("Base noise".into());
+        assert_eq!(Graph::from_json(&g.to_json()).unwrap().nodes[&1].label.as_deref(), Some("Base noise"));
     }
 }

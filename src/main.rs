@@ -1246,6 +1246,10 @@ impl eframe::App for App {
                         let node = self.graph.nodes.get_mut(id).unwrap();
                         let has_output_kind = editor::has_output(&node.kind);
                         ui.heading(editor::title(&node.kind));
+                        let mut label = node.label.clone().unwrap_or_default();
+                        if ui.add(egui::TextEdit::singleline(&mut label).hint_text("Label (shown on the node)").desired_width(f32::INFINITY)).changed() {
+                            node.label = Some(label).filter(|l| !l.is_empty());
+                        }
                         node_props(ui, &mut node.kind);
                         // Below the controls: appearing above them mid-drag shifted the slider out from
                         // under the cursor and ended the drag.
