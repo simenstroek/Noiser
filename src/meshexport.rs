@@ -378,17 +378,30 @@ pub struct FileJob<'a> {
     pub grid_res: u32,
     pub grid_pad: f32,
     pub combine: crate::meshsdf::Combine,
+    /// Keep the detail the same size in object units: the size, in object units, of one normalized unit that
+    /// `d.tile_size` and `d.amount` were set for (a mesh scaled by 2.5 then gets tile and amount divided by 2.5).
+    /// None keeps them relative to each mesh's own size.
+    pub object_scale: Option<f32>,
 }
 
 impl FileJob<'_> {
     /// Loads `input`, displaces it like the preview would and writes the result to `output`.
     pub fn run(&self, input: &Path, output: &Path, progress: &Progress) -> Result<String, String> {
         let (mesh, norm) = crate::meshformats::load(input)?.normalized();
-        let sdf = crate::meshsdf::MeshSdf::build_with(&mesh, self.grid_res, self.grid_pad, &Default::default(), self.combine);
+        let (mut d, mut grid_pad) = (self.d, self.grid_pad);
+        if let Some(reference) = self.object_scale {
+            let k = reference / norm.scale;
+            d.tile_size *= k;
+            d.amount *= k;
+            // A small mesh displaced by a fixed amount moves far in its own units: the grid has to reach that far.
+            let push = crate::view::push_range(self.graph.density_range(), d.amount, d.mask.range);
+            grid_pad = grid_pad.max((push.0.abs().max(push.1.abs()) + 0.05).min(8.0));
+        }
+        let sdf = crate::meshsdf::MeshSdf::build_with(&mesh, self.grid_res, grid_pad, &Default::default(), self.combine);
         let (_texture, view) = sdf.upload(self.device, self.queue); // keep the texture alive for the whole job
         let (lo, hi) = mesh.bounds();
         let ev = MeshEvaluator::new(self.device, self.queue, self.graph, self.seed, view, sdf.origin, sdf.voxel, (lo, hi), self.d.mask.count > 0)?;
-        let job = Job { ev: &ev, d: self.d, lo, hi, reach: reach(self.graph, self.d.amount, self.d.mask.range, self.grid_pad), norm, settings: self.settings.clone() };
+        let job = Job { ev: &ev, d, lo, hi, reach: reach(self.graph, d.amount, d.mask.range, grid_pad), norm, settings: self.settings.clone() };
         job.run(output, progress)
     }
 }

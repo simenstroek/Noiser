@@ -390,6 +390,11 @@ impl App {
                 ui.selectable_value(v, SeedMode::Random, "Random each");
             });
             crate::row(ui, &mut self.batch_amount_var, 0.0, |ui, v| _ = ui.add(egui::Slider::new(v, 0.0..=0.5).custom_formatter(|x, _| format!("±{:.0}%", x * 100.0)).text("vary displacement")));
+            crate::row(ui, &mut self.batch_object_units, false, |ui, v| {
+                ui.add_enabled(self.mesh.is_some(), egui::Checkbox::new(v, "same detail size in object units")).on_hover_text(
+                    "Off: the noise scales with each mesh (a 100 cm mesh gets 100 times the detail size of a 1 cm one).\nOn: the tile size and displacement of the loaded mesh are kept in object units, so every mesh gets the same detail size. Needs a loaded mesh as the reference.",
+                );
+            });
             let base = self.pv.seed;
             ui.weak(match self.batch_seeds {
                 SeedMode::Same => format!("Every mesh uses the global seed ({base})."),
@@ -426,6 +431,7 @@ impl App {
         let d = Displace { amount: self.pv.amount, tile_size: self.pv.tile_size, prim_size: self.pv.prim_size, mask: self.mesh_mask.pack() };
         let settings = self.mesh_export.clone();
         let (grid_res, grid_pad, combine) = (self.mesh_res, self.mesh_pad, self.mesh_combine);
+        let object_scale = self.mesh.as_ref().filter(|_| self.batch_object_units).map(|m| m.norm.scale);
         let (device, queue) = (self.rs.device.clone(), self.rs.queue.clone());
         let index = Arc::new(AtomicU32::new(0));
         let file_progress = meshexport::Progress::default();
@@ -446,7 +452,7 @@ impl App {
                 let label = if mode == SeedMode::Same { stem.clone() } else { format!("{stem}_seed{seed}") };
                 let output = unique_path(&dir, &format!("{label}_displaced"), settings.format.extension());
                 let d = Displace { amount: d.amount * meshexport::amount_factor(base, i, var), ..d };
-                let job = FileJob { device: &device, queue: &queue, graph: &graph, seed, d, settings: settings.clone(), grid_res, grid_pad, combine };
+                let job = FileJob { device: &device, queue: &queue, graph: &graph, seed, d, settings: settings.clone(), grid_res, grid_pad, combine, object_scale };
                 // One bad file (or a GPU error inside it) must not stop the rest.
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| job.run(input, &output, &fp)));
                 match result {

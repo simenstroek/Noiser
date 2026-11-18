@@ -1669,6 +1669,7 @@ mod batch_tests {
                 grid_res: 48,
                 grid_pad: 0.5,
                 combine: Default::default(),
+                object_scale: None,
             };
             let out = dir.join(out);
             job.run(&dir.join(input), &out, &Default::default()).unwrap();
@@ -1685,8 +1686,18 @@ mod batch_tests {
         assert_eq!(big.positions.len(), a.positions.len(), "scaled copies should displace identically");
         let worst = a.positions.iter().zip(&big.positions).map(|(p, q)| (0..3).map(|k| (p[k] * 3.0 - q[k]).abs()).fold(0.0, f32::max)).fold(0.0, f32::max);
         assert!(worst < 0.02, "scaled mesh differs by {worst}");
+        // In object units the detail keeps its size: the big sphere moves about as far as the small one, not 3x as far.
+        let spread = |m: &crate::mesh::Mesh, radius: f32| m.positions.iter().map(|p| ((p[0] * p[0] + p[1] * p[1] + p[2] * p[2]).sqrt() - radius).abs()).fold(0.0f32, f32::max);
+        let absolute = |input: &str, out: &str| {
+            let job = FileJob { device: &gpu.device, queue: &gpu.queue, graph: &noise, seed: 0, d: Displace { amount: 0.1, tile_size: 1.0, prim_size: 1.0, mask: crate::meshmask::PackedMask::NONE }, settings: Settings { res: 48, format: Format::Obj, cull: 0.0 }, grid_res: 48, grid_pad: 0.5, combine: Default::default(), object_scale: Some(1.0) };
+            job.run(&dir.join(input), &dir.join(out), &Default::default()).unwrap();
+            crate::mesh::Mesh::load_obj(&dir.join(out)).unwrap()
+        };
+        let (s1, s3) = (spread(&absolute("small.obj", "d.obj"), 1.0), spread(&absolute("big.obj", "e.obj"), 3.0));
+        assert!(s3 < s1 * 1.6, "object units: small spread {s1}, big spread {s3}");
+        assert!(spread(&big, 3.0) > s1 * 2.0, "relative mode scales the displacement with the mesh");
         // A missing file is an error, not a panic.
-        let job = FileJob { device: &gpu.device, queue: &gpu.queue, graph: &noise, seed: 0, d: Displace { amount: 0.1, tile_size: 1.0, prim_size: 1.0, mask: crate::meshmask::PackedMask::NONE }, settings: Settings::default(), grid_res: 32, grid_pad: 0.5, combine: Default::default() };
+        let job = FileJob { device: &gpu.device, queue: &gpu.queue, graph: &noise, seed: 0, d: Displace { amount: 0.1, tile_size: 1.0, prim_size: 1.0, mask: crate::meshmask::PackedMask::NONE }, settings: Settings::default(), grid_res: 32, grid_pad: 0.5, combine: Default::default(), object_scale: None };
         assert!(job.run(&dir.join("nope.obj"), &dir.join("x.obj"), &Default::default()).is_err());
     }
 }

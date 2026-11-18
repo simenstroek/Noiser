@@ -12,7 +12,7 @@ use std::path::PathBuf;
 pub const USAGE: &str = "usage: noiser --headless GRAPH.noisegraph --batch-out DIR (--batch-file F.obj ... | --batch-dir SRC)
   [--export-noiser OUT.noiser] [--export-shader OUT.hlsl|glsl|wgsl] [--manifest meshes.json] [--param name=value ...] [--set 3.scale=8 ...] [--amount 0.25] [--amount-var 0.2] [--tile 1.0] [--size 1.0] [--seed 0] [--seed-mode same|increment|random]
   [--res 256] [--grid-res 128] [--format obj|ply] [--cull 0.01] [--mask KIND ...]
-  [--combine union|intersect|smooth-union|smooth-intersect] [--combine-smooth 0.1]";
+  [--combine union|intersect|smooth-union|smooth-intersect] [--combine-smooth 0.1] [--object-units]";
 
 /// One mesh of a `--manifest`: the file and any settings that differ from the command line for that mesh.
 #[derive(Debug, Clone, Default, serde::Deserialize)]
@@ -73,6 +73,8 @@ struct Options {
     settings: Settings,
     grid_res: u32,
     combine: crate::meshsdf::Combine,
+    /// `--object-units`: --tile and --amount are in the meshes' own units, so the detail is the same size on every mesh.
+    object_units: bool,
     mask: MaskSettings,
 }
 
@@ -95,6 +97,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
         settings: Settings::default(),
         grid_res: 128,
         combine: Default::default(),
+        object_units: false,
         mask: MaskSettings::default(),
     };
     let mut it = args.iter();
@@ -144,6 +147,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
                 let name = value("union, intersect, smooth-union or smooth-intersect")?;
                 o.combine.mode = crate::meshsdf::CombineMode::ALL.into_iter().find(|m| m.file_name() == name).ok_or(format!("unknown combine mode {name}"))?;
             }
+            "--object-units" => o.object_units = true,
             "--combine-smooth" => o.combine.smooth = float(value("a width like 0.1")?)?.max(0.0),
             "--seed-mode" => {
                 o.mode = match value("same, increment or random")?.as_str() {
@@ -317,7 +321,7 @@ fn run(args: &[String], log: &mut Log) -> Result<usize, String> {
         let label = if o.mode == SeedMode::Same && spec.seed.is_none() { stem.clone() } else { format!("{stem}_seed{seed}") };
         let output = crate::meshapp::unique_path(&o.out, &format!("{label}_displaced"), settings.format.extension());
         let d = Displace { amount: d.amount * crate::meshexport::amount_factor(o.seed, i, o.amount_var), ..d };
-        let job = FileJob { device: &device, queue: &queue, graph, seed, d, settings, grid_res: spec.grid_res.unwrap_or(o.grid_res), grid_pad: 0.5, combine: o.combine };
+        let job = FileJob { device: &device, queue: &queue, graph, seed, d, settings, grid_res: spec.grid_res.unwrap_or(o.grid_res), grid_pad: 0.5, combine: o.combine, object_scale: o.object_units.then_some(1.0) };
         let started = std::time::Instant::now();
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| job.run(input, &output, &Progress::default())));
         let n = i + 1;
