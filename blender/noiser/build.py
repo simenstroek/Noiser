@@ -224,10 +224,55 @@ def white_noise(b, op, q):
     return v
 
 
+def worley_call(b, x, period, seed, feature):
+    """worley(x, period, seed, feature) for the default settings (Euclidean, jitter 1), f1, f2 or f2_minus_f1."""
+    pv = b.combine(float(period), float(period), float(period))
+    wrap = lambda c: b.vmath("SUBTRACT", c, b.vmath("MULTIPLY", pv, b.vmath("FLOOR", b.vmath("DIVIDE", c, pv))))
+    fl = b.vmath("FLOOR", x)
+    f = b.vmath("SUBTRACT", x, fl)
+    i = wrap(fl)
+    seed_mul = b.imath("MULTIPLY", seed, 0x9E3779B9)
+    f1 = f2 = None
+    for oz in (-1, 0, 1):
+        for oy in (-1, 0, 1):
+            for ox in (-1, 0, 1):
+                o = (float(ox), float(oy), float(oz))
+                c = wrap(b.vmath("ADD", i, o))
+                h = b.combine(*pcg_hash3(b, b.separate(c), seed_mul))
+                d = b.vmath("SUBTRACT", b.vmath("ADD", h, o), f)
+                d2 = b.vmath("DOT_PRODUCT", d, d, out=1)
+                if f1 is None:
+                    f1, f2 = d2, 1e9
+                else:
+                    f2 = b.math("MINIMUM", f2, b.math("MAXIMUM", f1, d2))
+                    f1 = b.math("MINIMUM", f1, d2)
+    F1, F2 = b.math("SQRT", f1), b.math("SQRT", f2)
+
+    def clamped(v):
+        return b.math("MINIMUM", b.math("MAXIMUM", v, -1.0), 1.0)
+
+    def affine(v, k):
+        n = b.math("MULTIPLY_ADD", v, k)
+        n.node.inputs[2].default_value = -1.0
+        return n
+
+    if feature == "f2":
+        return clamped(affine(F2, 2.0 / 1.4))
+    if feature == "f2_minus_f1":
+        return clamped(affine(b.math("SUBTRACT", F2, F1), 2.0))
+    return clamped(affine(F1, 2.0))
+
+
 def noise(b, op, q):
     if op["kind"] == "white":
         return white_noise(b, op, q)
-    if op["kind"] != "perlin":
+    if op["kind"] == "worley":
+        if op.get("metric", "euclidean") != "euclidean" or op.get("jitter", 1.0) != 1.0 or op["feature"] not in ("f1", "f2", "f2_minus_f1"):
+            raise Unsupported("worley with another metric, jitter or feature than f1, f2, f2_minus_f1")
+        base = lambda x, period, seed: worley_call(b, x, period, seed, op["feature"])
+    elif op["kind"] == "perlin":
+        base = lambda x, period, seed: perlin_call(b, x, period, seed)
+    else:
         raise Unsupported(f"{op['kind']} noise (use Noiser's VDB export for now)")
     scale, octaves, lac = op["scale"], max(op["octaves"], 1), op["lacunarity"]
     seed = op["seed"]
@@ -239,7 +284,7 @@ def noise(b, op, q):
         x = b.vmath("ADD", x, b.vmath("SCALE", d, op["distortion"]))
     total, amp, acc = 0.0, 1.0, None
     for o in range(octaves):
-        term = b.math("MULTIPLY", perlin_call(b, x, period, seed + o), amp)
+        term = b.math("MULTIPLY", base(x, period, seed + o), amp)
         acc = term if acc is None else b.math("ADD", acc, term)
         total = f32(total + amp)
         amp = f32(amp * op["roughness"])
