@@ -365,13 +365,20 @@ impl Runner<'_> {
                 (self.log)("transferring UVs");
                 let (uv, stats) = crate::uvtransfer::transfer(&target, &source)?;
                 (self.log)(&format!("  {} island(s) used; {} corner(s) farther than 2% of the mesh size from the source surface", stats.islands, stats.far_corners));
+                for line in crate::meshquality::uv_report(&uv, 512).to_string().lines() {
+                    (self.log)(&format!("  {line}"));
+                }
                 Value::Uv(uv)
             }
             NodeKind::AutoUv(params) => {
                 let (src, _) = input(0)?;
                 let Value::Mesh(mesh) = self.value(original, lowered, src, memo, fields)? else { return Err(format!("node {id} (Auto UVs) needs a mesh")) };
                 (self.log)("unwrapping");
-                Value::Uv(crate::uvgen::generate(&mesh, params)?)
+                let uv = crate::uvgen::generate(&mesh, params)?;
+                for line in crate::meshquality::uv_report(&uv, 512).to_string().lines() {
+                    (self.log)(&format!("  {line}"));
+                }
+                Value::Uv(uv)
             }
             NodeKind::Bake(settings) => {
                 let (mesh_src, _) = input(0)?;
