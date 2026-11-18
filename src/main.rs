@@ -17,6 +17,7 @@ mod meshexport;
 mod meshquality;
 mod remesh;
 mod uvgen;
+mod bake;
 mod meshformats;
 mod meshsdf;
 mod shaderexport;

@@ -1364,7 +1364,7 @@ mod mesh_export_tests {
     }
 
     fn job<'a>(ev: &'a MeshEvaluator, d: Displace, reach: f32, res: u32) -> Job<'a> {
-        Job { ev, d, lo: [-1.0; 3], hi: [1.0; 3], reach, norm: Normalization::IDENTITY, settings: Settings { res, format: Format::Obj, cull: 0.0, remesh: None, uv: None } }
+        Job { ev, d, lo: [-1.0; 3], hi: [1.0; 3], reach, norm: Normalization::IDENTITY, settings: Settings { res, format: Format::Obj, cull: 0.0, remesh: None, uv: None, bake: None } }
     }
 
     fn radius(p: [f32; 3]) -> f32 {
@@ -1638,7 +1638,7 @@ fn export_a_real_mesh() {
     let push = crate::view::push_range(graph.density_range(), amount, (1.0, 1.0));
     let reach = push.0.abs().max(push.1.abs()).min(pad - 0.05);
     let (lo, hi) = mesh.bounds();
-    let settings = Settings { res, format: Format::Obj, cull: 0.01, remesh: None, uv: None };
+    let settings = Settings { res, format: Format::Obj, cull: 0.01, remesh: None, uv: None, bake: None };
     let job = Job { ev: &ev, d: Displace { amount, tile_size: 1.0, prim_size: 1.0, mask: crate::meshmask::PackedMask::NONE }, lo, hi, reach, norm, settings };
     eprintln!("export grid {:?}", job.grid().dims);
     let t = std::time::Instant::now();
@@ -1668,7 +1668,7 @@ fn remesh_a_real_mesh() {
     let reach = push.0.abs().max(push.1.abs()).min(0.45);
     let (lo, hi) = mesh.bounds();
     let d = Displace { amount, tile_size: 1.0, prim_size: 1.0, mask: crate::meshmask::PackedMask::NONE };
-    let job = Job { ev: &ev, d, lo, hi, reach, norm, settings: Settings { res: 160, format: Format::Obj, cull: 0.01, remesh: Some(tris), uv: None } };
+    let job = Job { ev: &ev, d, lo, hi, reach, norm, settings: Settings { res: 160, format: Format::Obj, cull: 0.01, remesh: Some(tris), uv: None, bake: None } };
     let mut field = |pts: &[[f32; 3]]| ev.points(d, pts, 0.002);
     let uniform = job.extract(&Default::default());
     eprintln!("uniform surface nets:\n{}", crate::meshquality::report(&uniform).with_surface_error(&uniform, &mut field));
@@ -1731,7 +1731,7 @@ mod batch_tests {
                 graph: &noise,
                 seed,
                 d: Displace { amount: 0.1, tile_size: 1.0, prim_size: 1.0, mask: crate::meshmask::PackedMask::NONE },
-                settings: Settings { res: 48, format: Format::Obj, cull: 0.0, remesh: None, uv: None },
+                settings: Settings { res: 48, format: Format::Obj, cull: 0.0, remesh: None, uv: None, bake: None },
                 grid_res: 48,
                 grid_pad: 0.5,
                 combine: Default::default(),
@@ -1755,7 +1755,7 @@ mod batch_tests {
         // In object units the detail keeps its size: the big sphere moves about as far as the small one, not 3x as far.
         let spread = |m: &crate::mesh::Mesh, radius: f32| m.positions.iter().map(|p| ((p[0] * p[0] + p[1] * p[1] + p[2] * p[2]).sqrt() - radius).abs()).fold(0.0f32, f32::max);
         let absolute = |input: &str, out: &str| {
-            let job = FileJob { device: &gpu.device, queue: &gpu.queue, graph: &noise, seed: 0, d: Displace { amount: 0.1, tile_size: 1.0, prim_size: 1.0, mask: crate::meshmask::PackedMask::NONE }, settings: Settings { res: 48, format: Format::Obj, cull: 0.0, remesh: None, uv: None }, grid_res: 48, grid_pad: 0.5, combine: Default::default(), object_scale: Some(1.0) };
+            let job = FileJob { device: &gpu.device, queue: &gpu.queue, graph: &noise, seed: 0, d: Displace { amount: 0.1, tile_size: 1.0, prim_size: 1.0, mask: crate::meshmask::PackedMask::NONE }, settings: Settings { res: 48, format: Format::Obj, cull: 0.0, remesh: None, uv: None, bake: None }, grid_res: 48, grid_pad: 0.5, combine: Default::default(), object_scale: Some(1.0) };
             job.run(&dir.join(input), &dir.join(out), &Default::default()).unwrap();
             crate::mesh::Mesh::load_obj(&dir.join(out)).unwrap()
         };

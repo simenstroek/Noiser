@@ -12,7 +12,8 @@ use std::path::PathBuf;
 pub const USAGE: &str = "usage: noiser --headless GRAPH.noisegraph --batch-out DIR (--batch-file F.obj ... | --batch-dir SRC)
   [--export-noiser OUT.noiser] [--export-shader OUT.hlsl|glsl|wgsl] [--manifest meshes.json] [--param name=value ...] [--set 3.scale=8 ...] [--amount 0.25] [--amount-var 0.2] [--tile 1.0] [--size 1.0] [--seed 0] [--seed-mode same|increment|random]
   [--res 256] [--grid-res 128] [--format obj|ply] [--cull 0.01] [--mask KIND ...]
-  [--combine union|intersect|smooth-union|smooth-intersect] [--combine-smooth 0.1] [--object-units] [--report] [--remesh TRIANGLES] [--uv] [--uv-res 2048] [--uv-cost 4] [--uv-smooth 20] [--uv-merge 3]";
+  [--combine union|intersect|smooth-union|smooth-intersect] [--combine-smooth 0.1] [--object-units] [--report] [--remesh TRIANGLES] [--uv] [--uv-res 2048] [--uv-cost 4] [--uv-smooth 20] [--uv-merge 3]
+  [--bake normal,occlusion,curvature,depth,thickness,position|all] [--bake-size 2048] [--bake-pad 8] [--green-up]";
 
 /// One mesh of a `--manifest`: the file and any settings that differ from the command line for that mesh.
 #[derive(Debug, Clone, Default, serde::Deserialize)]
@@ -156,6 +157,18 @@ fn parse(args: &[String]) -> Result<Options, String> {
             "--uv-res" => o.settings.uv.get_or_insert_with(Default::default).resolution = whole(value("a texture size like 2048")?)?,
             "--uv-smooth" => o.settings.uv.get_or_insert_with(Default::default).smoothing = whole(value("a number of rounds")?)?,
             "--uv-merge" => o.settings.uv.get_or_insert_with(Default::default).merge_rounds = whole(value("a number of rounds")?)?,
+            "--bake" => {
+                let list = value("channel names or all")?;
+                let channels = if list == "all" {
+                    crate::bake::Channel::ALL.to_vec()
+                } else {
+                    list.split(',').map(|n| crate::bake::Channel::ALL.into_iter().find(|c| c.name().eq_ignore_ascii_case(n.trim())).ok_or(format!("unknown map {n}"))).collect::<Result<Vec<_>, _>>()?
+                };
+                o.settings.bake.get_or_insert_with(Default::default).channels = channels;
+            }
+            "--bake-size" => o.settings.bake.get_or_insert_with(Default::default).size = whole(value("a texture size like 2048")?)?,
+            "--bake-pad" => o.settings.bake.get_or_insert_with(Default::default).padding = whole(value("texels")?)?,
+            "--green-up" => o.settings.bake.get_or_insert_with(Default::default).green_up = true,
             "--uv-cost" => o.settings.uv.get_or_insert_with(Default::default).max_cost = float(value("a number like 4")?)?,
             "--remesh" => o.settings.remesh = Some(whole(value("a triangle count")?)?.max(100) as usize),
             "--combine-smooth" => o.combine.smooth = float(value("a width like 0.1")?)?.max(0.0),

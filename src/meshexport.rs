@@ -40,11 +40,13 @@ pub struct Settings {
     pub remesh: Option<usize>,
     /// Also generate UVs (OBJ only).
     pub uv: Option<crate::uvgen::UvParams>,
+    /// Also bake maps from the field into PNG files next to the mesh (needs UVs, which are generated if not asked for).
+    pub bake: Option<crate::bake::Settings>,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { res: 256, format: Format::Obj, cull: 0.01, remesh: None, uv: None }
+        Self { res: 256, format: Format::Obj, cull: 0.01, remesh: None, uv: None, bake: None }
     }
 }
 
@@ -105,11 +107,13 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
     out[(id.z * x.ny + id.y) * x.nx + id.x] = field_at(p);
 }
 
-// The distance and its gradient (central differences over x.h) at each of x.count points.
+// The distance and its gradient (central differences over x.h) at each of x.count points; with x.ny = 1 the
+// distance only (six times cheaper).
 @compute @workgroup_size(64)
 fn points(@builtin(global_invocation_id) id: vec3u) {
     if (id.x >= x.count) { return; }
     let p = pts[id.x].xyz;
+    if (x.ny == 1u) { samples[id.x] = vec4f(field_at(p), 0.0, 0.0, 0.0); return; }
     let e = x.h;
     let g = vec3f(
         field_at(p + vec3f(e, 0.0, 0.0)) - field_at(p - vec3f(e, 0.0, 0.0)),
@@ -315,8 +319,16 @@ impl MeshEvaluator {
     /// The displaced field at arbitrary points of the preview's space: (distance, gradient x, y, z) for each,
     /// the gradient by central differences over `eps`. The noise is never skipped, so any point is exact
     /// (unlike `layers`, which trusts the band). Done in chunks so any number of points works.
-    #[allow(dead_code)]
     pub fn points(&self, d: Displace, points: &[V3], eps: f32) -> Vec<[f32; 4]> {
+        self.sample_points(d, points, eps, true)
+    }
+
+    /// The displaced field's distance alone at each point (see `points`).
+    pub fn distances(&self, d: Displace, points: &[V3]) -> Vec<f32> {
+        self.sample_points(d, points, 1.0, false).iter().map(|s| s[0]).collect()
+    }
+
+    fn sample_points(&self, d: Displace, points: &[V3], eps: f32, gradient: bool) -> Vec<[f32; 4]> {
         use wgpu::util::DeviceExt;
         const CHUNK: usize = 1 << 20;
         let dev = &self.device;
@@ -328,7 +340,7 @@ impl MeshEvaluator {
                 mesh_origin: self.mesh_origin,
                 mesh_voxel: self.mesh_voxel,
                 nx: 0,
-                ny: 0,
+                ny: u32::from(!gradient),
                 z0: 0,
                 count: chunk.len() as u32,
                 amount: d.amount,
@@ -482,25 +494,67 @@ impl Job<'_> {
             return Err("the displaced surface is empty (is the mesh outside the exported region?)".into());
         }
         let removed = if self.settings.remesh.is_some() { 0 } else { mesh.remove_small_parts(self.settings.cull) };
+        let wants_uv = self.settings.uv.is_some() || self.settings.bake.is_some();
+        if wants_uv && self.settings.format != Format::Obj {
+            return Err("UVs and maps are written with OBJ meshes only; choose the OBJ format".into());
+        }
+        // UVs and maps are made in the preview's space, where the field is; only then is the mesh put back in the
+        // mesh's own units.
+        let mut uv = None;
+        let mut baked = String::new();
+        if wants_uv {
+            let params = self.settings.uv.clone().unwrap_or_default();
+            let mut u = crate::uvgen::generate(&mesh, &params)?;
+            if std::env::var_os("NOISER_REMESH_DEBUG").is_some() {
+                eprintln!("{}", crate::meshquality::uv_report(&u, 1024));
+            }
+            if let Some(bake) = &self.settings.bake {
+                let (lo, hi) = u.positions.iter().fold(([f32::MAX; 3], [f32::MIN; 3]), |(lo, hi), p| ([0, 1, 2].map(|a| lo[a].min(p[a])), [0, 1, 2].map(|a| hi[a].max(p[a]))));
+                let diagonal = (0..3).map(|a| (hi[a] - lo[a]).powi(2)).sum::<f32>().sqrt();
+                let mut field = EvalField { ev: self.ev, d: self.d, eps: 0.0005 * diagonal };
+                let images = crate::bake::bake(&u, &mut field, bake, &|done, total| progress.store(900 + (done * 100 / total.max(1)) as u32, Ordering::Relaxed))?;
+                let stem = path.file_stem().map_or("mesh".into(), |s| s.to_string_lossy().into_owned());
+                let dir = path.parent().unwrap_or(Path::new("."));
+                for image in &images {
+                    let file = dir.join(format!("{stem}_{}.png", image.channel.name()));
+                    image.write_png(&file)?;
+                }
+                baked = format!(", {} map(s) of {} texels", images.len(), bake.size);
+            }
+            for p in &mut u.positions {
+                *p = self.norm.to_object(p.map(|v| v / self.d.prim_size));
+            }
+            uv = Some(u);
+        }
         for p in &mut mesh.positions {
             *p = self.norm.to_object(p.map(|v| v / self.d.prim_size));
         }
-        let written = match (&self.settings.uv, self.settings.format) {
-            (Some(params), Format::Obj) => {
-                let uv = crate::uvgen::generate(&mesh, params)?;
-                if std::env::var_os("NOISER_REMESH_DEBUG").is_some() {
-                    eprintln!("{}", crate::meshquality::uv_report(&uv, 1024));
-                }
-                uv.write_obj(path)
-            }
-            (Some(_), Format::Ply) => return Err("UVs are written to OBJ only; choose the OBJ format".into()),
+        let written = match (&uv, self.settings.format) {
+            (Some(u), _) => u.write_obj(path),
             (None, Format::Obj) => mesh.write_obj(path),
             (None, Format::Ply) => mesh.write_ply(path),
         };
         written.map_err(|e| format!("could not write {}: {e}", path.display()))?;
         progress.store(1000, Ordering::Relaxed);
         let parts = if removed > 0 { format!(", {removed} small parts removed") } else { String::new() };
-        Ok(format!("Exported {} vertices, {} triangles{parts} to {}", mesh.positions.len(), mesh.triangles.len(), path.display()))
+        let (vertices, triangles) = uv.as_ref().map_or((mesh.positions.len(), mesh.triangles.len()), |u| (u.positions.len(), u.triangles.len()));
+        Ok(format!("Exported {vertices} vertices, {triangles} triangles{parts}{baked} to {}", path.display()))
+    }
+}
+
+/// The displaced field as a bake source.
+struct EvalField<'a> {
+    ev: &'a MeshEvaluator,
+    d: Displace,
+    eps: f32,
+}
+
+impl crate::bake::Field for EvalField<'_> {
+    fn gradient(&mut self, points: &[V3]) -> Vec<[f32; 4]> {
+        self.ev.points(self.d, points, self.eps)
+    }
+    fn distance(&mut self, points: &[V3]) -> Vec<f32> {
+        self.ev.distances(self.d, points)
     }
 }
 

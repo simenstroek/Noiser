@@ -261,7 +261,7 @@ pub fn uv_report(mesh: &crate::uvgen::UvMesh, res: usize) -> UvReport {
         let (a, b, c) = (dot(ss, ss), dot(ss, st), dot(st, st));
         let root_term = ((a - c) * (a - c) + 4.0 * b * b).sqrt();
         let (big, small) = (0.5 * (a + c + root_term), (0.5 * (a + c - root_term)).max(1e-20));
-        stretch.push((big / small).sqrt());
+        stretch.push((big / small).sqrt().min(1000.0));
         density.push((big * small).sqrt().sqrt());
     }
     r.islands = area.len();
