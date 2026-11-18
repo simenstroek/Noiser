@@ -810,6 +810,44 @@ impl Editor {
     }
 }
 
+/// Lays the graph out in columns left to right by how far each node is from the inputs: sources on the left,
+/// the outputs on the right, each column keeping the nodes' current top to bottom order.
+pub fn arrange(graph: &mut Graph) {
+    let mut depth: BTreeMap<NodeId, usize> = BTreeMap::new();
+    // Longest path from a node without inputs; the graph has no cycles, but a cycle must not hang this.
+    fn visit(g: &Graph, id: NodeId, depth: &mut BTreeMap<NodeId, usize>, stack: &mut Vec<NodeId>) -> usize {
+        if let Some(d) = depth.get(&id) {
+            return *d;
+        }
+        if stack.contains(&id) {
+            return 0;
+        }
+        stack.push(id);
+        let d = g.edges.iter().filter(|e| e.to == id).map(|e| visit(g, e.from, depth, stack) + 1).max().unwrap_or(0);
+        stack.pop();
+        depth.insert(id, d);
+        d
+    }
+    let ids: Vec<NodeId> = graph.nodes.keys().copied().collect();
+    for id in &ids {
+        visit(graph, *id, &mut depth, &mut Vec::new());
+    }
+    let ed = Editor::default();
+    let mut columns: BTreeMap<usize, Vec<NodeId>> = BTreeMap::new();
+    for id in &ids {
+        columns.entry(depth[id]).or_default().push(*id);
+    }
+    for (d, col) in columns.iter_mut() {
+        col.sort_by(|a, b| graph.nodes[a].pos[1].total_cmp(&graph.nodes[b].pos[1]));
+        let mut y = 0.0;
+        for id in col.iter() {
+            let node = graph.nodes.get_mut(id).unwrap();
+            node.pos = [*d as f32 * (NODE_W + 90.0), y];
+            y += ed.layout(Pos2::ZERO, &node.kind, node.pos).rect.height() + 30.0;
+        }
+    }
+}
+
 /// Copies `nodes` (and the links between them) so their centre lands on `at`. Returns the copies.
 pub fn duplicate(graph: &mut Graph, nodes: &BTreeSet<NodeId>, at: [f32; 2]) -> BTreeSet<NodeId> {
     let src = graph.clone();
@@ -1050,6 +1088,40 @@ mod tests {
         assert!((g.frames[0].pos[0] - 180.0).abs() < 2.0 && (g.frames[0].pos[1] - 100.0).abs() < 2.0, "frame at {:?}", g.frames[0].pos);
         assert!((g.nodes[&inside].pos[0] - 220.0).abs() < 2.0, "the node inside moved with it: {:?}", g.nodes[&inside].pos);
         assert_eq!(g.nodes[&outside].pos, [600.0, 400.0]);
+    }
+
+    #[test]
+    fn arranging_puts_sources_left_of_what_they_feed_without_overlaps() {
+        for name in Graph::TEMPLATES {
+            let mut g = Graph::template(name);
+            for n in g.nodes.values_mut() {
+                n.pos = [50.0, 50.0]; // everything in a heap
+            }
+            arrange(&mut g);
+            for e in &g.edges {
+                assert!(g.nodes[&e.from].pos[0] < g.nodes[&e.to].pos[0], "{name}: {} should be left of {}", e.from, e.to);
+            }
+            let ed = Editor::default();
+            let rects: Vec<Rect> = g.nodes.values().map(|n| ed.layout(Pos2::ZERO, &n.kind, n.pos).rect).collect();
+            for (i, a) in rects.iter().enumerate() {
+                assert!(rects[i + 1..].iter().all(|b| !a.intersects(*b)), "{name}: overlap after arranging");
+            }
+        }
+    }
+
+    /// No two nodes of a template sit on top of each other.
+    #[test]
+    fn template_nodes_do_not_overlap() {
+        let ed = Editor::default();
+        for name in Graph::TEMPLATES {
+            let g = Graph::template(name);
+            let rects: Vec<(NodeId, Rect)> = g.nodes.iter().map(|(id, n)| (*id, ed.layout(Pos2::ZERO, &n.kind, n.pos).rect)).collect();
+            for (i, (a, ra)) in rects.iter().enumerate() {
+                for (b, rb) in &rects[i + 1..] {
+                    assert!(!ra.intersects(*rb), "{name}: nodes {a} and {b} overlap ({ra:?} and {rb:?})");
+                }
+            }
+        }
     }
 
     /// A lone node dropped on a wire is spliced into it: source to the node, node to the old target.

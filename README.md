@@ -85,7 +85,7 @@ reported and the rest continue; nothing is ever overwritten. Without a window, s
 folder; the exit code is 1 if any mesh failed. Without the .cmd, use `Start-Process -Wait -PassThru` in PowerShell.
 
 **Editing.** Undo and redo, copy and paste of nodes (also between two Noiser windows), duplicate, reroute nodes, mute (bypass) a
-node with M, frame the selection with F or everything with Home, search in the add menu, File > New from template
+node with M, frame the selection with F or everything with Home, search in the add menu, Edit > Arrange nodes (a tidy left-to-right layout), File > New from template
 (clouds, ridged mountains, cracked rock, brick wall, gyroid foam, warped cells), Open recent, drag a `.noisegraph` or `.obj` file
 onto the window, comment frames, node labels, snap-to-grid, and a prompt before closing or replacing a graph with unsaved changes with unsaved changes (the window title shows an asterisk).
 Edit > Preferences holds the interface scale, snapping and the backup switch; Help > Keyboard shortcuts lists the keys.

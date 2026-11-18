@@ -1170,6 +1170,10 @@ impl eframe::App for App {
                         self.undo(true);
                     }
                     ui.separator();
+                    if ui.button("Arrange nodes").on_hover_text("Lay the graph out in columns, inputs on the left").clicked() {
+                        editor::arrange(&mut self.graph);
+                        self.editor.frame_next = true;
+                    }
                     if ui.button("Preferences…").clicked() {
                         self.prefs_open = true;
                         ui.close();
