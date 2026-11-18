@@ -46,6 +46,8 @@ a node that breaks tiling gets an orange outline and says why in the details pan
 - **Outputs**: Density and Normal.
 - Pins and wires are blue for floats and yellow for vectors.
 
+**Layout.** The side panel has the viewport settings in tabs (3D view, Material, Lighting, Slice, Mesh) above the selected node's settings.
+
 **Viewports.** A raymarched 3D view (solid, or cloud with a light) of a chosen shape displaced by the
 graph, and a 2D slice view (any axis, grayscale or heatmap, with a 2 × 2 tile view to spot seams).
 The eye in a node's header previews that node instead of the output.
