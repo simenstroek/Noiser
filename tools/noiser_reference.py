@@ -1,7 +1,7 @@
 """Reference implementations of the white, blue, worley and simplex noises, written only from docs/noiser-format.md.
 
 Usage: python tools/noiser_reference.py file.noiser [...]
-Each file must be a graph of one noise node (whole scale, one octave, no distortion); the script evaluates the noise
+Each file must be a graph of one noise node (whole scale and lacunarity); the script evaluates the noise
 at the file's test points and prints the largest difference from the GPU values stored in the file. It is meant as
 starting point and cross-check for ports to other hosts (Houdini VEX, shaders): the same arithmetic, in Python.
 """
@@ -113,20 +113,49 @@ def blue(x, period, seed):
     return float(_BLUE[t][c[0] + t * (c[1] + t * c[2])]) * 2 - 1
 
 
+def perlin(x, period, seed):
+    fl = [math.floor(v) for v in x]
+    i = wrap(fl, period)
+    f = [x[k] - fl[k] for k in range(3)]
+    w = [v * v * v * (v * (v * 6 - 15) + 10) for v in f]
+    n = {}
+    for oz in (0, 1):
+        for oy in (0, 1):
+            for ox in (0, 1):
+                o = (ox, oy, oz)
+                c = wrap([i[k] + o[k] for k in range(3)], period)
+                g = normalize([float(a) * 2 - 1 for a in hash3(c, seed)])
+                n[o] = sum(g[k] * (f[k] - o[k]) for k in range(3))
+    mix = lambda a, b, t: a * (1 - t) + b * t
+    x0 = lambda z: mix(mix(n[0, 0, z], n[1, 0, z], w[0]), mix(n[0, 1, z], n[1, 1, z], w[0]), w[1])
+    return max(-1.0, min(1.0, 1.5 * mix(x0(0), x0(1), w[2])))
+
+
 def noise_op(op, q):
+    """The fBm wrapper of the format document (whole scale and lacunarity, so the noise tiles)."""
     scale = op["scale"]
     # The GPU multiplies in float32: points on cell seams (k / 12 at scale 24) land on either side of the seam
     # depending on that rounding, so the reference rounds the same way.
     x = [float(np.float32(v) * np.float32(scale)) for v in q]
-    period = int(scale)  # the test graphs use whole scales
+    period = int(scale)
     kind = op["kind"]
-    if kind == "white": base = lambda x, p, s: white(x, p, s)
+    if kind == "white": base = white
     elif kind == "blue": base = blue
+    elif kind == "perlin": base = perlin
     elif kind == "worley": base = lambda x, p, s: worley(x, p, s, op["feature"])
     else: base = simplex
-    total = amp = 1.0
-    acc = base(x, period, op["seed"])
-    v = acc / 1.0
+    if op["distortion"] != 0:
+        d = [perlin(x, period, op["seed"] + 1 + c) for c in range(3)]
+        x = [x[k] + d[k] * op["distortion"] for k in range(3)]
+    total = acc = 0.0
+    amp = 1.0
+    for o in range(max(op["octaves"], 1)):
+        acc += amp * base(x, period, op["seed"] + o)
+        total += amp
+        amp *= op["roughness"]
+        x = [v * op["lacunarity"] for v in x]
+        period = int(period * op["lacunarity"])
+    v = acc / max(total, 1e-6)
     return v * 0.5 + 0.5 if op["normalize"] else v
 
 
