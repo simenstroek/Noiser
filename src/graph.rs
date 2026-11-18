@@ -992,9 +992,9 @@ impl Graph {
                     (Const | Periodic, Const | Periodic) => Periodic,
                     (Coord, _) | (_, Coord) => match op {
                         MathOp::Add => Coord,
-                        MathOp::Subtract if tb != Coord => Coord,
-                        // p - p cancels the position out.
-                        MathOp::Subtract => Const,
+                        // A difference with a position is position-like again (-p, p - 2p, 0.5 - p): it can look constant
+                        // only when the coefficients cancel, which is not tracked, so it is never called Const.
+                        MathOp::Subtract => Coord,
                         MathOp::Multiply if ta == Coord && tb == Const && whole_const(1, *b) => Coord,
                         MathOp::Multiply if tb == Coord && ta == Const && whole_const(0, *a) => Coord,
                         MathOp::Multiply => Broken("position multiplied by a non-whole or non-constant value".into()),
