@@ -1328,7 +1328,7 @@ impl Graph {
     pub fn output_type(&self, id: NodeId) -> PortType {
         match &self.nodes[&id].kind {
             NodeKind::Remesh { .. } | NodeKind::AutoUv(_) | NodeKind::TransferUv => return PortType::Mesh,
-            NodeKind::Bake(_) | NodeKind::ImageSplit | NodeKind::ImageCombine | NodeKind::ImageLevels { .. } | NodeKind::TransferUv => return PortType::Image,
+            NodeKind::Bake(_) | NodeKind::ImageSplit | NodeKind::ImageCombine | NodeKind::ImageLevels { .. } => return PortType::Image,
             _ => {}
         }
         if self.yields_vector(id) { PortType::Vector } else { PortType::Float }
@@ -1339,7 +1339,7 @@ impl Graph {
         match &self.nodes[&id].kind {
             NodeKind::AutoUv(_) | NodeKind::OutMesh(_) | NodeKind::TransferUv => PortType::Mesh,
             NodeKind::Bake(_) if port == 0 => PortType::Mesh,
-            NodeKind::OutImage(_) | NodeKind::ImageSplit | NodeKind::ImageCombine | NodeKind::ImageLevels { .. } | NodeKind::TransferUv => PortType::Image,
+            NodeKind::OutImage(_) | NodeKind::ImageSplit | NodeKind::ImageCombine | NodeKind::ImageLevels { .. } => PortType::Image,
             NodeKind::Noise(_) | NodeKind::Grid { .. } | NodeKind::Pattern(_) | NodeKind::OutNormal | NodeKind::Separate => PortType::Vector,
             NodeKind::Math { op, .. } if port < 2 => {
                 let vector = *op == MathOp::Dot || (0..2).any(|p| self.input(id, p).is_some_and(|s| self.yields_vector(s)));

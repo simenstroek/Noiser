@@ -169,7 +169,8 @@ enum Value {
 
 /// A loaded mesh baked into a distance grid, kept between runs (the grid takes seconds to build).
 pub struct LoadedMesh {
-    texture: eframe::wgpu::Texture,
+    /// Kept alive with the view.
+    _texture: eframe::wgpu::Texture,
     view: eframe::wgpu::TextureView,
     origin: [f32; 3],
     voxel: f32,
@@ -224,7 +225,7 @@ impl Runner<'_> {
         let sdf = crate::meshsdf::MeshSdf::build_with(&mesh, p.resolution, p.padding, &Default::default(), p.combine);
         let (texture, view) = sdf.upload(self.device, self.queue);
         let (nlo, nhi) = mesh.bounds();
-        let loaded = std::sync::Arc::new(LoadedMesh { texture, view, origin: sdf.origin, voxel: sdf.voxel, norm, lo: norm.to_object(nlo), hi: norm.to_object(nhi), raw });
+        let loaded = std::sync::Arc::new(LoadedMesh { _texture: texture, view, origin: sdf.origin, voxel: sdf.voxel, norm, lo: norm.to_object(nlo), hi: norm.to_object(nhi), raw });
         self.cache.meshes.insert(key, loaded.clone());
         Ok(loaded)
     }

@@ -98,6 +98,7 @@ impl ImageFormat {
 #[derive(Clone, Debug)]
 pub struct Image {
     /// The standard map this is, if it is one (custom maps and processed images are not).
+    #[cfg_attr(not(test), allow(dead_code))]
     pub channel: Option<Channel>,
     /// The name its file gets (`Normal`, `Normal_R`...).
     pub label: String,
