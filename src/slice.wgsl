@@ -62,6 +62,9 @@ fn fs_slice(in: VsOut) -> @location(0) vec4f {
     let uv = fract(vec2f(q.x, -q.y) * 0.5 * u.slice_tiles + 0.5 * u.slice_tiles);
     let n = u.slice_res;
     let texel = min(vec2u(uv * f32(n)), vec2u(n - 1u));
+    if (VECTOR_PREVIEW) {
+        return vec4f(graph_color(slice_point((vec2f(texel) + 0.5) / f32(n))), 1.0);
+    }
     let v = slice.vals[texel.y * n + texel.x];
     let lo = unord(atomicLoad(&slice.lo));
     let hi = unord(atomicLoad(&slice.hi));

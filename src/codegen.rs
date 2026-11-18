@@ -78,12 +78,17 @@ struct Gen<'a> {
 }
 
 pub fn compile(g: &Graph) -> Result<Compiled, String> {
-    compile_with(g, &BTreeMap::new())
+    compile_inner(g, &BTreeMap::new(), false)
 }
 
 /// Like `compile`, but nodes in `caches` read their baked texture (`cache_sample(slot, p)`)
-/// instead of evaluating their upstream graph. Preview only.
+/// instead of evaluating their upstream graph. Preview only: when the Density output reads a
+/// vector, the result also defines `graph_color(p)`, the vector as a colour (see view.rs).
 pub fn compile_with(g: &Graph, caches: &BTreeMap<NodeId, u32>) -> Result<Compiled, String> {
+    compile_inner(g, caches, true)
+}
+
+fn compile_inner(g: &Graph, caches: &BTreeMap<NodeId, u32>, preview: bool) -> Result<Compiled, String> {
     let lowered = g.lowered();
     let g = &lowered;
     // Parameter slots, in node-id order.
@@ -161,17 +166,26 @@ pub fn compile_with(g: &Graph, caches: &BTreeMap<NodeId, u32>) -> Result<Compile
     // One output of a Separate node is a component of the vector its function returns.
     let component = |src: NodeId, port: usize| if matches!(g.nodes[&src].kind, NodeKind::Separate) { Some(["x", "y", "z"][port.min(2)]) } else { None };
 
+    let mut color_source = None;
     let density_expr = match density {
         Some((src, port)) => {
             let ty = cg.cone(src)?;
             match component(src, port) {
                 Some(c) => format!("c{src}(p).{c}"),
-                None => convert(&format!("c{src}(p)"), ty, Ty::F),
+                None => {
+                    if ty == Ty::V {
+                        color_source = Some(src);
+                    }
+                    convert(&format!("c{src}(p)"), ty, Ty::F)
+                }
             }
         }
         None => "0.0".into(),
     };
     writeln!(cg.out, "fn graph_density(p: vec3f) -> f32 {{ return {density_expr}; }}").unwrap();
+    if let (true, Some(src)) = (preview, color_source) {
+        writeln!(cg.out, "fn graph_color(p: vec3f) -> vec3f {{ return safe_normalize(c{src}(p)) * 0.5 + 0.5; }}").unwrap();
+    }
 
     let normal_expr = match normal {
         Some((src, port)) => {
@@ -550,6 +564,25 @@ mod tests {
         naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all())
             .validate(&module)
             .unwrap();
+    }
+
+    #[test]
+    fn vector_preview_defines_a_colour_only_for_previews() {
+        let mut g = Graph::default();
+        let position = g.add(NodeKind::Position, [0.0; 2]);
+        let out = g.add(NodeKind::OutDensity, [0.0; 2]);
+        g.connect(position, out, 0);
+        assert!(!compile(&g).unwrap().wgsl.contains("fn graph_color("));
+        let preview = compile_with(&g, &BTreeMap::new()).unwrap();
+        assert!(preview.wgsl.contains("fn graph_color("));
+        let src = crate::view::shader_source(&preview.wgsl, false, Default::default());
+        assert!(src.contains("const VECTOR_PREVIEW: bool = true;"));
+        let module = naga::front::wgsl::parse_str(&src).unwrap_or_else(|e| panic!("{}", e.emit_to_string(&src)));
+        naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all()).validate(&module).unwrap();
+
+        let float_preview = compile_with(&Graph::default_graph(), &BTreeMap::new()).unwrap();
+        assert!(!float_preview.wgsl.contains("fn graph_color("));
+        assert!(crate::view::shader_source(&float_preview.wgsl, false, Default::default()).contains("const VECTOR_PREVIEW: bool = false;"));
     }
 
     #[test]

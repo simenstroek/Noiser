@@ -410,14 +410,19 @@ impl Gpu {
 /// Full shader source for a compiled graph. `mask` compiles the mesh displacement mask; without it the
 /// mask is a stub, which keeps pipeline builds fast for everything that is not a masked mesh.
 pub fn shader_source(graph_wgsl: &str, mask: bool, extras: Extras) -> String {
+    let vector_preview = graph_wgsl.contains("fn graph_color(");
+    let color_stub = if vector_preview { "" } else { "fn graph_color(p: vec3f) -> vec3f { return vec3f(0.0); }\n" };
     let mut s = format!(
-        "{}\n{}\n{graph_wgsl}\n{}\n{}\n{}",
+        "{}\n{}\n{graph_wgsl}\n{color_stub}{}\n{}\n{}",
         codegen::NOISE_LIB,
         codegen::mesh_mask_lib(mask),
         include_str!("common.wgsl"),
         include_str!("raymarch.wgsl"),
         include_str!("slice.wgsl")
     );
+    if vector_preview {
+        s = s.replace("const VECTOR_PREVIEW: bool = false;", "const VECTOR_PREVIEW: bool = true;");
+    }
     if extras.mask_view {
         s = s.replace("const MASK_VIEW: bool = false;", "const MASK_VIEW: bool = true;");
         s = s.replace("fn view_mask(p: vec3f) -> f32 { return 1.0; } // STUB view_mask", "fn view_mask(p: vec3f) -> f32 { return mask_at(p); }");

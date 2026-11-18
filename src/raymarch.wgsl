@@ -64,6 +64,10 @@ const MASK_VIEW: bool = false;
 // 0.15 s of compile time but made the solid view 60 % slower, so the shadow code stays in.)
 fn view_mask(p: vec3f) -> f32 { return 1.0; } // STUB view_mask
 
+// Replaced by `true` (see view::shader_source) when the Density output reads a vector: both views then
+// show its direction as colour, (normalize(v) + 1) * 0.5, unlit.
+const VECTOR_PREVIEW: bool = false;
+
 fn displaced(p: vec3f, b: f32) -> f32 {
     if (MASK_VIEW) { return b; }
     return b - u.amount * mask_at(p) * graph_density(p / u.tile_size);
@@ -170,6 +174,10 @@ fn solid(ro: vec3f, rd: vec3f, bg: vec3f) -> vec3f {
     }
     if (!hit || started_inside) { return bg; }
     let p = ro + rd * t;
+    if (VECTOR_PREVIEW) {
+        // fs applies the display gamma; undo it so the colour reads as the raw value, like the slice view.
+        return pow(graph_color(p / u.tile_size), vec3f(2.2));
+    }
     let n = normal_at(p, max(pix * t, 1e-4));
     let SUN = sun_dir();
     let diff = max(dot(n, SUN), 0.0);
