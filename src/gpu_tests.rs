@@ -914,6 +914,43 @@ fn write_random_noiser_files() {
     eprintln!("wrote {written} files to {}", dir.display());
 }
 
+/// Continuous noises must have no jump at the exact grid points a texture export samples (ties in the lattice
+/// code show up there): compare each voxel centre with a point a hair away.
+#[test]
+fn continuous_noises_have_no_jumps_at_grid_points() {
+    use crate::graph::{WorleyFeature, WorleyMetric};
+    let Some(gpu) = gpu() else { return eprintln!("no GPU adapter; skipping") };
+    let kinds: Vec<(&str, NoiseParams)> = vec![
+        ("perlin", NoiseParams { kind: NoiseKind::Perlin, ..Default::default() }),
+        ("simplex", NoiseParams { kind: NoiseKind::Simplex, ..Default::default() }),
+        ("worley f1", NoiseParams { kind: NoiseKind::Worley, feature: WorleyFeature::F1, ..Default::default() }),
+        ("worley f2", NoiseParams { kind: NoiseKind::Worley, feature: WorleyFeature::F2, ..Default::default() }),
+        ("worley f2-f1", NoiseParams { kind: NoiseKind::Worley, feature: WorleyFeature::F2MinusF1, ..Default::default() }),
+        ("worley manhattan", NoiseParams { kind: NoiseKind::Worley, metric: WorleyMetric::Manhattan, ..Default::default() }),
+        ("worley chebyshev", NoiseParams { kind: NoiseKind::Worley, metric: WorleyMetric::Chebyshev, ..Default::default() }),
+        ("worley edges", NoiseParams { kind: NoiseKind::Worley, feature: WorleyFeature::Edges, ..Default::default() }),
+    ];
+    for (name, base) in kinds {
+        for scale in [4.0f32, 5.0, 8.0] {
+            let g = noise_graph(NoiseParams { scale, octaves: 1, ..base.clone() });
+            for n in [6u32, 8, 16] {
+                let mut on = Vec::new();
+                for z in 0..n.min(8) {
+                    for y in 0..n.min(8) {
+                        for x in 0..n.min(8) {
+                            on.push([(x as f32 + 0.5) / n as f32, (y as f32 + 0.5) / n as f32, (z as f32 + 0.5) / n as f32]);
+                        }
+                    }
+                }
+                let near: Vec<[f32; 3]> = on.iter().map(|p| [p[0] + 2e-5, p[1] - 3e-5, p[2] + 1e-5]).collect();
+                let (a, b) = (eval(&gpu, &g, &on), eval(&gpu, &g, &near));
+                let (worst, at) = a.iter().zip(&b).zip(&on).map(|((x, y), p)| ((x - y).abs(), *p)).fold((0.0f32, [0.0; 3]), |m, v| if v.0 > m.0 { v } else { m });
+                assert!(worst < 8e-3, "{name} at scale {scale}, {n}^3 grid: jump of {worst} at {at:?}");
+            }
+        }
+    }
+}
+
 /// On the main diagonals of a lattice cube all three simplex fractions are equal; the value there must be the
 /// limit from nearby points, not a double count of two corners.
 #[test]
