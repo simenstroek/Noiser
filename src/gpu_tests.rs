@@ -505,6 +505,10 @@ fn new_math_ops_match_reference() {
     near(math(SmoothMax, 1.0, 1.2, 0.5), 1.2 + 0.6f32.powi(3) * 0.5 / 6.0, "smooth max");
     near(math(SmoothMin, 0.0, 5.0, 0.5), 0.0, "smooth min, far apart");
     near(math(SmoothMin, 1.0, 1.2, 0.0), 1.0, "smooth min with k = 0 is min");
+    near(math(Lerp, 2.0, 6.0, 0.25), 3.0, "lerp");
+    near(math(Lerp, 2.0, 6.0, 1.5), 8.0, "lerp is not limited to 0..1");
+    near(math(InverseLerp, 2.0, 6.0, 3.0), 0.25, "inverse lerp");
+    near(math(InverseLerp, 2.0, 2.0, 3.0), 0.0, "inverse lerp with a = b is 0");
     // The blend width can come from a link too.
     let mut g = Graph::default();
     let w = g.add(NodeKind::Float(0.5), [0.0; 2]);
@@ -778,6 +782,8 @@ mod noiser_interpreter {
             "sqrt" => a.max(0.0).sqrt(),
             "modulo" => if b == 0.0 { 0.0 } else { a - b * (a / b).floor() },
             "greater" => if a > b { 1.0 } else { 0.0 },
+            "lerp" => a + (b - a) * k,
+            "inverse_lerp" => if a == b { 0.0 } else { (k - a) / (b - a) },
             other => panic!("unknown math fn {other}"),
         }
     }

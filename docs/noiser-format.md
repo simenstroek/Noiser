@@ -54,7 +54,7 @@ A constant: `value` is a number (float) or `[x, y, z]` (vector).
 
 ### `math`
 `fn` is one of `add`, `subtract`, `multiply`, `divide`, `min`, `max`, `power`, `smooth_min`,
-`smooth_max`, `dot`, `absolute`, `ridge`, `floor`, `fract`, `sine`, `sqrt`, `modulo`, `greater`. Operands `a` and `b` are
+`smooth_max`, `dot`, `absolute`, `ridge`, `floor`, `fract`, `sine`, `sqrt`, `modulo`, `greater`, `lerp`, `inverse_lerp`. Operands `a` and `b` are
 either `{"node": id}` or a number. The result is a vector if either operand is a vector, and
 then both operands are converted to vectors and the op applies per component.
 
@@ -68,6 +68,7 @@ then both operands are converted to vectors and the op applies per component.
 - `absolute` and `ridge` are unary (`b` is ignored): `|a|` and `1 − |a|`, per component.
 - `floor`, `fract`, `sine` and `sqrt` are unary, per component: `floor(a)`, `a − floor(a)`, `sin(a)` (radians) and
   `sqrt(max(a, 0))`.
+- `lerp` and `inverse_lerp` have a third operand `k` (like `smooth_min`, always a float, converted to the vector type if the result is one): `lerp` is `a + (b − a)·k` (`k` is not limited to 0..1) and `inverse_lerp` is `(k − a) / (b − a)`, 0 where `b = a`, per component.
 - `modulo` is `a − b·floor(a / b)` (the sign of `b`), 0 where `b` is 0. `greater` is 1 where `a > b`, else 0.
 
 ### `remap`

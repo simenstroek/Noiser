@@ -343,6 +343,8 @@ impl Gen<'_> {
                     MathOp::Power => format!("{}({a}, {b})", if v { "pow_safe3" } else { "pow_safe" }),
                     MathOp::SmoothMin => format!("{}({a}, {b}, {k})", if v { "smin3" } else { "smin" }),
                     MathOp::SmoothMax => format!("{}({a}, {b}, {k})", if v { "smax3" } else { "smax" }),
+                    MathOp::Lerp => format!("{a} + ({b} - {a}) * {}", convert(&k, Ty::F, opty)),
+                    MathOp::InverseLerp => format!("select(({} - {a}) / ({b} - {a}), {zero}, {b} == {a})", convert(&k, Ty::F, opty)),
                     MathOp::Dot => format!("dot({a}, {b})"),
                     MathOp::Absolute => format!("abs({a})"),
                     MathOp::Ridge => format!("{} - abs({a})", convert("1.0", Ty::F, opty)),

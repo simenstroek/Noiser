@@ -133,6 +133,8 @@ fn input_label(kind: &NodeKind, port: usize) -> &'static str {
     match (kind, port) {
         (NodeKind::Math { .. }, 0) => "A",
         (NodeKind::Math { .. }, 1) => "B",
+        (NodeKind::Math { op: MathOp::Lerp, .. }, _) => "Factor",
+        (NodeKind::Math { op: MathOp::InverseLerp, .. }, _) => "Value",
         (NodeKind::Math { .. }, _) => "Blend",
         (NodeKind::Reroute | NodeKind::NamedReroute { .. }, _) => "In",
         (NodeKind::Curve { .. }, _) => "Value",

@@ -82,11 +82,13 @@ pub fn ops(g: &Graph, seed: u32) -> Result<Value, String> {
                         MathOp::Sqrt => "sqrt",
                         MathOp::Modulo => "modulo",
                         MathOp::Greater => "greater",
+                        MathOp::Lerp => "lerp",
+                        MathOp::InverseLerp => "inverse_lerp",
                     };
                     // An unconnected operand is its constant.
                     let operand = |port, c: f32| reference(id, port).map_or(json!(c), |s| json!({"node": s}));
                     let mut o = json!({"op": "math", "fn": f, "a": operand(0, *a), "b": operand(1, *b)});
-                    if op.is_smooth() {
+                    if op.is_ternary() {
                         o["k"] = operand(2, *c);
                     }
                     o

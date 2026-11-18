@@ -120,10 +120,14 @@ pub enum MathOp {
     Modulo,
     /// 1 where a > b, else 0.
     Greater,
+    /// a + (b - a) * t, the third input being t (not limited to 0..1).
+    Lerp,
+    /// (v - a) / (b - a), 0 when a = b; the third input is v.
+    InverseLerp,
 }
 
 impl MathOp {
-    pub const ALL: [MathOp; 18] = [
+    pub const ALL: [MathOp; 20] = [
         MathOp::Add,
         MathOp::Subtract,
         MathOp::Multiply,
@@ -142,6 +146,8 @@ impl MathOp {
         MathOp::Sqrt,
         MathOp::Modulo,
         MathOp::Greater,
+        MathOp::Lerp,
+        MathOp::InverseLerp,
     ];
 
     /// Name shown in the operator dropdown.
@@ -165,12 +171,19 @@ impl MathOp {
             MathOp::Sqrt => "Square root",
             MathOp::Modulo => "Modulo",
             MathOp::Greater => "Greater than",
+            MathOp::Lerp => "Lerp (a to b by t)",
+            MathOp::InverseLerp => "Inverse lerp",
         }
     }
 
     /// Smooth min and max take a third input, the blend width.
     pub fn is_smooth(self) -> bool {
         matches!(self, MathOp::SmoothMin | MathOp::SmoothMax)
+    }
+
+    /// The ops with a third input: the blend width of smooth min/max, the factor of Lerp, the value of Inverse lerp.
+    pub fn is_ternary(self) -> bool {
+        matches!(self, MathOp::SmoothMin | MathOp::SmoothMax | MathOp::Lerp | MathOp::InverseLerp)
     }
 
     /// Absolute and Ridge use only the first input.
@@ -623,7 +636,7 @@ impl NodeKind {
             NodeKind::Float(_) | NodeKind::Vec3(_) | NodeKind::Position => 0,
             NodeKind::Reroute | NodeKind::NamedReroute { .. } => 1,
             NodeKind::NamedRerouteUse { .. } => 0,
-            NodeKind::Math { op, .. } => if op.is_smooth() { 3 } else if op.is_unary() { 1 } else { 2 },
+            NodeKind::Math { op, .. } => if op.is_ternary() { 3 } else if op.is_unary() { 1 } else { 2 },
             NodeKind::Remap { .. } => 5,
             NodeKind::Mix { .. } | NodeKind::Combine { .. } => 3,
             NodeKind::Separate => 1,
@@ -1119,7 +1132,7 @@ impl Graph {
             NodeKind::Math { op, a, b, .. } => {
                 let ta = input(0, memo, stack).unwrap_or(Const);
                 let tb = input(1, memo, stack).unwrap_or(Const);
-                let tc = if op.is_smooth() { input(2, memo, stack) } else { None };
+                let tc = if op.is_ternary() { input(2, memo, stack) } else { None };
                 // Operand is a whole-number constant: the unconnected default, or a Float/Vec3 node.
                 let whole_const = |port: usize, default: f32| match self.input(id, port).map(|s| &self.nodes[&s].kind) {
                     None => is_whole(default),
@@ -1394,7 +1407,7 @@ fn scaled((lo, hi): Range, k: f32) -> Range {
     ((lo * k).min(hi * k), (lo * k).max(hi * k))
 }
 
-fn math_range(op: MathOp, (a0, a1): Range, (b0, b1): Range, (_, k1): Range) -> Range {
+fn math_range(op: MathOp, (a0, a1): Range, (b0, b1): Range, (k0, k1): Range) -> Range {
     let span = |v: [f32; 4]| {
         // NaN (0 × ∞) only comes from unbounded inputs, so treat it as unbounded.
         if v.iter().any(|x| x.is_nan()) {
@@ -1426,6 +1439,8 @@ fn math_range(op: MathOp, (a0, a1): Range, (b0, b1): Range, (_, k1): Range) -> R
         MathOp::Sqrt => (a0.max(0.0).sqrt(), a1.max(0.0).sqrt()),
         MathOp::Modulo if b0 > 0.0 => (0.0, b1),
         MathOp::Modulo => UNBOUNDED,
+        MathOp::Lerp if k0 >= 0.0 && k1 <= 1.0 => (a0.min(b0), a1.max(b1)),
+        MathOp::Lerp | MathOp::InverseLerp => UNBOUNDED,
         MathOp::Absolute | MathOp::Ridge => {
             let abs = (if a0 <= 0.0 && a1 >= 0.0 { 0.0 } else { a0.abs().min(a1.abs()) }, a0.abs().max(a1.abs()));
             if op == MathOp::Absolute { abs } else { (1.0 - abs.1, 1.0 - abs.0) }
