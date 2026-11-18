@@ -72,7 +72,9 @@ Read for the algorithms; Epic's licence does not allow copying code into this re
 
 ## Status (2026-11-18, evening)
 
-Done, tested and pushed: the point evaluator (`MeshEvaluator::points` and `distances`), the quality reports (`meshquality.rs`: triangle shape, folds, topology, distance to the true surface, UV coverage, islands, overlap, stretch), the adaptive remesher (`remesh.rs`), UV generation (`uvgen.rs`) and the baker (`bake.rs`). All of it is reachable from the Mesh tab's export window and from headless (`--remesh N --uv --bake all`). Not yet: the mesh graph (phase 4), UV transfer from the input mesh, the custom bake channel.
+Released as 0.9.0. Done, tested and pushed: the point evaluator (`MeshEvaluator::points` and `distances`), the quality reports (`meshquality.rs`: triangle shape, folds, topology, distance to the true surface, UV coverage, islands, overlap, stretch), the adaptive remesher (`remesh.rs`), UV generation (`uvgen.rs`) and the baker (`bake.rs`). All of it is reachable from the Mesh tab's export window and from headless (`--remesh N --uv --bake all`). Not yet: the mesh graph (phase 4), UV transfer from the input mesh, the custom bake channel.
+
+Against the acceptance numbers the UV work is not finished: coverage is 58 to 66% (70% or more wanted; best packing adds about 5 points at 8 to 10 times the time), and bumpy meshes keep many tiny islands (rock at 10k triangles: 223 islands, 167 tiny; monkey: 53 and 25). Checked that these are not caused by bad triangles: fewer than 1% of faces are slivers or folds and almost none lie in tiny charts, so the cause is xatlas's chart growth, which `max_cost` does not change. Tried and rejected: merging small charts and re-running, segmenting on a heavily smoothed copy, uvunwrap. Also the remesher: about 1.5% of triangles of the monkey at amplitude 0.08 and 5% of the rock's face against the field at their centres (the uniform mesh has about 1%), and it degrades at amplitude 0.2.
 
 What was learned:
 - Start the remesher from marching tetrahedra, not surface nets: surface nets leave non-manifold edges that block the edge operations. The extractor is `surface::marching_tets`.
