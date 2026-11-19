@@ -637,16 +637,18 @@ mod tests {
     fn a_bumpy_sphere_stays_overlap_free_and_inside_the_square_after_absorbing_islands() {
         let mut mesh = sphere(4);
         for p in &mut mesh.positions {
-            let k = 1.0 + 0.08 * (9.0 * p[0]).sin() * (7.0 * p[1] + 1.0).sin() * (8.0 * p[2]).cos();
+            let k = 1.0 + 0.12 * (16.0 * p[0]).sin() * (13.0 * p[1] + 1.0).sin() * (15.0 * p[2]).cos();
             *p = p.map(|c| c * k);
         }
         mesh.normals = mesh.positions.clone();
-        let uv = generate(&mesh, &UvParams { brute_force: false, ..Default::default() }).unwrap();
+        let uv = generate(&mesh, &UvParams { brute_force: false, smoothing: 0, ..Default::default() }).unwrap();
         let r = uv_report(&uv, 2048);
         eprintln!("{r}");
         assert!(r.overlap_fraction < 1e-4 && r.flipped == 0, "{r}");
         assert!(uv.uvs.iter().all(|t| (0.0..=1.0).contains(&t[0]) && (0.0..=1.0).contains(&t[1])));
-        let plain = generate(&mesh, &UvParams { brute_force: false, absorb_tiny: false, ..Default::default() }).unwrap();
-        assert!(uv_report(&uv, 2048).islands <= uv_report(&plain, 2048).islands);
+        let plain = generate(&mesh, &UvParams { brute_force: false, smoothing: 0, absorb_tiny: false, ..Default::default() }).unwrap();
+        let (a, b) = (uv_report(&uv, 2048), uv_report(&plain, 2048));
+        eprintln!("islands {} without absorbing, {} with", b.islands, a.islands);
+        assert!(a.islands < b.islands, "absorbing merged nothing: {} islands both ways", a.islands);
     }
 }
