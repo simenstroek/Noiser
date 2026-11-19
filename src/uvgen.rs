@@ -630,4 +630,22 @@ mod tests {
         assert!(r.coverage > 0.5, "{r}");
         assert!(uv.uvs.iter().all(|t| (0.0..=1.0).contains(&t[0]) && (0.0..=1.0).contains(&t[1])), "UVs leave the 0 to 1 square: {:?}", uv.uvs.iter().filter(|t| !(0.0..=1.0).contains(&t[0]) || !(0.0..=1.0).contains(&t[1])).take(3).collect::<Vec<_>>());
     }
+
+    /// A bumpy sphere breaks into many small islands; absorbing them must keep the layout valid.
+    #[test]
+    fn a_bumpy_sphere_stays_overlap_free_and_inside_the_square_after_absorbing_islands() {
+        let mut mesh = sphere(4);
+        for p in &mut mesh.positions {
+            let k = 1.0 + 0.08 * (9.0 * p[0]).sin() * (7.0 * p[1] + 1.0).sin() * (8.0 * p[2]).cos();
+            *p = p.map(|c| c * k);
+        }
+        mesh.normals = mesh.positions.clone();
+        let uv = generate(&mesh, &UvParams { brute_force: false, ..Default::default() }).unwrap();
+        let r = uv_report(&uv, 2048);
+        eprintln!("{r}");
+        assert!(r.overlap_fraction < 1e-4 && r.flipped == 0, "{r}");
+        assert!(uv.uvs.iter().all(|t| (0.0..=1.0).contains(&t[0]) && (0.0..=1.0).contains(&t[1])));
+        let plain = generate(&mesh, &UvParams { brute_force: false, absorb_tiny: false, ..Default::default() }).unwrap();
+        assert!(uv_report(&uv, 2048).islands <= uv_report(&plain, 2048).islands);
+    }
 }
