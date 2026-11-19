@@ -571,6 +571,31 @@ impl Default for NoiseParams {
     }
 }
 
+/// How a Radial position describes a point.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RadialMode {
+    /// (distance from the axis, angle around it, height along it).
+    #[default]
+    Cylindrical,
+    /// (distance from the centre, angle around the axis, angle from the axis).
+    Spherical,
+}
+
+/// A position in radial coordinates: the angles are in radians, the angle around the axis jumps from pi to -pi on one half plane.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RadialParams {
+    pub mode: RadialMode,
+    pub center: [f32; 3],
+    /// The direction of the centre line (any length; zero means Z).
+    pub axis: [f32; 3],
+}
+
+impl Default for RadialParams {
+    fn default() -> Self {
+        RadialParams { mode: RadialMode::Cylindrical, center: [0.0; 3], axis: [0.0, 0.0, 1.0] }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum NodeKind {
     Float(f32),
@@ -610,6 +635,8 @@ pub enum NodeKind {
     /// A regular pattern (see `PatternParams`). Input: position (defaults to world position).
     Pattern(PatternParams),
     Position,
+    /// Position in cylindrical or spherical coordinates around a centre and an axis (see `RadialParams`). Input: position (defaults to world position).
+    Radial(RadialParams),
     /// A waypoint on a wire: passes its input through (every reader skips it, like a muted node).
     Reroute,
     /// The named end of a wire (Unreal's named reroute): passes its input on, and any `NamedRerouteUse` with the
@@ -658,7 +685,8 @@ impl NodeKind {
         match self {
             NodeKind::Separate => 3,
             NodeKind::ImageSplit => 4,
-            NodeKind::LoadMesh(_) => 2,
+            // The second output of a generator is its displacement vector.
+            NodeKind::LoadMesh(_) | NodeKind::Noise(_) | NodeKind::Pattern(_) | NodeKind::Grid { .. } => 2,
             NodeKind::Bake(s) => (s.channels.len() + s.custom.len()).max(1),
             NodeKind::OutDensity | NodeKind::OutNormal | NodeKind::OutMesh(_) | NodeKind::OutImage(_) => 0,
             _ => 1,
@@ -675,7 +703,7 @@ impl NodeKind {
             NodeKind::Mix { .. } | NodeKind::Combine { .. } => 3,
             NodeKind::Separate => 1,
             NodeKind::Curve { .. } => 1,
-            NodeKind::Normal { .. } | NodeKind::Noise(_) | NodeKind::Grid { .. } | NodeKind::Pattern(_) | NodeKind::OutDensity | NodeKind::OutNormal => 1,
+            NodeKind::Normal { .. } | NodeKind::Noise(_) | NodeKind::Grid { .. } | NodeKind::Pattern(_) | NodeKind::Radial(_) | NodeKind::OutDensity | NodeKind::OutNormal => 1,
             NodeKind::LoadMesh(_) | NodeKind::NoiseGraph(_) | NodeKind::Remesh { .. } | NodeKind::AutoUv(_) | NodeKind::OutMesh(_) | NodeKind::OutImage(_) | NodeKind::ImageSplit | NodeKind::ImageLevels { .. } => 1,
             NodeKind::Bake(s) => 2 + s.custom.len(),
             NodeKind::ImageCombine => 4,
@@ -828,6 +856,23 @@ impl Graph {
             let m = g.nodes.get_mut(id).unwrap();
             m.kind = NodeKind::Math { op: MathOp::Multiply, a: 0.0, b: amount, c: default_smooth() };
             g.connect(new, *id, 0);
+        }
+        // The displacement output of a generator (output 1): its unit gradient times its value.
+        let generators: BTreeSet<NodeId> = self
+            .edges
+            .iter()
+            .filter(|e| e.from_port == 1 && self.nodes.get(&e.from).is_some_and(|n| !n.muted && matches!(n.kind, NodeKind::Noise(_) | NodeKind::Pattern(_) | NodeKind::Grid { .. })))
+            .map(|e| e.from)
+            .collect();
+        for id in generators {
+            let normal = g.add(NodeKind::Normal { flip: false }, [0.0; 2]);
+            let times = g.add(NodeKind::Math { op: MathOp::Multiply, a: 0.0, b: 0.0, c: default_smooth() }, [0.0; 2]);
+            for e in g.edges.iter_mut().filter(|e| e.from == id && e.from_port == 1) {
+                (e.from, e.from_port) = (times, 0);
+            }
+            g.connect(id, normal, 0);
+            g.connect(normal, times, 0);
+            g.connect(id, times, 1);
         }
         g
     }
@@ -1003,7 +1048,7 @@ impl Graph {
 
     pub fn yields_vector(&self, id: NodeId) -> bool {
         match &self.nodes[&id].kind {
-            NodeKind::Vec3(_) | NodeKind::Position | NodeKind::Normal { .. } | NodeKind::Combine { .. } => true,
+            NodeKind::Vec3(_) | NodeKind::Position | NodeKind::Radial(_) | NodeKind::Normal { .. } | NodeKind::Combine { .. } => true,
             NodeKind::Reroute | NodeKind::NamedReroute { .. } => self.input(id, 0).is_some_and(|s| self.yields_vector(s)),
             NodeKind::NamedRerouteUse { name } => self.named_declaration(name).and_then(|d| self.input(d, 0)).is_some_and(|s| self.yields_vector(s)),
             NodeKind::Math { op, .. } => *op != MathOp::Dot && (0..2).any(|p| self.input(id, p).is_some_and(|s| self.yields_vector(s))),
@@ -1153,6 +1198,7 @@ impl Graph {
             NodeKind::LoadMesh(_) => Broken("a loaded mesh does not tile".into()),
             NodeKind::NoiseGraph(_) | NodeKind::Remesh { .. } | NodeKind::AutoUv(_) | NodeKind::Bake(_) | NodeKind::OutMesh(_) | NodeKind::OutImage(_) | NodeKind::ImageSplit | NodeKind::ImageCombine | NodeKind::ImageLevels { .. } | NodeKind::TransferUv => Const,
             NodeKind::Position => Coord,
+            NodeKind::Radial(_) => Broken("a radial position does not tile".into()),
             NodeKind::Reroute | NodeKind::NamedReroute { .. } => input(0, memo, stack).unwrap_or(Const),
             NodeKind::NamedRerouteUse { name } => match self.named_declaration(name).and_then(|d| self.input(d, 0)) {
                 Some(src) => self.tiling_of(src, memo, stack),
@@ -1323,6 +1369,9 @@ impl Graph {
         if port == 1 && matches!(self.nodes.get(&id).map(|n| &n.kind), Some(NodeKind::LoadMesh(_))) {
             return PortType::Mesh;
         }
+        if port == 1 && matches!(self.nodes.get(&id).map(|n| &n.kind), Some(NodeKind::Noise(_) | NodeKind::Pattern(_) | NodeKind::Grid { .. })) {
+            return PortType::Vector;
+        }
         self.output_type(id)
     }
 
@@ -1398,7 +1447,7 @@ impl Graph {
         let r = match &self.nodes[&id].kind {
             NodeKind::Float(v) => (*v, *v),
             NodeKind::Vec3(v) => (v.iter().cloned().fold(f32::MAX, f32::min), v.iter().cloned().fold(f32::MIN, f32::max)),
-            NodeKind::Position | NodeKind::LoadMesh(_) | NodeKind::NoiseGraph(_) | NodeKind::Remesh { .. } | NodeKind::AutoUv(_) | NodeKind::Bake(_) | NodeKind::OutMesh(_) | NodeKind::OutImage(_) | NodeKind::ImageSplit | NodeKind::ImageCombine | NodeKind::ImageLevels { .. } | NodeKind::TransferUv => UNBOUNDED,
+            NodeKind::Position | NodeKind::Radial(_) | NodeKind::LoadMesh(_) | NodeKind::NoiseGraph(_) | NodeKind::Remesh { .. } | NodeKind::AutoUv(_) | NodeKind::Bake(_) | NodeKind::OutMesh(_) | NodeKind::OutImage(_) | NodeKind::ImageSplit | NodeKind::ImageCombine | NodeKind::ImageLevels { .. } | NodeKind::TransferUv => UNBOUNDED,
             NodeKind::Separate => match self.input(id, 0) {
                 Some(src) => self.range_of(src, stack),
                 None => (0.0, 0.0),

@@ -121,6 +121,11 @@ pub fn compile_eps(g: &Graph, caches: &BTreeMap<NodeId, u32>, eps: f32) -> Resul
                 }
             }
             NodeKind::Combine { vals } => params.extend(vals),
+            NodeKind::Radial(r) => {
+                params.push(if r.mode == crate::graph::RadialMode::Spherical { 1.0 } else { 0.0 });
+                params.extend(r.center);
+                params.extend(r.axis);
+            }
             NodeKind::Mix { vals, clamp } => {
                 params.extend(vals);
                 params.push(if *clamp { 1.0 } else { 0.0 });
@@ -330,6 +335,10 @@ impl Gen<'_> {
             NodeKind::Float(_) => (Ty::F, format!("P[{s}]")),
             NodeKind::Vec3(_) => (Ty::V, format!("vec3f(P[{s}], P[{}], P[{}])", s + 1, s + 2)),
             NodeKind::Position => (Ty::V, "p".into()),
+            NodeKind::Radial(_) => {
+                let q = self.operand(id, 0, Ty::V, "p");
+                (Ty::V, format!("radial_coords({q}, vec3f(P[{}], P[{}], P[{}]), vec3f(P[{}], P[{}], P[{}]), P[{s}] > 0.5)", s + 1, s + 2, s + 3, s + 4, s + 5, s + 6))
+            }
             // A loaded mesh: the shader prelude of the evaluator defines mesh_dist_N(p) for each slot.
             NodeKind::LoadMesh(_) => {
                 let slot = self.mesh_slots.iter().position(|&n| n == id).unwrap_or(0);
@@ -602,6 +611,8 @@ mod tests {
     fn every_node_kind_compiles() {
         let mut g = Graph::default();
         let p = g.add(NodeKind::Position, [0.0; 2]);
+        let radial = g.add(NodeKind::Radial(Default::default()), [0.0; 2]);
+        g.connect(p, radial, 0);
         let v = g.add(NodeKind::Vec3([0.5, 1.0, 2.0]), [0.0; 2]);
         let f = g.add(NodeKind::Float(3.0), [0.0; 2]);
         let mut ops = Vec::new();

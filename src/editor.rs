@@ -127,6 +127,10 @@ pub fn title(kind: &NodeKind) -> String {
         NodeKind::Grid { .. } => "Grid".into(),
         NodeKind::Pattern(p) => p.kind.name().into(),
         NodeKind::Position => "Position".into(),
+        NodeKind::Radial(r) => match r.mode {
+            crate::graph::RadialMode::Cylindrical => "Cylindrical position".into(),
+            crate::graph::RadialMode::Spherical => "Spherical position".into(),
+        },
         NodeKind::Reroute => "Reroute".into(),
         NodeKind::NamedReroute { name } => format!("{name}  (reroute)"),
         NodeKind::NamedRerouteUse { name } => name.clone(),
@@ -170,7 +174,7 @@ fn input_label(kind: &NodeKind, port: usize) -> &'static str {
         (NodeKind::Remap { .. }, 3) => "To min",
         (NodeKind::Remap { .. }, _) => "To max",
         (NodeKind::Grid { .. } | NodeKind::Pattern(_), _) => "Position",
-        (NodeKind::Noise(_), _) => "Position",
+        (NodeKind::Noise(_) | NodeKind::Radial(_), _) => "Position",
         (NodeKind::Normal { .. }, _) => "Field",
         (NodeKind::OutDensity, _) => "Density",
         (NodeKind::OutNormal, _) => "Normal",
@@ -278,6 +282,7 @@ fn noise_palette() -> Vec<(&'static str, NodeKind)> {
             ("Truchet", NodeKind::Pattern(crate::graph::PatternParams::for_kind(crate::graph::PatternKind::Truchet))),
             ("Honeycomb", NodeKind::Pattern(crate::graph::PatternParams::for_kind(crate::graph::PatternKind::Honeycomb))),
             ("Position", NodeKind::Position),
+            ("Radial position", NodeKind::Radial(Default::default())),
             ("Normal", NodeKind::Normal { flip: false }),
             ("Density Output", NodeKind::OutDensity),
             ("Normal Output", NodeKind::OutNormal),
@@ -707,6 +712,7 @@ impl Editor {
                         NodeKind::Bake(b) => b.channels.get(k).map(|c| c.name()).or_else(|| b.custom.get(k - b.channels.len()).map(|s| s.as_str())).unwrap_or(""),
                         NodeKind::ImageSplit => ["R", "G", "B", "A"][k.min(3)],
                         NodeKind::LoadMesh(_) => ["Field", "Mesh"][k.min(1)],
+                        NodeKind::Noise(_) | NodeKind::Pattern(_) | NodeKind::Grid { .. } => ["Value", "Displacement"][k.min(1)],
                         _ => ["X", "Y", "Z"][k.min(2)],
                     };
                     painter.text(p - Vec2::new(10.0 * z, 0.0), egui::Align2::RIGHT_CENTER, name, small.clone(), Color32::from_gray(210));
