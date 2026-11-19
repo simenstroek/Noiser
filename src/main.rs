@@ -366,6 +366,7 @@ impl App {
             close_ok: false,
             recent: cc.storage.and_then(|s| s.get_string(RECENT_KEY)).and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default(),
         };
+        let graph_from_arg = mesh_graph_arg.is_some();
         if mesh_tab || mesh_graph_arg.is_some() {
             app.workspace = meshworkspace::Workspace::Mesh;
         }
@@ -382,7 +383,8 @@ impl App {
             app.start_mesh_load(p);
         }
         // The mesh graph as it was left (an unsaved one included), with the file it belongs to.
-        if let Some(g) = cc.storage.and_then(|s| s.get_string(MESH_GRAPH_KEY)).and_then(|s| Graph::from_json(&s).ok()) {
+        // (a graph named on the command line wins)
+        if let Some(g) = cc.storage.and_then(|s| s.get_string(MESH_GRAPH_KEY)).and_then(|s| Graph::from_json(&s).ok()).filter(|_| !graph_from_arg) {
             let path = cc.storage.and_then(|s| s.get_string(MESH_GRAPH_PATH_KEY)).filter(|p| !p.is_empty()).map(std::path::PathBuf::from);
             app.mesh_ws.restore(g, path);
         }
