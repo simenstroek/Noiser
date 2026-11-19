@@ -275,6 +275,9 @@ impl App {
                 batch_dir = args.next().map(std::path::PathBuf::from);
             } else if a == "--batch-file" {
                 batch_files.extend(args.next().map(std::path::PathBuf::from));
+            } else if a.to_lowercase().ends_with(".meshgraph") {
+                // A mesh graph given as a plain file name ("open with") opens in the Mesh graph tab.
+                mesh_graph_arg = Some(std::path::PathBuf::from(a));
             } else if graph_arg.is_none() {
                 graph_arg = Some(std::path::PathBuf::from(a));
             }
