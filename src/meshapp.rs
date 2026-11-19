@@ -313,6 +313,7 @@ impl App {
                         }
                     });
                     ui.add(egui::DragValue::new(&mut b.padding).range(0..=64).prefix("padding ").suffix(" px"));
+                    ui.add(egui::DragValue::new(&mut b.samples).range(1..=4).prefix("samples ").suffix(" per side")).on_hover_text("Anti-aliasing: the map is baked at this many times the size and averaged down (not above 4096 px in all).");
                     for c in crate::bake::Channel::ALL {
                         let mut on = b.channels.contains(&c);
                         if ui.checkbox(&mut on, c.name()).changed() {

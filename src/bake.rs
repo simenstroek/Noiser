@@ -61,11 +61,13 @@ pub struct Settings {
     pub custom: Vec<String>,
     /// A normal map with green up (OpenGL: Blender, Unity, glTF) instead of down (DirectX: Unreal).
     pub green_up: bool,
+    /// Samples per texel along each side (1 to 4): the map is baked at this many times the size and averaged down.
+    pub samples: u32,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { size: 2048, padding: 8, channels: vec![Channel::Normal, Channel::Occlusion, Channel::Curvature, Channel::Depth], custom: Vec::new(), green_up: false }
+        Settings { size: 2048, padding: 8, channels: vec![Channel::Normal, Channel::Occlusion, Channel::Curvature, Channel::Depth], custom: Vec::new(), green_up: false, samples: 2 }
     }
 }
 
@@ -267,6 +269,70 @@ fn rasterize(mesh: &UvMesh, size: usize) -> Vec<Texel> {
 /// Bakes `settings.channels` for `mesh` against `field`. `progress` is called with (done, total) texel counts.
 pub fn bake(mesh: &UvMesh, field: &mut dyn Field, customs: &mut [&mut dyn Field], settings: &Settings, progress: &dyn Fn(usize, usize)) -> Result<Vec<Image>, String> {
     let size = settings.size.max(16) as usize;
+    // The big map is limited to 4096 x 4096 (memory): large maps get fewer samples.
+    let k = (settings.samples.clamp(1, 4) as usize).min((4096 / size).max(1));
+    let big = Settings { size: (size * k) as u32, ..settings.clone() };
+    let (mut images, valid) = bake_raw(mesh, field, customs, &big, progress)?;
+    let mut valid = valid;
+    if k > 1 {
+        let small = downsample_valid(&valid, size * k, k);
+        images = images.into_iter().map(|im| downsample(im, k, &valid)).collect();
+        valid = small;
+    }
+    for im in &mut images {
+        dilate(&mut im.data, valid.clone(), size, im.components, settings.padding as usize);
+    }
+    Ok(images)
+}
+
+/// Which texels of the small map have a valid sample among their k x k.
+fn downsample_valid(valid: &[bool], big: usize, k: usize) -> Vec<bool> {
+    let n = big / k;
+    (0..n * n).map(|i| (0..k * k).any(|j| valid[(i / n * k + j / k) * big + (i % n) * k + j % k])).collect()
+}
+
+/// Averages the valid texels of every k x k block of an unpadded map;
+/// normals are averaged as vectors and normalised again.
+fn downsample(im: Image, k: usize, valid: &[bool]) -> Image {
+    let big = im.size as usize;
+    let n = big / k;
+    let c = im.components;
+    let mut data = vec![0.0f32; n * n * c];
+    let normal = im.channel == Some(Channel::Normal);
+    for y in 0..n {
+        for x in 0..n {
+            let (mut sum, mut count) = ([0.0f32; 3], 0.0f32);
+            for j in 0..k * k {
+                let at = ((y * k + j / k) * big + x * k + j % k) * c;
+                if !valid[(y * k + j / k) * big + x * k + j % k] {
+                    continue;
+                }
+                let px = &im.data[at..at + c];
+                for a in 0..c {
+                    sum[a] += if normal { 2.0 * px[a] - 1.0 } else { px[a] };
+                }
+                count += 1.0;
+            }
+            let out = (y * n + x) * c;
+            if count > 0.0 {
+                if normal {
+                    let l = (sum[0] * sum[0] + sum[1] * sum[1] + sum[2] * sum[2]).sqrt().max(1e-12);
+                    for a in 0..3 {
+                        data[out + a] = 0.5 + 0.5 * sum[a] / l;
+                    }
+                } else {
+                    for a in 0..c {
+                        data[out + a] = sum[a] / count;
+                    }
+                }
+            }
+        }
+    }
+    Image { size: n as u32, data, ..im }
+}
+
+fn bake_raw(mesh: &UvMesh, field: &mut dyn Field, customs: &mut [&mut dyn Field], settings: &Settings, progress: &dyn Fn(usize, usize)) -> Result<(Vec<Image>, Vec<bool>), String> {
+    let size = settings.size.max(16) as usize;
     if mesh.triangles.is_empty() {
         return Err("nothing to bake: the mesh has no triangles".into());
     }
@@ -450,18 +516,14 @@ pub fn bake(mesh: &UvMesh, field: &mut dyn Field, customs: &mut [&mut dyn Field]
         }
     }
     progress(texels.len(), texels.len());
-    // Pad the islands outwards.
     let mut out = Vec::new();
     for (k, &c) in channels.iter().enumerate() {
-        let mut data = std::mem::take(&mut images[k]);
-        dilate(&mut data, valid.clone(), size, c.components(), settings.padding as usize);
-        out.push(Image { channel: Some(c), label: c.name().to_string(), size: size as u32, components: c.components(), data });
+        out.push(Image { channel: Some(c), label: c.name().to_string(), size: size as u32, components: c.components(), data: std::mem::take(&mut images[k]) });
     }
-    for (k, mut data) in custom_images.into_iter().enumerate() {
-        dilate(&mut data, valid.clone(), size, 1, settings.padding as usize);
+    for (k, data) in custom_images.into_iter().enumerate() {
         out.push(Image { channel: None, label: settings.custom.get(k).cloned().unwrap_or_else(|| format!("Custom{}", k + 1)), size: size as u32, components: 1, data });
     }
-    Ok(out)
+    Ok((out, valid))
 }
 
 /// Copies valid texels into the invalid ones next to them, `passes` times, averaging when several neighbours are valid.

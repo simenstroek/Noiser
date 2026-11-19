@@ -1744,7 +1744,7 @@ fn a_mesh_graph_runs_from_a_mesh_file_to_files() {
     g.connect(blend, sum, 1);
     let remesh = g.add(NodeKind::Remesh { triangles: 3000, adaptivity: 1.0 }, [0.0; 2]);
     let uv = g.add(NodeKind::AutoUv(crate::uvgen::UvParams { resolution: 512, ..Default::default() }), [0.0; 2]);
-    let bake = g.add(NodeKind::Bake(crate::bake::Settings { size: 128, padding: 2, channels: vec![crate::bake::Channel::Normal, crate::bake::Channel::Occlusion], custom: vec!["Mask".into()], green_up: false }), [0.0; 2]);
+    let bake = g.add(NodeKind::Bake(crate::bake::Settings { size: 128, padding: 2, channels: vec![crate::bake::Channel::Normal, crate::bake::Channel::Occlusion], custom: vec!["Mask".into()], green_up: false, ..Default::default() }), [0.0; 2]);
     let out_mesh = g.add(NodeKind::OutMesh(crate::meshgraph::OutParams { folder: "out".into(), name: "ball".into(), ..Default::default() }), [0.0; 2]);
     let out_normal = g.add(NodeKind::OutImage(crate::meshgraph::OutParams { folder: "out".into(), name: "ball".into(), ..Default::default() }), [0.0; 2]);
     g.connect(sum, remesh, 0);

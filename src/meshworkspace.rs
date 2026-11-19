@@ -59,6 +59,8 @@ struct Preview {
     /// The texture coordinates of each triangle's corners (V up) and the island each triangle is in; empty without UVs.
     uvs: Vec<[[f32; 2]; 3]>,
     island: Vec<u32>,
+    /// Smooth vertex normals (area weighted), for shading.
+    normals: Vec<[f32; 3]>,
 }
 
 impl Preview {
@@ -67,9 +69,24 @@ impl Preview {
         let (lo, hi) = mesh.bounds();
         let centre = [0, 1, 2].map(|a| 0.5 * (lo[a] + hi[a]));
         let radius = (0..3).map(|a| hi[a] - lo[a]).fold(0.0, f32::max).max(1e-9) * 0.5;
-        let positions = mesh.positions.iter().map(|p| [0, 1, 2].map(|a| (p[a] - centre[a]) / radius)).collect();
+        let positions: Vec<[f32; 3]> = mesh.positions.iter().map(|p| [0, 1, 2].map(|a| (p[a] - centre[a]) / radius)).collect();
         let island = if mesh.uvs.len() == mesh.triangles.len() && !mesh.uvs.is_empty() { crate::uvtransfer::islands(&mesh) } else { Vec::new() };
-        Ok(Preview { positions, triangles: mesh.triangles, name: path.file_name().map_or(String::new(), |n| n.to_string_lossy().into_owned()), uvs: if island.is_empty() { Vec::new() } else { mesh.uvs }, island })
+        let mut normals = vec![[0.0f32; 3]; positions.len()];
+        for t in &mesh.triangles {
+            let [a, b, c] = t.map(|i| positions[i as usize]);
+            let (e1, e2) = ([b[0] - a[0], b[1] - a[1], b[2] - a[2]], [c[0] - a[0], c[1] - a[1], c[2] - a[2]]);
+            let n = [e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2], e1[0] * e2[1] - e1[1] * e2[0]];
+            for &i in t {
+                for k in 0..3 {
+                    normals[i as usize][k] += n[k];
+                }
+            }
+        }
+        for n in &mut normals {
+            let l = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt().max(1e-20);
+            *n = [n[0] / l, n[1] / l, n[2] / l];
+        }
+        Ok(Preview { normals, positions, triangles: mesh.triangles, name: path.file_name().map_or(String::new(), |n| n.to_string_lossy().into_owned()), uvs: if island.is_empty() { Vec::new() } else { mesh.uvs }, island })
     }
 
     /// The UV layout: the 0 to 1 square with every triangle, filled by island.
@@ -98,7 +115,7 @@ impl Preview {
         painter.rect_stroke(square, 0.0, egui::Stroke::new(1.0, egui::Color32::from_gray(140)), egui::StrokeKind::Outside);
     }
 
-    /// Flat-shaded triangles, far ones first, as one egui mesh in `rect`.
+    /// Smooth-shaded triangles, far ones first, as one egui mesh in `rect`.
     fn paint(&self, painter: &egui::Painter, rect: egui::Rect, yaw: f32, pitch: f32, zoom: f32) {
         const LIMIT: usize = 150_000;
         if self.triangles.len() > LIMIT {
@@ -113,6 +130,7 @@ impl Preview {
             [x, cp * p[1] - sp * z, sp * p[1] + cp * z]
         };
         let v: Vec<[f32; 3]> = self.positions.iter().map(|p| view(*p)).collect();
+        let vn: Vec<[f32; 3]> = self.normals.iter().map(|n| view(*n)).collect();
         let scale = 0.45 * rect.width().min(rect.height()) * zoom;
         let to_screen = |p: [f32; 3]| egui::pos2(rect.center().x + p[0] * scale, rect.center().y - p[1] * scale);
         let light = {
@@ -129,16 +147,20 @@ impl Preview {
             let (e1, e2) = ([b[0] - a[0], b[1] - a[1], b[2] - a[2]], [c[0] - a[0], c[1] - a[1], c[2] - a[2]]);
             let n = [e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2], e1[0] * e2[1] - e1[1] * e2[0]];
             let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt().max(1e-20);
-            let facing = (n[0] * light[0] + n[1] * light[1] + n[2] * light[2]) / len;
-            // Faces turned away show dark red, which also exposes inside-out or folded triangles.
-            let colour = if n[2] < 0.0 {
-                egui::Color32::from_rgb(110, 25, 25)
-            } else {
-                let k = 0.2 + 0.8 * facing.max(0.0);
-                egui::Color32::from_rgb((205.0 * k) as u8, (195.0 * k) as u8, (175.0 * k) as u8)
-            };
+            // Faces turned away show dark red, which also exposes inside-out or folded triangles; the rest is shaded
+            // per vertex from averaged normals.
+            let back = n[2] < 0.0;
+            let _ = len;
             let base = mesh.vertices.len() as u32;
-            for p in [a, b, c] {
+            for (j, p) in [a, b, c].into_iter().enumerate() {
+                let colour = if back {
+                    egui::Color32::from_rgb(110, 25, 25)
+                } else {
+                    let q = vn[t[j] as usize];
+                    let facing = q[0] * light[0] + q[1] * light[1] + q[2] * light[2];
+                    let k = 0.2 + 0.8 * facing.max(0.0);
+                    egui::Color32::from_rgb((205.0 * k) as u8, (195.0 * k) as u8, (175.0 * k) as u8)
+                };
                 mesh.vertices.push(egui::epaint::Vertex { pos: to_screen(p), uv: egui::epaint::WHITE_UV, color: colour });
             }
             mesh.indices.extend([base, base + 1, base + 2]);

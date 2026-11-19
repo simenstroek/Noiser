@@ -115,6 +115,7 @@ pub fn props(ui: &mut egui::Ui, kind: &mut NodeKind) -> bool {
                 }
             });
             crate::row(ui, &mut b.padding, d.padding, |ui, v| _ = ui.add(egui::DragValue::new(v).range(0..=64).prefix("padding ").suffix(" px")));
+            crate::row(ui, &mut b.samples, d.samples, |ui, v| _ = ui.add(egui::DragValue::new(v).range(1..=4).prefix("samples ").suffix(" per side")).on_hover_text("Anti-aliasing: the map is baked at this many times the size and averaged down (not above 4096 px in all)."));
             for c in crate::bake::Channel::ALL {
                 let mut on = b.channels.contains(&c);
                 if ui.checkbox(&mut on, c.name()).changed() {

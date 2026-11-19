@@ -165,6 +165,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
                 o.settings.bake.get_or_insert_with(Default::default).channels = channels;
             }
             "--bake-size" => o.settings.bake.get_or_insert_with(Default::default).size = whole(value("a texture size like 2048")?)?,
+            "--bake-samples" => o.settings.bake.get_or_insert_with(Default::default).samples = whole(value("samples per side, 1 to 4")?)?,
             "--bake-pad" => o.settings.bake.get_or_insert_with(Default::default).padding = whole(value("texels")?)?,
             "--green-up" => o.settings.bake.get_or_insert_with(Default::default).green_up = true,
             "--uv-brute" => o.settings.uv.get_or_insert_with(Default::default).brute_force = true,
