@@ -229,7 +229,7 @@ fn merge_small_charts(mesh: &RawMesh, charts: &[Vec<u32>], min_faces: usize) -> 
 
 /// The faces of `mesh` whose UV triangle has a texel centre strictly inside another face's (a fold-over or overlap),
 /// rasterized on a `res` by `res` grid.
-fn overlapping_faces(mesh: &UvMesh, res: usize, island: &[u32]) -> Vec<bool> {
+fn overlapping_faces(mesh: &UvMesh, res: usize, island: &[u32], grow: f32) -> Vec<bool> {
     let n = mesh.triangles.len();
     let mut owner = vec![u32::MAX; res * res];
     let mut bad = vec![false; n];
@@ -267,10 +267,10 @@ fn overlapping_faces(mesh: &UvMesh, res: usize, island: &[u32]) -> Vec<bool> {
             }
         });
     }
-    // A face one texel from another island's face would bleed into it: flag those too.
+    // A face within `grow` texels (half the padding, at most one) of another island's face would bleed into it: flag those too.
     for (f, tri) in mesh.triangles.iter().enumerate() {
         let mut hit = false;
-        cover(tri, 1.0, &mut |cell| {
+        cover(tri, grow, &mut |cell| {
             let o = owner[cell];
             hit |= o != u32::MAX && island[o as usize] != island[f];
         });
@@ -289,7 +289,7 @@ fn uv_area2(mesh: &UvMesh, t: [u32; 3]) -> f32 {
 /// Folds islands of fewer than `min_faces` faces into the neighbouring island they share the most border with: the
 /// tiny island's border vertices take the neighbour's UVs there and its inner vertices are spread between them. A
 /// merge that flips a triangle or lands on another island is undone and the island stays as it was.
-fn absorb_tiny_islands(mesh: &mut UvMesh, min_faces: usize, res: usize) -> usize {
+fn absorb_tiny_islands(mesh: &mut UvMesh, min_faces: usize, res: usize, grow: f32) -> usize {
     use std::collections::HashMap;
     let n = mesh.triangles.len();
     let mut parent: Vec<u32> = (0..n as u32).collect();
@@ -514,7 +514,7 @@ fn absorb_tiny_islands(mesh: &mut UvMesh, min_faces: usize, res: usize) -> usize
     // Undo the merges that landed on other charts.
     let mut undone = vec![false; merges.len()];
     loop {
-        let bad = overlapping_faces(mesh, res, &island);
+        let bad = overlapping_faces(mesh, res, &island, grow);
         let mut any = false;
         for (i, m) in merges.iter().enumerate() {
             if !undone[i] && m.faces.iter().any(|&f| bad[f as usize]) {
@@ -593,9 +593,10 @@ pub fn generate(mesh: &RawMesh, params: &UvParams) -> Result<UvMesh, String> {
         (uv, charts) = (u, c);
     }
     if params.absorb_tiny {
+        let check_res = (params.resolution as usize).min(2048);
         // Each round merges islands that did not absorb any in that round; the next one can then merge the grown ones.
         for round in 0..4 {
-            let absorbed = absorb_tiny_islands(&mut uv, min_faces, (params.resolution as usize).min(2048));
+            let absorbed = absorb_tiny_islands(&mut uv, min_faces, check_res, (0.5 * params.padding as f32 * check_res as f32 / params.resolution.max(1) as f32).clamp(0.0, 1.0));
             if std::env::var_os("NOISER_REMESH_DEBUG").is_some() {
                 eprintln!("round {round}: absorbed {absorbed} tiny islands");
             }
