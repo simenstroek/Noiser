@@ -127,3 +127,7 @@ The log now reports the number of triangles stretched over 100x instead of the m
 
 Tried and rejected after v0.13.0: packing the charts a second time after absorbing (xatlas `add_uv_mesh`, first pass without best packing, repack with it; the wrapper counts contiguous UV data in threes, so the UVs have to go in as strided bytes). Rock 20k: coverage 66.2% to 63.5%, overlap 0.000% to 0.130%, one flipped triangle, mean stretch 1.25 to 1.50, time 36 s to 30 s. The merges kept or undone differ when the first layout is not the best-packed one, and the repack does not help what they kept. Not kept.
 
+## Status at v0.14.0 (2026-11-19, morning)
+
+Everything in phases 1 to 4 exists and is released: remesher, UVs (xatlas with smoothed charts, best packing up to 50k triangles, absorbing of tiny islands by unfolding), Transfer UVs (from a mesh file or from an Auto UVs result, with relax), baker (normal, occlusion, curvature, depth, thickness, position, custom), the Mesh graph tab (typed wires, image nodes, runs, preview, batch, cancel, UV layout view), formats in (OBJ, PLY, STL, glTF, FBX) and out (OBJ, PLY, GLB, PNG 8/16, EXR). Tests: unit and GPU tests, plus kittest GUI tests for the Remesh and mask fields. Never clicked by hand: Cancel, the UV layout and output format buttons, LOD wiring in the GUI. Open: coverage 58 to 68% against a 70% target, tiny islands on bumpy meshes, remesher quality at very large amplitude, no live field preview, FBX tested with one Blender export.
+
