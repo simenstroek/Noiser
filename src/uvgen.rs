@@ -143,7 +143,9 @@ fn run(mesh: &RawMesh, base: &[V3], material: Option<&[u32]>, params: &UvParams,
     if std::env::var_os("NOISER_REMESH_DEBUG").is_some() {
         eprintln!("atlas {w} x {h}, {} atlas(es), texels per unit {}", atlas.atlas_count(), atlas.texels_per_unit());
     }
+    // xatlas may return a slightly non-square atlas; stretching it to the square (at most 15%) gains that much coverage.
     let side = w.max(h);
+    let (sx, sy) = if side <= 1.15 * w.min(h) { (w, h) } else { (side, side) };
     let meshes = atlas.meshes();
     let m = meshes.first().ok_or("UV generation produced no mesh")?;
     let mut out = UvMesh::default();
@@ -151,7 +153,7 @@ fn run(mesh: &RawMesh, base: &[V3], material: Option<&[u32]>, params: &UvParams,
         let src = v.xref as usize;
         out.positions.push(mesh.positions[src]);
         out.normals.push(mesh.normals.get(src).copied().unwrap_or([0.0; 3]));
-        out.uvs.push([v.uv[0] / side, v.uv[1] / side]);
+        out.uvs.push([v.uv[0] / sx, v.uv[1] / sy]);
         out.source.push(v.xref);
     }
     out.triangles = m.index_array.chunks_exact(3).map(|t| [t[0], t[1], t[2]]).collect();
