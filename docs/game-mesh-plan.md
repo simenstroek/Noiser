@@ -95,3 +95,16 @@ Checked in Blender 4.5 (Cycles, from the command line): the 4,000-triangle monke
 ### Where the UV coverage goes (measured 2026-11-19)
 
 Rock, 20k triangles, 351 islands (299 tiny): coverage 64.1% in 10 s. Padding is not the lever: 2 texels gives 63.4%, 4 texels 64.1%, 4096 px 65.9%. Packing efficiency is: xatlas best packing (`brute_force`) gives 70.6% (69.6% with 2 texels) in 35 s, so it is now on by default up to 50k triangles. At 100k triangles (1218 islands) it did not help (64.8% plain, 60.9% best packing, 25 s longer), so it is skipped above 50k. Transfer UVs now relaxes each island's interior (cotan Laplacian, borders pinned, flip-safe): rock mean stretch 1.18 to 1.13, 0 flipped. xatlas sometimes returns a non-square atlas (IslandRock: 2279 x 2449); stretching it to the square when the ratio is under 1.15 gains that much coverage (IslandRock 53.1% to 57.1%, rock 70.6% to 72.9% with best packing). Real assets through the batch run (20k triangles each): IslandRock_Complex_01 57%, vehicle SDF export 65%, leaves sculpt (thin open sheets, not a good fit for a volume) 60%. Chart smoothing was tuned again: with 10 rounds the UVs are made on a copy that differs from the true surface, and the rock's mean stretch was 1.57 (p95 3.2); at 3 rounds it is 1.2 to 1.3 with fewer islands (rock 298 against 351, coverage similar), so 3 is the default now (rock 20k: islands 351 to ~300, stretch 1.57 to ~1.2; 100k rock: stretch 1.44 to 1.26, coverage 64.8% to 68.0%). A Laplacian relax of the interiors after xatlas, against the true surface, did not help (mean stretch unchanged), so only the Transfer UVs path uses relax.
+
+### Measured with the shipped defaults (v0.12.0: smoothing 3, best packing up to 50k triangles, atlas 2048, overlap counted at 2048)
+
+| Mesh (20k triangles unless noted) | Islands (tiny) | Coverage | Mean stretch (p95) | Overlap |
+|---|---|---|---|---|
+| Rock (RockShape + noise) | 294 (234) | 66.2% | 1.25 (1.88) | 0.000% |
+| IslandRock_Complex_01 | 116 (30) | 58.2% | 1.16 (1.39) | 0.000% |
+| Vehicle SDF export | 39 (17) | 67.5% | 1.04 (1.07) | 0.000% |
+| Leaves sculpt (open sheets) | 872 (705) | 62.1% | 2.47 (2.90) | 0.000% |
+| Rock, 100k triangles | 1237 (1077) | 68.0% | 1.26 (1.63) | 0.000% |
+
+The 0.001% overlap seen earlier was a counting artefact: the log counted at 512 px while islands are packed 4 px apart at 2048, so they touched at 512. The log now counts at the atlas resolution. Coverage between runs varies by a few points with any change to the charts, so single numbers are not exact; the 70% target is met only by some meshes. Graphs saved before v0.12.0 keep their stored *chart smoothing* 10 and *best packing* off; press reset on those two fields in the Auto UVs node.
+

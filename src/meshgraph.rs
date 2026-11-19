@@ -416,7 +416,7 @@ impl Runner<'_> {
                 let Value::Mesh(mesh) = self.value(original, lowered, src, memo, fields)? else { return Err(format!("node {id} (Auto UVs) needs a mesh")) };
                 (self.log)("unwrapping");
                 let uv = crate::uvgen::generate(&mesh, params)?;
-                for line in crate::meshquality::uv_report(&uv, 512).to_string().lines() {
+                for line in crate::meshquality::uv_report(&uv, params.resolution as usize).to_string().lines() {
                     (self.log)(&format!("  {line}"));
                 }
                 Value::Uv(uv)
