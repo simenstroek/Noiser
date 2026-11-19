@@ -15,6 +15,103 @@ pub enum Workspace {
     Mesh,
 }
 
+/// A picture request for the ray marching worker: the graph (and what it was made from), the view and the size.
+struct RayRequest {
+    graph: Graph,
+    key: u64,
+    base: PathBuf,
+    seed: u32,
+    view: [f32; 3],
+    size: u32,
+}
+
+/// What the worker sends back: the picture (RGBA bytes) for a request, or why there is none.
+struct RayResult {
+    size: u32,
+    rgba: Result<Vec<u8>, String>,
+}
+
+/// Draws the field of the first Remesh by ray marching on its own thread: it keeps the compiled field for as long as
+/// the graph does not change and answers only the newest request.
+struct RayWorker {
+    tx: mpsc::Sender<RayRequest>,
+    rx: mpsc::Receiver<RayResult>,
+    /// Requests sent and not yet answered.
+    outstanding: usize,
+}
+
+/// The orthographic camera that matches the software view (`Preview::paint`) for a field with these bounds.
+fn ray_camera(lo: [f32; 3], hi: [f32; 3], view: [f32; 3], size: u32) -> crate::meshexport::MarchCamera {
+    let [yaw, pitch, zoom] = view;
+    let centre: [f32; 3] = std::array::from_fn(|a| 0.5 * (lo[a] + hi[a]));
+    let radius = (0..3).map(|a| hi[a] - lo[a]).fold(0.0, f32::max).max(1e-9) * 0.5;
+    let (cy, sy, cp, sp) = (yaw.cos(), yaw.sin(), pitch.cos(), pitch.sin());
+    // The rows of the software view's rotation: image x, image y and towards the viewer, in the field's space.
+    let (x, y, z) = ([cy, 0.0, sy], [sp * sy, cp, -sp * cy], [-cp * sy, sp, cp * cy]);
+    let half = radius / (0.9 * zoom);
+    let step = 2.0 * half / size as f32;
+    let at = |a: usize| centre[a] + z[a] * 2.0 * radius + x[a] * (-half + 0.5 * step) + y[a] * (half - 0.5 * step);
+    let light: [f32; 3] = std::array::from_fn(|a| x[a] * 0.35 + y[a] * 0.55 + z[a] * 0.75);
+    let l = (light[0] * light[0] + light[1] * light[1] + light[2] * light[2]).sqrt();
+    crate::meshexport::MarchCamera {
+        origin: [at(0), at(1), at(2)],
+        step_x: x.map(|c| c * step),
+        step_y: y.map(|c| -c * step),
+        direction: z.map(|c| -c),
+        light: light.map(|c| c / l),
+        t_max: 4.0 * radius,
+        hit: 0.0008 * radius,
+        gradient_step: 0.002 * radius,
+    }
+}
+
+impl RayWorker {
+    fn spawn(device: eframe::wgpu::Device, queue: eframe::wgpu::Queue) -> RayWorker {
+        let (tx, requests) = mpsc::channel::<RayRequest>();
+        let (answers, rx) = mpsc::channel::<RayResult>();
+        std::thread::spawn(move || {
+            let mut cache = MeshCache::default();
+            let mut current: Option<(u64, crate::meshgraph::FieldView)> = None;
+            while let Ok(mut req) = requests.recv() {
+                let mut skipped = 0;
+                while let Ok(newer) = requests.try_recv() {
+                    req = newer;
+                    skipped += 1;
+                }
+                // Answer once per request so the sender can count, newest picture last.
+                for _ in 0..skipped {
+                    let _ = answers.send(RayResult { size: 0, rgba: Err(String::new()) });
+                }
+                if current.as_ref().map(|c| c.0) != Some(req.key) {
+                    current = None;
+                    let mut quiet = |_: &str| {};
+                    let built = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        Runner { device: &device, queue: &queue, cache: &mut cache, base: req.base.clone(), seed: req.seed, progress: Default::default(), log: &mut quiet, batch_file: None, max_triangles: None, numbering: Default::default() }.field_view(&req.graph)
+                    }));
+                    match built {
+                        Ok(Ok(view)) => current = Some((req.key, view)),
+                        Ok(Err(e)) => {
+                            let _ = answers.send(RayResult { size: req.size, rgba: Err(e) });
+                            continue;
+                        }
+                        Err(_) => {
+                            let _ = answers.send(RayResult { size: req.size, rgba: Err("the field could not be built".into()) });
+                            continue;
+                        }
+                    }
+                }
+                let Some((_, view)) = &current else { continue };
+                let (lo, hi) = view.bounds();
+                let cam = ray_camera(lo, hi, req.view, req.size);
+                let pixels = view.march(&cam, req.size, req.size);
+                let rgba = pixels.iter().flat_map(|p| p.map(|c| (c.clamp(0.0, 1.0) * 255.0) as u8)).collect();
+                let _ = answers.send(RayResult { size: req.size, rgba: Ok(rgba) });
+            }
+        });
+        RayWorker { tx, rx, outstanding: 0 }
+    }
+}
+
 struct RunJob {
     progress: crate::meshexport::Progress,
     log: Arc<Mutex<Vec<String>>>,
@@ -47,6 +144,14 @@ pub struct MeshWorkspace {
     map_tex: Option<(usize, egui::TextureHandle)>,
     map_zoom: f32,
     map_pan: egui::Vec2,
+    /// The ray-marched view of the field beside the software view, its worker, last picture, last error, and what was
+    /// last requested (graph key, view, size) with when the graph key last changed.
+    pub field_view: bool,
+    ray: Option<RayWorker>,
+    ray_tex: Option<egui::TextureHandle>,
+    ray_error: Option<String>,
+    ray_sent: Option<(u64, [i32; 3], u32)>,
+    ray_key: (u64, Option<std::time::Instant>),
     /// Redo the quick preview a moment after the graph (or the noise graph it uses) changes.
     pub auto_preview: bool,
     /// What the last preview was made from, and since when the graph has differed from it.
@@ -182,7 +287,7 @@ impl Default for MeshWorkspace {
         let mut editor = crate::editor::Editor::default();
         editor.mesh_mode = true;
         editor.frame_next = true;
-        MeshWorkspace { saved: graph.clone(), graph, editor, path: None, cache: Arc::new(Mutex::new(MeshCache::default())), job: None, log: Vec::new(), written: Vec::new(), seed: 0, autorun: false, preview: None, show_uv: false, thumbnails: Vec::new(), map_files: Vec::new(), show_map: false, map_index: 0, map_tex: None, map_zoom: 1.0, map_pan: egui::Vec2::ZERO, auto_preview: false, preview_key: 0, changed_since: None, history: crate::history::History::new(&Graph::default()), yaw: 0.6, pitch: 0.35, zoom: 1.0 }
+        MeshWorkspace { saved: graph.clone(), graph, editor, path: None, cache: Arc::new(Mutex::new(MeshCache::default())), job: None, log: Vec::new(), written: Vec::new(), seed: 0, autorun: false, preview: None, show_uv: false, thumbnails: Vec::new(), map_files: Vec::new(), show_map: false, map_index: 0, map_tex: None, map_zoom: 1.0, map_pan: egui::Vec2::ZERO, field_view: true, ray: None, ray_tex: None, ray_error: None, ray_sent: None, ray_key: (0, None), auto_preview: false, preview_key: 0, changed_since: None, history: crate::history::History::new(&Graph::default()), yaw: 0.6, pitch: 0.35, zoom: 1.0 }
     }
 }
 
@@ -584,6 +689,7 @@ impl crate::App {
                 }
                 ui.add(egui::DragValue::new(&mut self.mesh_ws.seed).prefix("seed "));
             });
+            ui.checkbox(&mut self.mesh_ws.field_view, "Field view (ray marched, beside the mesh)").on_hover_text("Draws the field of the first Remesh directly on the GPU, without making a mesh: it follows the graph as you edit it and turns with the mesh view.");
             ui.checkbox(&mut self.mesh_ws.auto_preview, "Preview again after changes").on_hover_text("A second after the graph, or the noise graph open in the Noise tab, stops changing, the quick preview runs again.");
             if let Some(job) = &self.mesh_ws.job {
                 let p = job.progress.load(std::sync::atomic::Ordering::Relaxed) as f32 / 1000.0;
@@ -692,6 +798,79 @@ impl crate::App {
                 } else {
                     painter.text(view_rect.center(), egui::Align2::CENTER_CENTER, "Could not read this map", egui::FontId::proportional(14.0), egui::Color32::from_gray(150));
                 }
+            }
+            // The ray-marched field, to the left of the software view.
+            let show_field = self.mesh_ws.field_view && !map_view && !self.mesh_ws.show_uv;
+            let mut view_rect = view_rect;
+            let mut field_rect = None;
+            if show_field {
+                let halves = view_rect.width() / 2.0;
+                field_rect = Some(egui::Rect::from_min_size(view_rect.min, egui::vec2(halves, view_rect.height())));
+                view_rect.min.x += halves;
+                let side = (halves.min(view_rect.height()) as u32 / 8 * 8).clamp(128, 640);
+                if self.mesh_ws.ray.is_none() {
+                    self.mesh_ws.ray = Some(RayWorker::spawn(self.rs.device.clone(), self.rs.queue.clone()));
+                }
+                // What the picture is made from: the graph as a run would see it, and the seed.
+                let graph = self.graph_for_run();
+                let key = {
+                    use std::hash::{Hash, Hasher};
+                    let mut h = std::collections::hash_map::DefaultHasher::new();
+                    graph.to_json().hash(&mut h);
+                    self.mesh_ws.seed.hash(&mut h);
+                    h.finish()
+                };
+                let ws = &mut self.mesh_ws;
+                if key != ws.ray_key.0 {
+                    ws.ray_key = (key, Some(std::time::Instant::now()));
+                }
+                // A changed graph is drawn again once it has been still for a moment (compiling takes a while); a new
+                // view or size is drawn at once.
+                let settled = ws.ray_key.1.is_none_or(|t| t.elapsed() > std::time::Duration::from_millis(400));
+                let quant = [(ws.yaw * 100.0) as i32, (ws.pitch * 100.0) as i32, (ws.zoom * 100.0) as i32];
+                let first = ws.ray_sent.is_none();
+                let changed = ws.ray_sent.is_none_or(|(k, v, s)| k != ws.ray_key.0 || v != quant || s != side);
+                if changed && (settled || first) && !ui.input(|i| i.pointer.any_down() && ws.ray_sent.is_some_and(|(k, _, _)| k != ws.ray_key.0)) {
+                    if let Some(w) = &mut ws.ray {
+                        let req = RayRequest { graph, key, base: ws.path.as_ref().and_then(|p| p.parent()).map_or(PathBuf::from("."), |p| p.to_path_buf()), seed: ws.seed, view: [ws.yaw, ws.pitch, ws.zoom], size: side };
+                        if w.tx.send(req).is_ok() {
+                            w.outstanding += 1;
+                        }
+                    }
+                    ws.ray_sent = Some((key, quant, side));
+                    ws.ray_key.1 = None;
+                } else if changed {
+                    ctx.request_repaint_after(std::time::Duration::from_millis(150));
+                }
+                if let Some(w) = &mut ws.ray {
+                    while let Ok(r) = w.rx.try_recv() {
+                        w.outstanding = w.outstanding.saturating_sub(1);
+                        match r.rgba {
+                            Ok(rgba) => {
+                                let image = egui::ColorImage::from_rgba_unmultiplied([r.size as usize, r.size as usize], &rgba);
+                                ws.ray_tex = Some(ctx.load_texture("field view", image, egui::TextureOptions::LINEAR));
+                                ws.ray_error = None;
+                            }
+                            Err(e) if e.is_empty() => {}
+                            Err(e) => ws.ray_error = Some(e),
+                        }
+                    }
+                    if w.outstanding > 0 {
+                        ctx.request_repaint_after(std::time::Duration::from_millis(100));
+                    }
+                }
+                let fr = field_rect.unwrap();
+                match (&ws.ray_tex, &ws.ray_error) {
+                    (_, Some(e)) => _ = painter.text(fr.center(), egui::Align2::CENTER_CENTER, format!("Field view: {e}"), egui::FontId::proportional(12.0), egui::Color32::from_rgb(230, 150, 90)),
+                    (Some(tex), None) => {
+                        let s = fr.width().min(fr.height());
+                        let img = egui::Rect::from_center_size(fr.center(), egui::vec2(s, s));
+                        painter.image(tex.id(), img, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), egui::Color32::WHITE);
+                    }
+                    _ => _ = painter.text(fr.center(), egui::Align2::CENTER_CENTER, "Field view: working...", egui::FontId::proportional(12.0), egui::Color32::from_gray(130)),
+                }
+                painter.line_segment([egui::pos2(view_rect.min.x, view_rect.min.y), egui::pos2(view_rect.min.x, view_rect.max.y)], egui::Stroke::new(1.0, egui::Color32::from_gray(60)));
+                painter.text(fr.left_top() + egui::vec2(8.0, 22.0), egui::Align2::LEFT_TOP, "Field (ray marched)", egui::FontId::proportional(11.0), egui::Color32::from_gray(120));
             }
             let has_maps = !self.mesh_ws.map_files.is_empty();
             let has_uv = self.mesh_ws.preview.as_ref().is_some_and(|p| !p.uvs.is_empty());

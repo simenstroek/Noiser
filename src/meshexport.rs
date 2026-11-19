@@ -111,6 +111,41 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
     out[(id.z * x.ny + id.y) * x.nx + id.x] = field_at(p);
 }
 
+// Sphere tracing of the field for a picture (an orthographic camera): pts[0] is the first ray origin and pts[1] and
+// pts[2] the world steps per pixel along the image's x and y; pts[3] the ray direction; pts[4] = (light dir, t_max);
+// pts[5] = (step scale, hit distance, gradient step, 0). The picture is x.nx by x.ny in `samples`.
+@compute @workgroup_size(8, 8)
+fn march(@builtin(global_invocation_id) id: vec3u) {
+    if (id.x >= x.nx || id.y >= x.ny) { return; }
+    let o = pts[0].xyz + pts[1].xyz * f32(id.x) + pts[2].xyz * f32(id.y);
+    let d = pts[3].xyz;
+    let light = pts[4].xyz;
+    let t_max = pts[4].w;
+    let scale = pts[5].x;
+    let hit_d = pts[5].y;
+    let e = pts[5].z;
+    var t = 0.0;
+    var hit = false;
+    for (var i = 0; i < 220; i = i + 1) {
+        let v = field_at(o + d * t);
+        if (v < hit_d) { hit = true; break; }
+        t = t + max(v * scale, hit_d * 0.5);
+        if (t > t_max) { break; }
+    }
+    var colour = vec4f(0.11, 0.11, 0.11, 0.0);
+    if (hit) {
+        let p = o + d * t;
+        let g = vec3f(
+            field_at(p + vec3f(e, 0.0, 0.0)) - field_at(p - vec3f(e, 0.0, 0.0)),
+            field_at(p + vec3f(0.0, e, 0.0)) - field_at(p - vec3f(0.0, e, 0.0)),
+            field_at(p + vec3f(0.0, 0.0, e)) - field_at(p - vec3f(0.0, 0.0, e)));
+        let n = normalize(g + vec3f(1e-9));
+        let k = 0.2 + 0.8 * max(dot(n, light), 0.0);
+        colour = vec4f(0.804 * k, 0.765 * k, 0.686 * k, 1.0);
+    }
+    samples[id.y * x.nx + id.x] = colour;
+}
+
 // The distance and its gradient (central differences over x.h) at each of x.count points; with x.ny = 1 the
 // distance only (six times cheaper).
 @compute @workgroup_size(64)
@@ -164,6 +199,7 @@ pub struct MeshEvaluator {
     points_pipeline: wgpu::ComputePipeline,
     #[allow(dead_code)]
     points_bgl: wgpu::BindGroupLayout,
+    march_pipeline: wgpu::ComputePipeline,
     uniforms: wgpu::Buffer,
     params: wgpu::Buffer,
     blue: wgpu::Buffer,
@@ -302,6 +338,14 @@ impl MeshEvaluator {
             compilation_options: Default::default(),
             cache: None,
         });
+        let march_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("field march"),
+            layout: Some(&points_layout),
+            module: &module,
+            entry_point: Some("march"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: None, bind_group_layouts: &[Some(&bgl)], immediate_size: 0 });
         let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("mesh export"),
@@ -322,6 +366,7 @@ impl MeshEvaluator {
             bgl,
             points_pipeline,
             points_bgl,
+            march_pipeline,
             uniforms: init(bytemuck::bytes_of(&[seed, 0, 0, 0]), wgpu::BufferUsages::UNIFORM),
             params: init(bytemuck::cast_slice(params), wgpu::BufferUsages::STORAGE),
             blue: init(bytemuck::cast_slice(&crate::bluenoise::tables()), wgpu::BufferUsages::STORAGE),
@@ -408,6 +453,72 @@ impl MeshEvaluator {
         self.sample_points(d, points, 1.0, false).iter().map(|s| s[0]).collect()
     }
 
+    /// A picture of the field's zero surface seen by an orthographic camera (`cam`), `w` by `h` pixels as RGBA in 0 to 1
+    /// (alpha 0 where nothing was hit).
+    pub fn march(&self, d: Displace, cam: &MarchCamera, w: u32, h: u32) -> Vec<[f32; 4]> {
+        use wgpu::util::DeviceExt;
+        let dev = &self.device;
+        let block = Block {
+            grid_min: [0.0; 3],
+            h: cam.hit,
+            mesh_origin: self.mesh_origin,
+            mesh_voxel: self.mesh_voxel,
+            nx: w,
+            ny: h,
+            z0: 0,
+            count: w * h,
+            amount: d.amount,
+            tile_size: d.tile_size,
+            prim_size: d.prim_size,
+            _pad: 0.0,
+            mesh_lo: self.mesh_bounds.0,
+            mask_n: d.mask.count,
+            mesh_hi: self.mesh_bounds.1,
+            band: f32::MAX,
+            mask: std::array::from_fn(|i| d.mask.terms[i]),
+        };
+        let block = dev.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: None, contents: bytemuck::bytes_of(&block), usage: wgpu::BufferUsages::UNIFORM });
+        let v4 = |v: V3, w: f32| [v[0], v[1], v[2], w];
+        let input = [v4(cam.origin, 0.0), v4(cam.step_x, 0.0), v4(cam.step_y, 0.0), v4(cam.direction, 0.0), v4(cam.light, cam.t_max), [0.8, cam.hit, cam.gradient_step, 0.0]];
+        let input = dev.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: None, contents: bytemuck::cast_slice(&input), usage: wgpu::BufferUsages::STORAGE });
+        let bytes = (w as u64) * (h as u64) * 16;
+        let out = dev.create_buffer(&wgpu::BufferDescriptor { label: None, size: bytes, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC, mapped_at_creation: false });
+        let read = dev.create_buffer(&wgpu::BufferDescriptor { label: None, size: bytes, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+        fn entry(binding: u32, b: &wgpu::Buffer) -> wgpu::BindGroupEntry<'_> {
+            wgpu::BindGroupEntry { binding, resource: b.as_entire_binding() }
+        }
+        let bind = dev.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None,
+            layout: &self.points_bgl,
+            entries: &[
+                entry(0, &self.uniforms),
+                entry(1, &self.params),
+                entry(3, &self.blue),
+                entry(4, &block),
+                wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(&self.mesh) },
+                entry(7, &input),
+                entry(8, &out),
+                entry(9, &self.info),
+                wgpu::BindGroupEntry { binding: 10, resource: wgpu::BindingResource::TextureView(&self.extra[0]) },
+                wgpu::BindGroupEntry { binding: 11, resource: wgpu::BindingResource::TextureView(&self.extra[1]) },
+                wgpu::BindGroupEntry { binding: 12, resource: wgpu::BindingResource::TextureView(&self.extra[2]) },
+            ],
+        });
+        let mut enc = dev.create_command_encoder(&Default::default());
+        {
+            let mut pass = enc.begin_compute_pass(&Default::default());
+            pass.set_pipeline(&self.march_pipeline);
+            pass.set_bind_group(0, &bind, &[]);
+            pass.dispatch_workgroups(w.div_ceil(8), h.div_ceil(8), 1);
+        }
+        enc.copy_buffer_to_buffer(&out, 0, &read, 0, bytes);
+        self.queue.submit([enc.finish()]);
+        read.map_async(wgpu::MapMode::Read, .., |r| r.expect("map march buffer"));
+        dev.poll(wgpu::PollType::wait_indefinitely()).expect("poll");
+        let view = read.get_mapped_range(..).expect("mapped");
+        bytemuck::cast_slice::<u8, [f32; 4]>(&view).to_vec()
+    }
+
     fn sample_points(&self, d: Displace, points: &[V3], eps: f32, gradient: bool) -> Vec<[f32; 4]> {
         use wgpu::util::DeviceExt;
         const CHUNK: usize = 1 << 20;
@@ -475,6 +586,19 @@ impl MeshEvaluator {
         }
         all
     }
+}
+
+/// An orthographic camera for `MeshEvaluator::march`: the first pixel's ray origin, the world step per pixel along the
+/// picture's x and y, the ray direction, the light direction, how far to trace, and the hit and gradient distances.
+pub struct MarchCamera {
+    pub origin: V3,
+    pub step_x: V3,
+    pub step_y: V3,
+    pub direction: V3,
+    pub light: V3,
+    pub t_max: f32,
+    pub hit: f32,
+    pub gradient_step: f32,
 }
 
 /// One export: what to evaluate and how.

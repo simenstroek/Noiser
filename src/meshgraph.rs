@@ -309,6 +309,22 @@ impl Runner<'_> {
         }
     }
 
+    /// The field that feeds the first Remesh upstream of the first mesh output, ready to be drawn by ray marching.
+    pub fn field_view(&mut self, graph: &Graph) -> Result<FieldView, String> {
+        let lowered = lowered_mesh(graph, &self.base)?;
+        let Some(out) = graph.nodes.iter().find(|(_, n)| matches!(n.kind, NodeKind::OutMesh(_))).map(|(id, _)| *id) else { return Err("the graph has no Mesh output node".into()) };
+        let mut at = graph.input_from(out, 0).ok_or("the Mesh output has nothing connected")?.0;
+        for _ in 0..graph.nodes.len() {
+            if matches!(graph.nodes[&at].kind, NodeKind::Remesh { .. }) {
+                break;
+            }
+            at = graph.input_from(at, 0).ok_or("the chain before the Mesh output has no Remesh node")?.0;
+        }
+        let src = graph.input_from(at, 0).ok_or("the Remesh node has nothing connected")?;
+        let mut fields: Fields = BTreeMap::new();
+        Ok(FieldView(self.field_for(graph, &lowered, src, true, &mut fields)?))
+    }
+
     /// The first Remesh result upstream of the first mesh output, at the triangle limit: a quick look at the shape
     /// while the noise graphs are being tuned.
     pub fn preview(&mut self, graph: &Graph) -> Result<RawMesh, String> {
@@ -522,6 +538,21 @@ impl Runner<'_> {
 
 /// The field sources built so far in a run, by source node and output, and whether they need a mesh.
 type Fields = BTreeMap<(NodeId, usize, bool), std::rc::Rc<FieldSource>>;
+
+/// A field that can be drawn (see `Runner::field_view`).
+pub struct FieldView(std::rc::Rc<FieldSource>);
+
+impl FieldView {
+    /// The field's bounds in the units of the mesh files.
+    pub fn bounds(&self) -> ([f32; 3], [f32; 3]) {
+        (self.0.lo, self.0.hi)
+    }
+
+    pub fn march(&self, cam: &crate::meshexport::MarchCamera, w: u32, h: u32) -> Vec<[f32; 4]> {
+        let d = Displace { amount: 0.0, tile_size: 1.0, prim_size: 1.0, mask: crate::meshmask::PackedMask::NONE };
+        self.0.ev.march(d, cam, w, h)
+    }
+}
 
 struct FieldSource {
     ev: MeshEvaluator,
