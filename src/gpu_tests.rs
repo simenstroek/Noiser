@@ -505,6 +505,10 @@ fn new_math_ops_match_reference() {
     near(math(SmoothMax, 1.0, 1.2, 0.5), 1.2 + 0.6f32.powi(3) * 0.5 / 6.0, "smooth max");
     near(math(SmoothMin, 0.0, 5.0, 0.5), 0.0, "smooth min, far apart");
     near(math(SmoothMin, 1.0, 1.2, 0.0), 1.0, "smooth min with k = 0 is min");
+    near(math(Lerp, 2.0, 6.0, 0.25), 3.0, "lerp");
+    near(math(Lerp, 2.0, 6.0, 1.5), 8.0, "lerp is not limited to 0..1");
+    near(math(InverseLerp, 2.0, 6.0, 3.0), 0.25, "inverse lerp");
+    near(math(InverseLerp, 2.0, 2.0, 3.0), 0.0, "inverse lerp with a = b is 0");
     // The blend width can come from a link too.
     let mut g = Graph::default();
     let w = g.add(NodeKind::Float(0.5), [0.0; 2]);
@@ -778,6 +782,8 @@ mod noiser_interpreter {
             "sqrt" => a.max(0.0).sqrt(),
             "modulo" => if b == 0.0 { 0.0 } else { a - b * (a / b).floor() },
             "greater" => if a > b { 1.0 } else { 0.0 },
+            "lerp" => a + (b - a) * k,
+            "inverse_lerp" => if a == b { 0.0 } else { (k - a) / (b - a) },
             other => panic!("unknown math fn {other}"),
         }
     }
@@ -1358,7 +1364,7 @@ mod mesh_export_tests {
     }
 
     fn job<'a>(ev: &'a MeshEvaluator, d: Displace, reach: f32, res: u32) -> Job<'a> {
-        Job { ev, d, lo: [-1.0; 3], hi: [1.0; 3], reach, norm: Normalization::IDENTITY, settings: Settings { res, format: Format::Obj, cull: 0.0 } }
+        Job { ev, d, lo: [-1.0; 3], hi: [1.0; 3], reach, norm: Normalization::IDENTITY, settings: Settings { res, format: Format::Obj, cull: 0.0, remesh: None, uv: None, bake: None, report: false } }
     }
 
     fn radius(p: [f32; 3]) -> f32 {
@@ -1423,6 +1429,33 @@ mod mesh_export_tests {
         let density = reference.eval_points(&sample);
         let worst = sample.iter().zip(&density).map(|(p, rho)| (sdf.sample(*p) - d.amount * rho).abs()).fold(0.0, f32::max);
         assert!(worst < 0.7 * h, "a vertex is off the surface by {worst} (sample spacing {h})");
+    }
+
+    #[test]
+    fn the_point_evaluator_gives_distance_and_gradient_and_scores_an_export() {
+        let Some(gpu) = gpu() else { return eprintln!("no GPU adapter; skipping") };
+        // No displacement: the field is the sphere's own distance, and its gradient points outwards.
+        let (_sdf, ev, _tex) = evaluator(&gpu, &single_node_graph(NodeKind::Float(0.0)), 0);
+        let flat = Displace { amount: 0.0, tile_size: 1.0, prim_size: 1.0, mask: crate::meshmask::PackedMask::NONE };
+        let pts = [[1.5, 0.0, 0.0], [0.0, 0.0, 0.5], [0.0, -1.3, 0.0], [0.6, 0.6, 0.6]];
+        for (p, s) in pts.iter().zip(ev.points(flat, &pts, 0.02)) {
+            assert!((s[0] - (radius(*p) - 1.0)).abs() < 0.03, "distance at {p:?} is {}", s[0]);
+            let g = radius([s[1], s[2], s[3]]);
+            let along = (s[1] * p[0] + s[2] * p[1] + s[3] * p[2]) / (g * radius(*p));
+            assert!((g - 1.0).abs() < 0.1 && along > 0.98, "gradient at {p:?} is {s:?}");
+        }
+        // With noise: a job's own vertices lie on the surface as far as the point evaluator can tell.
+        let noise = noise_graph(NoiseParams { scale: 3.0, octaves: 3, ..Default::default() });
+        let (_sdf, ev, _tex) = evaluator(&gpu, &noise, 0);
+        let d = Displace { amount: 0.12, tile_size: 1.0, prim_size: 1.0, mask: crate::meshmask::PackedMask::NONE };
+        let j = job(&ev, d, 0.12, 96);
+        let h = j.grid().h;
+        let m = j.extract(&Default::default());
+        let report = crate::meshquality::report(&m).with_surface_error(&m, &mut |pts| ev.points(d, pts, 0.002));
+        eprintln!("{report}");
+        assert!(report.max_error.unwrap() < 0.6 * h, "max error {:?} against sample spacing {h}", report.max_error);
+        assert!(report.mean_error.unwrap() < 0.15 * h, "mean error {:?}", report.mean_error);
+        assert!(report.triangles == m.triangles.len() && report.components >= 1 && report.min_angle > 0.0);
     }
 
     #[test]
@@ -1492,6 +1525,15 @@ mod mesh_export_tests {
         down.negative = true;
         let v_down = probe_mask(&gpu, vec![down]);
         assert!((mean(&v_down) - 0.5).abs() < 0.1 && mean(&v_down.iter().filter(|(p, _)| p[1] > 0.8).map(|(p, m)| (*p, *m)).collect::<Vec<_>>()) < 0.1);
+
+        // Power 2 squares the ramp (mean of y² over 0..1 is 1/3, against 1/2 linear); inverted, the power shapes the flipped ramp.
+        let mut sq = MaskTerm::new(MaskKind::Position);
+        sq.power = 2.0;
+        let (m1, m2) = (mean(&probe_mask(&gpu, vec![MaskTerm::new(MaskKind::Position)])), mean(&probe_mask(&gpu, vec![sq.clone()])));
+        assert!(m2 < m1 - 0.08, "power 2 mean {m2} vs linear {m1}");
+        sq.invert = true;
+        let m3 = mean(&probe_mask(&gpu, vec![sq]));
+        assert!((m3 - m2).abs() < 0.1 && m3 > 0.0, "inverted power 2 mean {m3}");
 
         // Normal direction: facing up counts fully, the equator and below not at all.
         let up = MaskTerm::new(MaskKind::Normal);
@@ -1596,13 +1638,312 @@ fn export_a_real_mesh() {
     let push = crate::view::push_range(graph.density_range(), amount, (1.0, 1.0));
     let reach = push.0.abs().max(push.1.abs()).min(pad - 0.05);
     let (lo, hi) = mesh.bounds();
-    let settings = Settings { res, format: Format::Obj, cull: 0.01 };
+    let settings = Settings { res, format: Format::Obj, cull: 0.01, remesh: None, uv: None, bake: None, report: false };
     let job = Job { ev: &ev, d: Displace { amount, tile_size: 1.0, prim_size: 1.0, mask: crate::meshmask::PackedMask::NONE }, lo, hi, reach, norm, settings };
     eprintln!("export grid {:?}", job.grid().dims);
     let t = std::time::Instant::now();
     let out = root.join("target").join(format!("{}_displaced.obj", mesh_path.file_stem().unwrap().to_string_lossy()));
     let summary = job.run(&out, &Default::default()).unwrap();
     eprintln!("{summary}\nexport took {:?}", t.elapsed());
+}
+
+/// Remeshes a real mesh the way the export does and scores the result, before and after.
+/// `NOISER_TEST_MESH=file.obj NOISER_TEST_TRIS=5000 cargo test --release remesh_a_real_mesh -- --ignored --nocapture`
+#[test]
+#[ignore = "needs NOISER_TEST_MESH"]
+fn remesh_a_real_mesh() {
+    use crate::meshexport::{Displace, Format, Job, MeshEvaluator, Settings};
+    let env = |k: &str| std::env::var(k).ok();
+    let mesh_path = std::path::PathBuf::from(env("NOISER_TEST_MESH").expect("set NOISER_TEST_MESH"));
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let graph = Graph::from_json(&std::fs::read_to_string(env("NOISER_TEST_GRAPH").map_or(root.join("SimpleTestGraph.noisegraph"), Into::into)).unwrap()).unwrap();
+    let tris: usize = env("NOISER_TEST_TRIS").map_or(5000, |v| v.parse().unwrap());
+    let amount: f32 = env("NOISER_TEST_AMOUNT").map_or(0.2, |v| v.parse().unwrap());
+    let gpu = gpu().expect("needs a GPU");
+    let (mesh, norm) = crate::mesh::Mesh::load_obj(&mesh_path).unwrap().normalized();
+    let sdf = crate::meshsdf::MeshSdf::build(&mesh, 128, 0.5, &Default::default());
+    let (_tex, view) = sdf.upload(&gpu.device, &gpu.queue);
+    let ev = MeshEvaluator::new(&gpu.device, &gpu.queue, &graph, 0, view, sdf.origin, sdf.voxel, mesh.bounds(), false).unwrap();
+    let push = crate::view::push_range(graph.density_range(), amount, (1.0, 1.0));
+    let reach = push.0.abs().max(push.1.abs()).min(0.45);
+    let (lo, hi) = mesh.bounds();
+    let d = Displace { amount, tile_size: 1.0, prim_size: 1.0, mask: crate::meshmask::PackedMask::NONE };
+    let job = Job { ev: &ev, d, lo, hi, reach, norm, settings: Settings { res: 160, format: Format::Obj, cull: 0.01, remesh: Some(tris), uv: None, bake: None, report: false } };
+    let mut field = |pts: &[[f32; 3]]| ev.points(d, pts, 0.002);
+    let uniform = job.extract(&Default::default());
+    eprintln!("uniform surface nets:\n{}", crate::meshquality::report(&uniform).with_surface_error(&uniform, &mut field));
+    let t = std::time::Instant::now();
+    let out = job.remeshed(tris, &Default::default());
+    eprintln!("remeshed to {tris} in {:?}:\n{}", t.elapsed(), crate::meshquality::report(&out).with_surface_error(&out, &mut field));
+}
+
+// ---- mesh graph ---------------------------------------------------------------------
+
+/// Two noise graphs used as nodes of a mesh graph, added together, compile into one shader and give what each does
+/// alone: amplitude times its own density at the position times its frequency.
+#[test]
+fn a_mesh_graph_of_two_noise_graphs_matches_the_standalone_graphs() {
+    let Some(gpu) = gpu() else { return eprintln!("no GPU adapter; skipping") };
+    let a = noise_graph(NoiseParams { kind: NoiseKind::Perlin, scale: 3.0, octaves: 2, seed: Some(1), ..Default::default() });
+    let b = noise_graph(NoiseParams { kind: NoiseKind::Simplex, scale: 5.0, octaves: 3, seed: Some(9), ..Default::default() });
+    let mut g = Graph::default();
+    let n1 = g.add(NodeKind::NoiseGraph(crate::meshgraph::NoiseGraphParams { embedded: a.to_json(), frequency: 2.0, amplitude: 0.5, ..Default::default() }), [0.0; 2]);
+    let n2 = g.add(NodeKind::NoiseGraph(crate::meshgraph::NoiseGraphParams { embedded: b.to_json(), frequency: 3.0, amplitude: 0.25, ..Default::default() }), [0.0; 2]);
+    let add = g.add(NodeKind::Math { op: crate::graph::MathOp::Add, a: 0.0, b: 0.0, c: 0.5 }, [0.0; 2]);
+    let out = g.add(NodeKind::OutDensity, [0.0; 2]);
+    g.connect(n1, add, 0);
+    g.connect(n2, add, 1);
+    g.connect(add, out, 0);
+    let lowered = crate::meshgraph::lowered_mesh(&g, std::path::Path::new(".")).unwrap();
+    assert!(lowered.nodes.len() > g.nodes.len(), "the noise graphs were copied in");
+    let pts = points(64, 5);
+    let combined = crate::export::Evaluator::new(&gpu.device, &gpu.queue, &lowered, 0).unwrap().eval_points(&pts);
+    let ea = crate::export::Evaluator::new(&gpu.device, &gpu.queue, &a, 0).unwrap().eval_points(&pts.iter().map(|p| p.map(|v| v * 2.0)).collect::<Vec<_>>());
+    let eb = crate::export::Evaluator::new(&gpu.device, &gpu.queue, &b, 0).unwrap().eval_points(&pts.iter().map(|p| p.map(|v| v * 3.0)).collect::<Vec<_>>());
+    for i in 0..pts.len() {
+        near(combined[i], 0.5 * ea[i] + 0.25 * eb[i], &format!("point {i}"));
+    }
+    // A graph that cannot be read is an error that names the file.
+    let mut bad = Graph::default();
+    bad.add(NodeKind::NoiseGraph(crate::meshgraph::NoiseGraphParams { file: "no/such/file.noisegraph".into(), ..Default::default() }), [0.0; 2]);
+    assert!(crate::meshgraph::lowered_mesh(&bad, std::path::Path::new(".")).unwrap_err().contains("no/such/file"));
+}
+
+/// A mesh graph shaped like the one in the design: a mesh, two noise graphs blended by how much the surface faces up,
+/// added to the mesh, then remeshed, unwrapped, baked and written. Run end to end on a GPU.
+#[test]
+fn a_mesh_graph_runs_from_a_mesh_file_to_files() {
+    use crate::graph::MathOp;
+    let Some(gpu) = gpu() else { return eprintln!("no GPU adapter; skipping") };
+    let dir = std::env::temp_dir().join("noiser-mesh-graph-test");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let sphere = crate::mesh::shapes::icosphere(1.0, 3);
+    crate::surface::RawMesh { normals: sphere.positions.clone(), positions: sphere.positions, triangles: sphere.triangles }.write_obj(&dir.join("ball.obj")).unwrap();
+    let rough = noise_graph(NoiseParams { kind: NoiseKind::Perlin, scale: 6.0, octaves: 3, seed: Some(2), ..Default::default() });
+    let smooth = noise_graph(NoiseParams { kind: NoiseKind::Perlin, scale: 2.0, octaves: 1, seed: Some(5), ..Default::default() });
+    std::fs::write(dir.join("rough.noisegraph"), rough.to_json()).unwrap();
+
+    let mut g = Graph::default();
+    let mesh = g.add(NodeKind::LoadMesh(crate::meshgraph::LoadMeshParams { path: "ball.obj".into(), resolution: 64, ..Default::default() }), [0.0; 2]);
+    let normal = g.add(NodeKind::Normal { flip: false }, [0.0; 2]);
+    let up = g.add(NodeKind::Vec3([0.0, 1.0, 0.0]), [0.0; 2]);
+    let facing = g.add(NodeKind::Math { op: MathOp::Dot, a: 0.0, b: 0.0, c: 0.5 }, [0.0; 2]);
+    // The rough one from a file next to the graph, the smooth one embedded: both ways of naming a noise graph.
+    let a = g.add(NodeKind::NoiseGraph(crate::meshgraph::NoiseGraphParams { file: dir.join("rough.noisegraph").to_string_lossy().into_owned(), frequency: 1.0, amplitude: 0.1, ..Default::default() }), [0.0; 2]);
+    let b = g.add(NodeKind::NoiseGraph(crate::meshgraph::NoiseGraphParams { embedded: smooth.to_json(), frequency: 1.0, amplitude: 0.1, ..Default::default() }), [0.0; 2]);
+    let blend = g.add(NodeKind::Math { op: MathOp::Lerp, a: 0.0, b: 0.0, c: 0.5 }, [0.0; 2]);
+    let sum = g.add(NodeKind::Math { op: MathOp::Add, a: 0.0, b: 0.0, c: 0.5 }, [0.0; 2]);
+    g.connect(mesh, normal, 0);
+    g.connect(normal, facing, 0);
+    g.connect(up, facing, 1);
+    g.connect(a, blend, 0);
+    g.connect(b, blend, 1);
+    g.connect(facing, blend, 2);
+    g.connect(mesh, sum, 0);
+    g.connect(blend, sum, 1);
+    let remesh = g.add(NodeKind::Remesh { triangles: 3000, adaptivity: 1.0 }, [0.0; 2]);
+    let uv = g.add(NodeKind::AutoUv(crate::uvgen::UvParams { resolution: 512, ..Default::default() }), [0.0; 2]);
+    let bake = g.add(NodeKind::Bake(crate::bake::Settings { size: 128, padding: 2, channels: vec![crate::bake::Channel::Normal, crate::bake::Channel::Occlusion], custom: vec!["Mask".into()], green_up: false, ..Default::default() }), [0.0; 2]);
+    let out_mesh = g.add(NodeKind::OutMesh(crate::meshgraph::OutParams { folder: "out".into(), name: "ball".into(), ..Default::default() }), [0.0; 2]);
+    let out_normal = g.add(NodeKind::OutImage(crate::meshgraph::OutParams { folder: "out".into(), name: "ball".into(), ..Default::default() }), [0.0; 2]);
+    g.connect(sum, remesh, 0);
+    g.connect(remesh, uv, 0);
+    g.connect(uv, bake, 0);
+    g.connect(sum, bake, 1);
+    g.connect(uv, out_mesh, 0);
+    g.connect_from(bake, 0, out_normal, 0);
+    // A custom map from a field, and an image pipeline: normal red and green plus the mask in blue.
+    g.connect(facing, bake, 2);
+    let split = g.add(NodeKind::ImageSplit, [0.0; 2]);
+    let combine = g.add(NodeKind::ImageCombine, [0.0; 2]);
+    let packed = g.add(NodeKind::OutImage(crate::meshgraph::OutParams { folder: "out".into(), name: "packed".into(), ..Default::default() }), [0.0; 2]);
+    g.connect_from(bake, 0, split, 0);
+    g.connect_from(split, 0, combine, 0);
+    g.connect_from(split, 1, combine, 1);
+    g.connect_from(bake, 2, combine, 2);
+    g.connect(combine, packed, 0);
+    // The same image as OpenEXR and the mesh as PLY: the other output formats.
+    let packed_exr = g.add(NodeKind::OutImage(crate::meshgraph::OutParams { folder: "out".into(), name: "packedexr".into(), image: crate::bake::ImageFormat::Exr, ..Default::default() }), [0.0; 2]);
+    let ply_out = g.add(NodeKind::OutMesh(crate::meshgraph::OutParams { folder: "out".into(), name: "ballply".into(), ply: true, ..Default::default() }), [0.0; 2]);
+    g.connect(combine, packed_exr, 0);
+    g.connect(uv, ply_out, 0);
+
+    let mut cache = crate::meshgraph::MeshCache::default();
+    let mut log = Vec::new();
+    let mut note = |s: &str| log.push(s.to_string());
+    let mut runner = crate::meshgraph::Runner { device: &gpu.device, queue: &gpu.queue, cache: &mut cache, base: dir.clone(), seed: 0, progress: Default::default(), log: &mut note, batch_file: None, max_triangles: None, numbering: Default::default() };
+    let written = runner.run(&g).unwrap();
+    assert_eq!(written.len(), 5, "{written:?}");
+    let obj = std::fs::read_to_string(dir.join("out").join("ball.obj")).unwrap();
+    let (mut radii, mut tris, mut uvs) = (Vec::new(), 0, 0);
+    for line in obj.lines() {
+        let p: Vec<&str> = line.split_whitespace().collect();
+        match p.first().copied() {
+            Some("v") => radii.push((0..3).map(|i| p[i + 1].parse::<f32>().unwrap().powi(2)).sum::<f32>().sqrt()),
+            Some("vt") => uvs += 1,
+            Some("f") => tris += 1,
+            _ => {}
+        }
+    }
+    assert!((2500..3600).contains(&tris), "{tris} triangles");
+    assert!(uvs >= radii.len() && uvs > 0, "UVs written");
+    // The surface is the unit sphere moved by up to the two amplitudes (the noise is in about -1..1).
+    let (lo, hi) = (radii.iter().cloned().fold(9.0, f32::min), radii.iter().cloned().fold(0.0, f32::max));
+    assert!(lo > 0.8 && hi < 1.2 && hi - lo > 0.03, "radii {lo}..{hi}");
+    assert!(dir.join("out").join("ball_Normal.png").exists());
+    assert!(std::fs::metadata(dir.join("out").join("packedexr_Combined.exr")).unwrap().len() > 1000);
+    let ply = std::fs::read(dir.join("out").join("ballply.ply")).unwrap();
+    assert!(ply.starts_with(b"ply
+format binary_little_endian") && ply.len() > 10_000);
+    let packed = image::open(dir.join("out").join("packed_Combined.png")).unwrap();
+    assert_eq!((packed.width(), packed.height(), packed.color()), (128, 128, image::ColorType::Rgba16));
+}
+
+/// The quick preview makes the first Remesh's shape at the triangle limit and writes nothing.
+#[test]
+fn a_mesh_graph_preview_is_the_remesh_at_a_triangle_limit() {
+    let Some(gpu) = gpu() else { return eprintln!("no GPU adapter; skipping") };
+    let dir = std::env::temp_dir().join("noiser-preview-test");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let sphere = crate::mesh::shapes::icosphere(1.0, 2);
+    crate::surface::RawMesh { normals: sphere.positions.clone(), positions: sphere.positions, triangles: sphere.triangles }.write_obj(&dir.join("ball.obj")).unwrap();
+    let mut g = Graph::default();
+    let mesh = g.add(NodeKind::LoadMesh(crate::meshgraph::LoadMeshParams { path: "ball.obj".into(), resolution: 48, ..Default::default() }), [0.0; 2]);
+    let remesh = g.add(NodeKind::Remesh { triangles: 50_000, adaptivity: 1.0 }, [0.0; 2]);
+    let uv = g.add(NodeKind::AutoUv(Default::default()), [0.0; 2]);
+    let out = g.add(NodeKind::OutMesh(Default::default()), [0.0; 2]);
+    g.connect(mesh, remesh, 0);
+    g.connect(remesh, uv, 0);
+    g.connect(uv, out, 0);
+    let mut cache = crate::meshgraph::MeshCache::default();
+    let mut note = |_: &str| {};
+    let m = crate::meshgraph::Runner { device: &gpu.device, queue: &gpu.queue, cache: &mut cache, base: dir.clone(), seed: 0, progress: Default::default(), log: &mut note, batch_file: None, max_triangles: Some(1500), numbering: Default::default() }.preview(&g).unwrap();
+    assert!((1200..1800).contains(&m.triangles.len()), "{} triangles", m.triangles.len());
+    assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1, "only the input file is there: nothing was written");
+}
+
+/// A mesh with UVs, remeshed after a noise displacement, takes its own UVs back through Transfer UVs.
+#[test]
+fn a_mesh_graph_transfers_the_uvs_of_its_mesh_to_the_remeshed_result() {
+    use crate::graph::MathOp;
+    let Some(gpu) = gpu() else { return eprintln!("no GPU adapter; skipping") };
+    let dir = std::env::temp_dir().join("noiser-transfer-test");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let sphere = crate::mesh::shapes::icosphere(1.0, 3);
+    let raw = crate::surface::RawMesh { normals: sphere.positions.clone(), positions: sphere.positions, triangles: sphere.triangles };
+    crate::uvgen::generate(&raw, &crate::uvgen::UvParams { resolution: 512, ..Default::default() }).unwrap().write_obj(&dir.join("ball_uv.obj")).unwrap();
+    // The file has UVs and the loader reads them.
+    let loaded = crate::meshformats::load(&dir.join("ball_uv.obj")).unwrap();
+    assert_eq!(loaded.uvs.len(), loaded.triangles.len());
+    let noise = noise_graph(NoiseParams { kind: NoiseKind::Perlin, scale: 3.0, octaves: 2, seed: Some(4), ..Default::default() });
+    let mut g = Graph::default();
+    let mesh = g.add(NodeKind::LoadMesh(crate::meshgraph::LoadMeshParams { path: "ball_uv.obj".into(), resolution: 64, ..Default::default() }), [0.0; 2]);
+    let n = g.add(NodeKind::NoiseGraph(crate::meshgraph::NoiseGraphParams { embedded: noise.to_json(), amplitude: 0.05, ..Default::default() }), [0.0; 2]);
+    let sum = g.add(NodeKind::Math { op: MathOp::Add, a: 0.0, b: 0.0, c: 0.5 }, [0.0; 2]);
+    let remesh = g.add(NodeKind::Remesh { triangles: 2000, adaptivity: 1.0 }, [0.0; 2]);
+    let transfer = g.add(NodeKind::TransferUv, [0.0; 2]);
+    let out = g.add(NodeKind::OutMesh(crate::meshgraph::OutParams { folder: "out".into(), name: "moved".into(), ..Default::default() }), [0.0; 2]);
+    g.connect(mesh, sum, 0);
+    g.connect(n, sum, 1);
+    g.connect(sum, remesh, 0);
+    g.connect(remesh, transfer, 0);
+    g.connect_from(mesh, 1, transfer, 1);
+    g.connect(transfer, out, 0);
+    assert_eq!(g.edges.len(), 6, "the typed connections were accepted");
+    // A mesh output cannot be wired into a field input.
+    g.connect_from(mesh, 1, sum, 0);
+    assert_eq!(g.edges.len(), 6, "a mesh does not feed a field");
+    let mut cache = crate::meshgraph::MeshCache::default();
+    let mut log = Vec::new();
+    let mut note = |s: &str| log.push(s.to_string());
+    let written = crate::meshgraph::Runner { device: &gpu.device, queue: &gpu.queue, cache: &mut cache, base: dir.clone(), seed: 0, progress: Default::default(), log: &mut note, batch_file: None, max_triangles: None, numbering: Default::default() }.run(&g).unwrap();
+    assert_eq!(written.len(), 1);
+    let obj = std::fs::read_to_string(&written[0]).unwrap();
+    let (vt, f) = (obj.lines().filter(|l| l.starts_with("vt ")).count(), obj.lines().filter(|l| l.starts_with("f ")).count());
+    assert!(vt > 0 && (1500..2600).contains(&f), "{vt} UVs, {f} triangles");
+    assert!(log.iter().any(|l| l.contains("island")), "{log:?}");
+}
+
+/// A level of detail: the UVs of an unwrapped Remesh carried onto a coarser Remesh of the same field.
+#[test]
+fn a_coarser_remesh_takes_the_uvs_of_an_unwrapped_one_through_transfer_uvs() {
+    let Some(gpu) = gpu() else { return eprintln!("no GPU adapter; skipping") };
+    let dir = std::env::temp_dir().join("noiser-lod-test");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let sphere = crate::mesh::shapes::icosphere(1.0, 3);
+    crate::surface::RawMesh { normals: sphere.positions.clone(), positions: sphere.positions, triangles: sphere.triangles }.write_obj(&dir.join("ball.obj")).unwrap();
+    let mut g = Graph::default();
+    let mesh = g.add(NodeKind::LoadMesh(crate::meshgraph::LoadMeshParams { path: "ball.obj".into(), resolution: 64, ..Default::default() }), [0.0; 2]);
+    let lod0 = g.add(NodeKind::Remesh { triangles: 3000, adaptivity: 1.0 }, [0.0; 2]);
+    let uv = g.add(NodeKind::AutoUv(crate::uvgen::UvParams { resolution: 512, ..Default::default() }), [0.0; 2]);
+    let lod1 = g.add(NodeKind::Remesh { triangles: 800, adaptivity: 1.0 }, [0.0; 2]);
+    let transfer = g.add(NodeKind::TransferUv, [0.0; 2]);
+    let out = g.add(NodeKind::OutMesh(crate::meshgraph::OutParams { folder: "out".into(), name: "lod1".into(), ..Default::default() }), [0.0; 2]);
+    g.connect(mesh, lod0, 0);
+    g.connect(lod0, uv, 0);
+    g.connect(mesh, lod1, 0);
+    g.connect(lod1, transfer, 0);
+    g.connect(uv, transfer, 1);
+    g.connect(transfer, out, 0);
+    assert_eq!(g.edges.len(), 6, "the wires were accepted");
+    let mut cache = crate::meshgraph::MeshCache::default();
+    let mut note = |_: &str| {};
+    let written = crate::meshgraph::Runner { device: &gpu.device, queue: &gpu.queue, cache: &mut cache, base: dir.clone(), seed: 0, progress: Default::default(), log: &mut note, batch_file: None, max_triangles: None, numbering: Default::default() }.run(&g).unwrap();
+    let loaded = crate::meshformats::load(&written[0]).unwrap();
+    assert!((600..1100).contains(&loaded.triangles.len()), "{} triangles", loaded.triangles.len());
+    assert_eq!(loaded.uvs.len(), loaded.triangles.len(), "the coarser mesh has UVs");
+}
+
+/// Writes a demo mesh graph for a real mesh: `NOISER_TEST_MESH=mesh.obj NOISER_TEST_OUT=dir cargo test write_demo_mesh_graph -- --ignored`.
+/// The graph blends two of the repository's noise graphs by how much the surface faces up.
+#[test]
+#[ignore = "writes files; needs NOISER_TEST_MESH and NOISER_TEST_OUT"]
+fn write_demo_mesh_graph() {
+    use crate::graph::MathOp;
+    let env = |k: &str| std::env::var(k).ok();
+    let mesh = env("NOISER_TEST_MESH").expect("set NOISER_TEST_MESH");
+    let out = std::path::PathBuf::from(env("NOISER_TEST_OUT").expect("set NOISER_TEST_OUT"));
+    std::fs::create_dir_all(&out).unwrap();
+    let rough = noise_graph(NoiseParams { kind: NoiseKind::Perlin, scale: 8.0, octaves: 5, roughness: 0.6, seed: Some(2), ..Default::default() });
+    let smooth = noise_graph(NoiseParams { kind: NoiseKind::Perlin, scale: 3.0, octaves: 2, seed: Some(5), ..Default::default() });
+    std::fs::write(out.join("rough.noisegraph"), rough.to_json()).unwrap();
+    std::fs::write(out.join("smooth.noisegraph"), smooth.to_json()).unwrap();
+    let mut g = Graph::default();
+    let m = g.add(NodeKind::LoadMesh(crate::meshgraph::LoadMeshParams { path: mesh, resolution: 128, ..Default::default() }), [0.0, 0.0]);
+    let normal = g.add(NodeKind::Normal { flip: false }, [160.0, 0.0]);
+    let up = g.add(NodeKind::Vec3([0.0, 1.0, 0.0]), [160.0, 80.0]);
+    let facing = g.add(NodeKind::Math { op: MathOp::Dot, a: 0.0, b: 0.0, c: 0.5 }, [320.0, 40.0]);
+    let remap = g.add(NodeKind::Remap { vals: [0.0, -0.3, 0.7, 0.0, 1.0], clamp: true }, [480.0, 40.0]);
+    let a = g.add(NodeKind::NoiseGraph(crate::meshgraph::NoiseGraphParams { file: "rough.noisegraph".into(), frequency: 0.25, amplitude: 0.15, ..Default::default() }), [480.0, 160.0]);
+    let b = g.add(NodeKind::NoiseGraph(crate::meshgraph::NoiseGraphParams { file: "smooth.noisegraph".into(), frequency: 0.25, amplitude: 0.08, ..Default::default() }), [480.0, 260.0]);
+    let blend = g.add(NodeKind::Math { op: MathOp::Lerp, a: 0.0, b: 0.0, c: 0.5 }, [660.0, 160.0]);
+    let sum = g.add(NodeKind::Math { op: MathOp::Add, a: 0.0, b: 0.0, c: 0.5 }, [820.0, 80.0]);
+    let remesh = g.add(NodeKind::Remesh { triangles: 20_000, adaptivity: 1.0 }, [980.0, 80.0]);
+    let uv = g.add(NodeKind::AutoUv(Default::default()), [1140.0, 80.0]);
+    let bake = g.add(NodeKind::Bake(crate::bake::Settings { size: 1024, channels: vec![crate::bake::Channel::Normal, crate::bake::Channel::Occlusion], custom: vec!["Mask".into()], ..Default::default() }), [1300.0, 120.0]);
+    let out_mesh = g.add(NodeKind::OutMesh(crate::meshgraph::OutParams { folder: "out".into(), name: "rock".into(), ..Default::default() }), [1480.0, 40.0]);
+    let out_normal = g.add(NodeKind::OutImage(crate::meshgraph::OutParams { folder: "out".into(), name: "rock".into(), ..Default::default() }), [1480.0, 140.0]);
+    g.connect(m, normal, 0);
+    g.connect(normal, facing, 0);
+    g.connect(up, facing, 1);
+    g.connect(facing, remap, 0);
+    g.connect(a, blend, 0);
+    g.connect(b, blend, 1);
+    g.connect(remap, blend, 2);
+    g.connect(m, sum, 0);
+    g.connect(blend, sum, 1);
+    g.connect(sum, remesh, 0);
+    g.connect(remesh, uv, 0);
+    g.connect(uv, bake, 0);
+    g.connect(sum, bake, 1);
+    g.connect(remap, bake, 2);
+    g.connect(uv, out_mesh, 0);
+    g.connect_from(bake, 0, out_normal, 0);
+    std::fs::write(out.join("rock.meshgraph"), g.to_json()).unwrap();
 }
 
 // ---- batch pipeline ---------------------------------------------------------------
@@ -1659,9 +2000,11 @@ mod batch_tests {
                 graph: &noise,
                 seed,
                 d: Displace { amount: 0.1, tile_size: 1.0, prim_size: 1.0, mask: crate::meshmask::PackedMask::NONE },
-                settings: Settings { res: 48, format: Format::Obj, cull: 0.0 },
+                settings: Settings { res: 48, format: Format::Obj, cull: 0.0, remesh: None, uv: None, bake: None, report: false },
                 grid_res: 48,
                 grid_pad: 0.5,
+                combine: Default::default(),
+                object_scale: None,
             };
             let out = dir.join(out);
             job.run(&dir.join(input), &out, &Default::default()).unwrap();
@@ -1678,8 +2021,18 @@ mod batch_tests {
         assert_eq!(big.positions.len(), a.positions.len(), "scaled copies should displace identically");
         let worst = a.positions.iter().zip(&big.positions).map(|(p, q)| (0..3).map(|k| (p[k] * 3.0 - q[k]).abs()).fold(0.0, f32::max)).fold(0.0, f32::max);
         assert!(worst < 0.02, "scaled mesh differs by {worst}");
+        // In object units the detail keeps its size: the big sphere moves about as far as the small one, not 3x as far.
+        let spread = |m: &crate::mesh::Mesh, radius: f32| m.positions.iter().map(|p| ((p[0] * p[0] + p[1] * p[1] + p[2] * p[2]).sqrt() - radius).abs()).fold(0.0f32, f32::max);
+        let absolute = |input: &str, out: &str| {
+            let job = FileJob { device: &gpu.device, queue: &gpu.queue, graph: &noise, seed: 0, d: Displace { amount: 0.1, tile_size: 1.0, prim_size: 1.0, mask: crate::meshmask::PackedMask::NONE }, settings: Settings { res: 48, format: Format::Obj, cull: 0.0, remesh: None, uv: None, bake: None, report: false }, grid_res: 48, grid_pad: 0.5, combine: Default::default(), object_scale: Some(1.0) };
+            job.run(&dir.join(input), &dir.join(out), &Default::default()).unwrap();
+            crate::mesh::Mesh::load_obj(&dir.join(out)).unwrap()
+        };
+        let (s1, s3) = (spread(&absolute("small.obj", "d.obj"), 1.0), spread(&absolute("big.obj", "e.obj"), 3.0));
+        assert!(s3 < s1 * 1.6, "object units: small spread {s1}, big spread {s3}");
+        assert!(spread(&big, 3.0) > s1 * 2.0, "relative mode scales the displacement with the mesh");
         // A missing file is an error, not a panic.
-        let job = FileJob { device: &gpu.device, queue: &gpu.queue, graph: &noise, seed: 0, d: Displace { amount: 0.1, tile_size: 1.0, prim_size: 1.0, mask: crate::meshmask::PackedMask::NONE }, settings: Settings::default(), grid_res: 32, grid_pad: 0.5 };
+        let job = FileJob { device: &gpu.device, queue: &gpu.queue, graph: &noise, seed: 0, d: Displace { amount: 0.1, tile_size: 1.0, prim_size: 1.0, mask: crate::meshmask::PackedMask::NONE }, settings: Settings::default(), grid_res: 32, grid_pad: 0.5, combine: Default::default(), object_scale: None };
         assert!(job.run(&dir.join("nope.obj"), &dir.join("x.obj"), &Default::default()).is_err());
     }
 }

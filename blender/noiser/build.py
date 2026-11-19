@@ -364,6 +364,17 @@ def math_op(b, op, operand):
         b.feed(n.inputs[1], c)
         b.feed(n.inputs[2], operand(op["k"]))
         return n.outputs[0]
+    if fn in ("lerp", "inverse_lerp"):
+        if vector:
+            raise Unsupported(f"{fn} on vectors")
+        k = operand(op["k"])
+        if fn == "lerp":
+            n = b.node("ShaderNodeMath", operation="MULTIPLY_ADD")
+            b.feed(n.inputs[0], b.math("SUBTRACT", c, a))
+            b.feed(n.inputs[1], k)
+            b.feed(n.inputs[2], a)
+            return n.outputs[0]
+        return b.math("DIVIDE", b.math("SUBTRACT", k, a), b.math("SUBTRACT", c, a))  # Blender's divide gives 0 for 0, like ours
     if fn == "ridge":
         if vector:
             return b.vmath("SUBTRACT", (1.0, 1.0, 1.0), b.vmath("ABSOLUTE", a))

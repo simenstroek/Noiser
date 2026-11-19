@@ -38,6 +38,8 @@ pub const EVAL_BINDINGS: &str = "struct U { seed: u32 }
 pub struct Compiled {
     pub wgsl: String,
     pub params: Vec<f32>,
+    /// The loaded-mesh nodes (mesh graph), in the order of the `mesh_dist_0`, `mesh_dist_1`... functions they call.
+    pub mesh_slots: Vec<NodeId>,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -74,21 +76,32 @@ struct Gen<'a> {
     building: BTreeSet<NodeId>,
     /// Noise kinds used, each getting its own fBm function.
     kinds: BTreeSet<NoiseKind>,
+    mesh_slots: Vec<NodeId>,
+    eps: f32,
     out: String,
 }
 
 pub fn compile(g: &Graph) -> Result<Compiled, String> {
-    compile_inner(g, &BTreeMap::new(), false)
+    compile_inner(g, &BTreeMap::new(), NORMAL_EPS, false)
 }
+
+/// The step the Normal node differentiates over, in position units, unless told otherwise.
+pub const NORMAL_EPS: f32 = 1e-3;
 
 /// Like `compile`, but nodes in `caches` read their baked texture (`cache_sample(slot, p)`)
 /// instead of evaluating their upstream graph. Preview only: when the Density output reads a
 /// vector, the result also defines `graph_color(p)`, the vector as a colour (see view.rs).
 pub fn compile_with(g: &Graph, caches: &BTreeMap<NodeId, u32>) -> Result<Compiled, String> {
-    compile_inner(g, caches, true)
+    compile_inner(g, caches, NORMAL_EPS, true)
 }
 
-fn compile_inner(g: &Graph, caches: &BTreeMap<NodeId, u32>, preview: bool) -> Result<Compiled, String> {
+/// `compile` with the Normal node's differentiation step: the 1e-3 of the noise graph is right for tiles of one
+/// unit, but a mesh graph works in the units of its mesh files, where a step should follow the size of the mesh.
+pub fn compile_eps(g: &Graph, caches: &BTreeMap<NodeId, u32>, eps: f32) -> Result<Compiled, String> {
+    compile_inner(g, caches, eps, false)
+}
+
+fn compile_inner(g: &Graph, caches: &BTreeMap<NodeId, u32>, eps: f32, preview: bool) -> Result<Compiled, String> {
     let lowered = g.lowered();
     let g = &lowered;
     // Parameter slots, in node-id order.
@@ -160,7 +173,8 @@ fn compile_inner(g: &Graph, caches: &BTreeMap<NodeId, u32>, preview: bool) -> Re
         }
     }
 
-    let mut cg = Gen { g, caches, slots, types: BTreeMap::new(), done: BTreeSet::new(), building: BTreeSet::new(), kinds: BTreeSet::new(), out: String::new() };
+    let mesh_slots: Vec<NodeId> = g.nodes.iter().filter(|(_, n)| matches!(n.kind, NodeKind::LoadMesh(_))).map(|(id, _)| *id).collect();
+    let mut cg = Gen { g, caches, slots, types: BTreeMap::new(), done: BTreeSet::new(), building: BTreeSet::new(), kinds: BTreeSet::new(), mesh_slots: mesh_slots.clone(), eps, out: String::new() };
     let density = g.find(|k| *k == NodeKind::OutDensity).and_then(|o| g.input_from(o, 0));
     let normal = g.find(|k| *k == NodeKind::OutNormal).and_then(|o| g.input_from(o, 0));
     // One output of a Separate node is a component of the vector its function returns.
@@ -197,7 +211,7 @@ fn compile_inner(g: &Graph, caches: &BTreeMap<NodeId, u32>, preview: bool) -> Re
         }
         None => "tetra_grad_density(p)".into(),
     };
-    writeln!(cg.out, "fn tetra_grad_density(p: vec3f) -> vec3f {{ {} }}", tetra_body(|q| format!("graph_density({q})"))).unwrap();
+    writeln!(cg.out, "fn tetra_grad_density(p: vec3f) -> vec3f {{ {} }}", tetra_body(eps, |q| format!("graph_density({q})"))).unwrap();
     writeln!(cg.out, "fn graph_normal(p: vec3f) -> vec3f {{ return {normal_expr}; }}").unwrap();
 
     if params.is_empty() {
@@ -213,14 +227,14 @@ fn compile_inner(g: &Graph, caches: &BTreeMap<NodeId, u32>, preview: bool) -> Re
     }
     wgsl += &cg.kinds.iter().map(|&k| fbm_function(k, general_worley)).collect::<String>();
     wgsl += &cg.out;
-    Ok(Compiled { wgsl, params })
+    Ok(Compiled { wgsl, params, mesh_slots })
 }
 
 /// Body of a function returning the normalized tetrahedral gradient (IQ) of the float field `sample(q)`.
 /// A loop, so the field is inlined once rather than four times (driver compile time).
-fn tetra_body(sample: impl Fn(&str) -> String) -> String {
+fn tetra_body(eps: f32, sample: impl Fn(&str) -> String) -> String {
     format!(
-        "let e = 1e-3; var g = vec3f(0.0); for (var k = 0u; k < 4u; k++) {{ let o = tetra(k); g += o * {}; }} return safe_normalize(g);",
+        "let e = {eps:e}; var g = vec3f(0.0); for (var k = 0u; k < 4u; k++) {{ let o = tetra(k); g += o * {}; }} return safe_normalize(g);",
         sample("p + o * e")
     )
 }
@@ -330,6 +344,13 @@ impl Gen<'_> {
             NodeKind::Float(_) => (Ty::F, format!("P[{s}]")),
             NodeKind::Vec3(_) => (Ty::V, format!("vec3f(P[{s}], P[{}], P[{}])", s + 1, s + 2)),
             NodeKind::Position => (Ty::V, "p".into()),
+            // A loaded mesh: the shader prelude of the evaluator defines mesh_dist_N(p) for each slot.
+            NodeKind::LoadMesh(_) => {
+                let slot = self.mesh_slots.iter().position(|&n| n == id).unwrap_or(0);
+                (Ty::F, format!("mesh_dist_{slot}({})", self.operand(id, 0, Ty::V, "p")))
+            }
+            NodeKind::NoiseGraph(_) => return Err("a Noise Graph node must be lowered first (meshgraph::lowered_mesh)".into()),
+            NodeKind::Remesh { .. } | NodeKind::AutoUv(_) | NodeKind::Bake(_) | NodeKind::OutMesh(_) | NodeKind::OutImage(_) | NodeKind::ImageSplit | NodeKind::ImageCombine | NodeKind::ImageLevels { .. } | NodeKind::TransferUv => return Err("this node does not produce a field".into()),
             // Never reached (readers look through them), but the match must be complete.
             NodeKind::NamedReroute { .. } | NodeKind::NamedRerouteUse { .. } => (Ty::F, "0.0".into()),
             NodeKind::Reroute => {
@@ -357,6 +378,8 @@ impl Gen<'_> {
                     MathOp::Power => format!("{}({a}, {b})", if v { "pow_safe3" } else { "pow_safe" }),
                     MathOp::SmoothMin => format!("{}({a}, {b}, {k})", if v { "smin3" } else { "smin" }),
                     MathOp::SmoothMax => format!("{}({a}, {b}, {k})", if v { "smax3" } else { "smax" }),
+                    MathOp::Lerp => format!("{a} + ({b} - {a}) * {}", convert(&k, Ty::F, opty)),
+                    MathOp::InverseLerp => format!("select(({} - {a}) / ({b} - {a}), {zero}, {b} == {a})", convert(&k, Ty::F, opty)),
                     MathOp::Dot => format!("dot({a}, {b})"),
                     MathOp::Absolute => format!("abs({a})"),
                     MathOp::Ridge => format!("{} - abs({a})", convert("1.0", Ty::F, opty)),
@@ -414,7 +437,7 @@ impl Gen<'_> {
                         let gname = format!("g{src}{}", part.map_or(String::new(), |c| format!("_{c}")));
                         if !self.out.contains(&format!("fn {gname}(")) {
                             let ty = if part.is_some() { Ty::F } else { self.types[&src] };
-                            let body = tetra_body(|q| convert(&format!("c{src}({q}){}", part.map_or(String::new(), |c| format!(".{c}"))), ty, Ty::F));
+                            let body = tetra_body(self.eps, |q| convert(&format!("c{src}({q}){}", part.map_or(String::new(), |c| format!(".{c}"))), ty, Ty::F));
                             writeln!(self.out, "fn {gname}(p: vec3f) -> vec3f {{ {body} }}").unwrap();
                         }
                         (Ty::V, format!("{sign}{gname}(p)"))

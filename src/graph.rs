@@ -120,10 +120,14 @@ pub enum MathOp {
     Modulo,
     /// 1 where a > b, else 0.
     Greater,
+    /// a + (b - a) * t, the third input being t (not limited to 0..1).
+    Lerp,
+    /// (v - a) / (b - a), 0 when a = b; the third input is v.
+    InverseLerp,
 }
 
 impl MathOp {
-    pub const ALL: [MathOp; 18] = [
+    pub const ALL: [MathOp; 20] = [
         MathOp::Add,
         MathOp::Subtract,
         MathOp::Multiply,
@@ -142,6 +146,8 @@ impl MathOp {
         MathOp::Sqrt,
         MathOp::Modulo,
         MathOp::Greater,
+        MathOp::Lerp,
+        MathOp::InverseLerp,
     ];
 
     /// Name shown in the operator dropdown.
@@ -165,12 +171,14 @@ impl MathOp {
             MathOp::Sqrt => "Square root",
             MathOp::Modulo => "Modulo",
             MathOp::Greater => "Greater than",
+            MathOp::Lerp => "Lerp (a to b by t)",
+            MathOp::InverseLerp => "Inverse lerp",
         }
     }
 
-    /// Smooth min and max take a third input, the blend width.
-    pub fn is_smooth(self) -> bool {
-        matches!(self, MathOp::SmoothMin | MathOp::SmoothMax)
+    /// The ops with a third input: the blend width of smooth min/max, the factor of Lerp, the value of Inverse lerp.
+    pub fn is_ternary(self) -> bool {
+        matches!(self, MathOp::SmoothMin | MathOp::SmoothMax | MathOp::Lerp | MathOp::InverseLerp)
     }
 
     /// Absolute and Ridge use only the first input.
@@ -615,20 +623,63 @@ pub enum NodeKind {
     Noise(NoiseParams),
     OutDensity,
     OutNormal,
+    /// Mesh graph: a mesh file as a field (its signed distance). Input: position (defaults to world position).
+    LoadMesh(crate::meshgraph::LoadMeshParams),
+    /// Mesh graph: a noise graph as a node. Input: position (defaults to world position).
+    NoiseGraph(crate::meshgraph::NoiseGraphParams),
+    /// Mesh graph: the surface of a field as an adaptive triangle mesh of about `triangles` triangles.
+    Remesh {
+        triangles: u32,
+        /// 0: even triangles everywhere; 1: strongly smaller ones where the surface bends (the default).
+        #[serde(default = "one")]
+        adaptivity: f32,
+    },
+    /// Mesh graph: UVs for a mesh.
+    AutoUv(crate::uvgen::UvParams),
+    /// Mesh graph: maps baked onto a mesh (input 0) from a field (input 1); one image output per map.
+    Bake(crate::bake::Settings),
+    /// Mesh graph: writes a mesh.
+    OutMesh(crate::meshgraph::OutParams),
+    /// Mesh graph: writes an image.
+    OutImage(crate::meshgraph::OutParams),
+    /// Mesh graph: the UVs of a mesh (input 2, a Load Mesh's mesh output) carried onto another (input 1), with the interior of each island relaxed (borders stay put) so the coarser mesh is less stretched.
+    TransferUv,
+    /// Mesh graph: an image split into its red, green, blue and alpha channels (four grey images).
+    ImageSplit,
+    /// Mesh graph: four grey images (red, green, blue, alpha) combined into one. Unconnected channels are 0, alpha 1.
+    ImageCombine,
+    /// Mesh graph: `value * scale + offset`, optionally inverted afterwards, clamped to 0..1.
+    ImageLevels { scale: f32, offset: f32, invert: bool },
 }
 
 impl NodeKind {
+    /// How many output pins the node has (a Bake node has one image per map, Separate XYZ three).
+    pub fn output_count(&self) -> usize {
+        match self {
+            NodeKind::Separate => 3,
+            NodeKind::ImageSplit => 4,
+            NodeKind::LoadMesh(_) => 2,
+            NodeKind::Bake(s) => (s.channels.len() + s.custom.len()).max(1),
+            NodeKind::OutDensity | NodeKind::OutNormal | NodeKind::OutMesh(_) | NodeKind::OutImage(_) => 0,
+            _ => 1,
+        }
+    }
+
     pub fn input_count(&self) -> usize {
         match self {
             NodeKind::Float(_) | NodeKind::Vec3(_) | NodeKind::Position => 0,
             NodeKind::Reroute | NodeKind::NamedReroute { .. } => 1,
             NodeKind::NamedRerouteUse { .. } => 0,
-            NodeKind::Math { op, .. } => if op.is_smooth() { 3 } else if op.is_unary() { 1 } else { 2 },
+            NodeKind::Math { op, .. } => if op.is_ternary() { 3 } else if op.is_unary() { 1 } else { 2 },
             NodeKind::Remap { .. } => 5,
             NodeKind::Mix { .. } | NodeKind::Combine { .. } => 3,
             NodeKind::Separate => 1,
             NodeKind::Curve { .. } => 1,
             NodeKind::Normal { .. } | NodeKind::Noise(_) | NodeKind::Grid { .. } | NodeKind::Pattern(_) | NodeKind::OutDensity | NodeKind::OutNormal => 1,
+            NodeKind::LoadMesh(_) | NodeKind::NoiseGraph(_) | NodeKind::Remesh { .. } | NodeKind::AutoUv(_) | NodeKind::OutMesh(_) | NodeKind::OutImage(_) | NodeKind::ImageSplit | NodeKind::ImageLevels { .. } => 1,
+            NodeKind::Bake(s) => 2 + s.custom.len(),
+            NodeKind::ImageCombine => 4,
+            NodeKind::TransferUv => 2,
         }
     }
 
@@ -789,16 +840,22 @@ impl Graph {
 
     /// Connects `from` into input `port` of `to`, replacing any existing link on that input.
     pub fn connect(&mut self, from: NodeId, to: NodeId, port: usize) {
+        self.connect_typed(from, 0, to, port);
+    }
+
+    fn connect_typed(&mut self, from: NodeId, from_port: usize, to: NodeId, port: usize) {
+        // Meshes and images only go to inputs of their own kind.
+        let special = |id: &NodeId| matches!(self.nodes.get(id).map(|n| &n.kind), Some(NodeKind::LoadMesh(_) | NodeKind::Remesh { .. } | NodeKind::AutoUv(_) | NodeKind::Bake(_) | NodeKind::OutMesh(_) | NodeKind::OutImage(_) | NodeKind::ImageSplit | NodeKind::ImageCombine | NodeKind::ImageLevels { .. } | NodeKind::TransferUv));
+        if (special(&from) || special(&to)) && self.nodes.contains_key(&from) && self.nodes.contains_key(&to) && !self.output_type_at(from, from_port).connects_to(self.input_type(to, port)) {
+            return;
+        }
         self.edges.retain(|e| !(e.to == to && e.port == port));
-        self.edges.push(Edge { from, from_port: 0, to, port });
+        self.edges.push(Edge { from, from_port, to, port });
     }
 
     /// Like `connect`, from output `from_port` of `from`.
     pub fn connect_from(&mut self, from: NodeId, from_port: usize, to: NodeId, port: usize) {
-        self.connect(from, to, port);
-        if let Some(e) = self.edges.last_mut() {
-            e.from_port = from_port;
-        }
+        self.connect_typed(from, from_port, to, port);
     }
 
     /// The node feeding `port` of `to` and which of its outputs, looking through muted nodes and reroutes.
@@ -843,7 +900,8 @@ impl Graph {
     /// Drops links into inputs a node no longer has (a Math node switched away from smooth min/max).
     pub fn prune_edges(&mut self) {
         let nodes = &self.nodes;
-        self.edges.retain(|e| nodes.get(&e.to).is_some_and(|n| e.port < n.kind.input_count()));
+        // A wire also goes when its output pin is gone (a Bake node with a map unticked).
+        self.edges.retain(|e| nodes.get(&e.to).is_some_and(|n| e.port < n.kind.input_count()) && nodes.get(&e.from).is_some_and(|n| e.from_port == 0 || e.from_port < n.kind.output_count()));
     }
 
     pub fn disconnect(&mut self, to: NodeId, port: usize) {
@@ -1092,6 +1150,8 @@ impl Graph {
         use Tiling::*;
         let t = match &self.nodes[&id].kind {
             NodeKind::Float(_) | NodeKind::Vec3(_) => Const,
+            NodeKind::LoadMesh(_) => Broken("a loaded mesh does not tile".into()),
+            NodeKind::NoiseGraph(_) | NodeKind::Remesh { .. } | NodeKind::AutoUv(_) | NodeKind::Bake(_) | NodeKind::OutMesh(_) | NodeKind::OutImage(_) | NodeKind::ImageSplit | NodeKind::ImageCombine | NodeKind::ImageLevels { .. } | NodeKind::TransferUv => Const,
             NodeKind::Position => Coord,
             NodeKind::Reroute | NodeKind::NamedReroute { .. } => input(0, memo, stack).unwrap_or(Const),
             NodeKind::NamedRerouteUse { name } => match self.named_declaration(name).and_then(|d| self.input(d, 0)) {
@@ -1119,7 +1179,7 @@ impl Graph {
             NodeKind::Math { op, a, b, .. } => {
                 let ta = input(0, memo, stack).unwrap_or(Const);
                 let tb = input(1, memo, stack).unwrap_or(Const);
-                let tc = if op.is_smooth() { input(2, memo, stack) } else { None };
+                let tc = if op.is_ternary() { input(2, memo, stack) } else { None };
                 // Operand is a whole-number constant: the unconnected default, or a Float/Vec3 node.
                 let whole_const = |port: usize, default: f32| match self.input(id, port).map(|s| &self.nodes[&s].kind) {
                     None => is_whole(default),
@@ -1240,18 +1300,47 @@ impl Graph {
 pub enum PortType {
     Float,
     Vector,
+    /// Mesh graph: a triangle mesh (not convertible to or from the others).
+    Mesh,
+    /// Mesh graph: a baked image.
+    Image,
+}
+
+impl PortType {
+    /// Whether a wire of this type may end in an input of type `to`: floats and vectors convert, meshes and images
+    /// only connect to their own kind.
+    pub fn connects_to(self, to: PortType) -> bool {
+        let value = |t: PortType| matches!(t, PortType::Float | PortType::Vector);
+        (value(self) && value(to)) || self == to
+    }
 }
 
 impl Graph {
     /// The type of a node's output. A Math node favors vectors: it outputs one when either input is
     /// a vector (the other is repeated), and only a float when it has to (dot product).
+    /// The type of one output pin: a Load Mesh node's second output is its mesh, the rest follow `output_type`.
+    pub fn output_type_at(&self, id: NodeId, port: usize) -> PortType {
+        if port == 1 && matches!(self.nodes.get(&id).map(|n| &n.kind), Some(NodeKind::LoadMesh(_))) {
+            return PortType::Mesh;
+        }
+        self.output_type(id)
+    }
+
     pub fn output_type(&self, id: NodeId) -> PortType {
+        match &self.nodes[&id].kind {
+            NodeKind::Remesh { .. } | NodeKind::AutoUv(_) | NodeKind::TransferUv => return PortType::Mesh,
+            NodeKind::Bake(_) | NodeKind::ImageSplit | NodeKind::ImageCombine | NodeKind::ImageLevels { .. } => return PortType::Image,
+            _ => {}
+        }
         if self.yields_vector(id) { PortType::Vector } else { PortType::Float }
     }
 
     /// The type an input expects; for Math it follows what is connected.
     pub fn input_type(&self, id: NodeId, port: usize) -> PortType {
         match &self.nodes[&id].kind {
+            NodeKind::AutoUv(_) | NodeKind::OutMesh(_) | NodeKind::TransferUv => PortType::Mesh,
+            NodeKind::Bake(_) if port == 0 => PortType::Mesh,
+            NodeKind::OutImage(_) | NodeKind::ImageSplit | NodeKind::ImageCombine | NodeKind::ImageLevels { .. } => PortType::Image,
             NodeKind::Noise(_) | NodeKind::Grid { .. } | NodeKind::Pattern(_) | NodeKind::OutNormal | NodeKind::Separate => PortType::Vector,
             NodeKind::Math { op, .. } if port < 2 => {
                 let vector = *op == MathOp::Dot || (0..2).any(|p| self.input(id, p).is_some_and(|s| self.yields_vector(s)));
@@ -1309,7 +1398,7 @@ impl Graph {
         let r = match &self.nodes[&id].kind {
             NodeKind::Float(v) => (*v, *v),
             NodeKind::Vec3(v) => (v.iter().cloned().fold(f32::MAX, f32::min), v.iter().cloned().fold(f32::MIN, f32::max)),
-            NodeKind::Position => UNBOUNDED,
+            NodeKind::Position | NodeKind::LoadMesh(_) | NodeKind::NoiseGraph(_) | NodeKind::Remesh { .. } | NodeKind::AutoUv(_) | NodeKind::Bake(_) | NodeKind::OutMesh(_) | NodeKind::OutImage(_) | NodeKind::ImageSplit | NodeKind::ImageCombine | NodeKind::ImageLevels { .. } | NodeKind::TransferUv => UNBOUNDED,
             NodeKind::Separate => match self.input(id, 0) {
                 Some(src) => self.range_of(src, stack),
                 None => (0.0, 0.0),
@@ -1394,7 +1483,7 @@ fn scaled((lo, hi): Range, k: f32) -> Range {
     ((lo * k).min(hi * k), (lo * k).max(hi * k))
 }
 
-fn math_range(op: MathOp, (a0, a1): Range, (b0, b1): Range, (_, k1): Range) -> Range {
+fn math_range(op: MathOp, (a0, a1): Range, (b0, b1): Range, (k0, k1): Range) -> Range {
     let span = |v: [f32; 4]| {
         // NaN (0 × ∞) only comes from unbounded inputs, so treat it as unbounded.
         if v.iter().any(|x| x.is_nan()) {
@@ -1426,6 +1515,8 @@ fn math_range(op: MathOp, (a0, a1): Range, (b0, b1): Range, (_, k1): Range) -> R
         MathOp::Sqrt => (a0.max(0.0).sqrt(), a1.max(0.0).sqrt()),
         MathOp::Modulo if b0 > 0.0 => (0.0, b1),
         MathOp::Modulo => UNBOUNDED,
+        MathOp::Lerp if k0 >= 0.0 && k1 <= 1.0 => (a0.min(b0), a1.max(b1)),
+        MathOp::Lerp | MathOp::InverseLerp => UNBOUNDED,
         MathOp::Absolute | MathOp::Ridge => {
             let abs = (if a0 <= 0.0 && a1 >= 0.0 { 0.0 } else { a0.abs().min(a1.abs()) }, a0.abs().max(a1.abs()));
             if op == MathOp::Absolute { abs } else { (1.0 - abs.1, 1.0 - abs.0) }
@@ -1888,5 +1979,45 @@ mod frame_tests {
         }
         assert_eq!(g.input(add, 0), None);
         assert!(!Graph::from_json(&g.to_json()).unwrap().nodes.is_empty());
+    }
+
+    #[test]
+    fn meshes_and_images_only_connect_to_their_own_kind() {
+        let mut g = Graph::default();
+        let mesh = g.add(NodeKind::LoadMesh(Default::default()), [0.0; 2]);
+        let remesh = g.add(NodeKind::Remesh { triangles: 1000, adaptivity: 1.0 }, [0.0; 2]);
+        let uv = g.add(NodeKind::AutoUv(Default::default()), [0.0; 2]);
+        let bake = g.add(NodeKind::Bake(Default::default()), [0.0; 2]);
+        let out_mesh = g.add(NodeKind::OutMesh(Default::default()), [0.0; 2]);
+        let out_image = g.add(NodeKind::OutImage(Default::default()), [0.0; 2]);
+        let add = g.add(NodeKind::Math { op: MathOp::Add, a: 0.0, b: 0.0, c: 0.5 }, [0.0; 2]);
+        g.connect(mesh, remesh, 0); // a field into Remesh: fine
+        g.connect(remesh, uv, 0);
+        g.connect(uv, bake, 0);
+        g.connect(mesh, bake, 1);
+        g.connect(uv, out_mesh, 0);
+        g.connect_from(bake, 0, out_image, 0);
+        assert_eq!(g.edges.len(), 6);
+        // A mesh cannot feed a field input, a field cannot feed a mesh input, an image cannot feed a mesh output.
+        g.connect(remesh, add, 0);
+        g.connect(add, uv, 0);
+        g.connect(bake, out_mesh, 0);
+        assert_eq!(g.edges.len(), 6, "{:?}", g.edges);
+        assert_eq!((g.output_type(remesh), g.output_type(bake), g.input_type(bake, 1)), (PortType::Mesh, PortType::Image, PortType::Float));
+    }
+
+    #[test]
+    fn unticking_a_bake_map_drops_its_wire() {
+        let mut g = Graph::default();
+        let bake = g.add(NodeKind::Bake(crate::bake::Settings { channels: vec![crate::bake::Channel::Normal, crate::bake::Channel::Occlusion], ..Default::default() }), [0.0; 2]);
+        let out = g.add(NodeKind::OutImage(Default::default()), [0.0; 2]);
+        g.connect_from(bake, 1, out, 0);
+        g.prune_edges();
+        assert_eq!(g.edges.len(), 1);
+        if let NodeKind::Bake(b) = &mut g.nodes.get_mut(&bake).unwrap().kind {
+            b.channels.retain(|c| *c == crate::bake::Channel::Normal);
+        }
+        g.prune_edges();
+        assert!(g.edges.is_empty());
     }
 }

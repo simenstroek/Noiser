@@ -4,7 +4,7 @@
 
 use crate::mesh::{Mesh, Normalization};
 use crate::meshexport::{self, Displace, FileJob, Format, Job, MeshEvaluator, SeedMode};
-use crate::meshsdf::MeshSdf;
+use crate::meshsdf::{Combine, CombineMode, MeshSdf};
 use crate::{App, view};
 use eframe::{egui, wgpu};
 use std::path::PathBuf;
@@ -43,6 +43,9 @@ pub struct MeshState {
     /// The settings the grid was baked with.
     pub res: u32,
     pub pad: f32,
+    pub combine: Combine,
+    /// How many separate pieces the mesh has (the combine setting only matters above one).
+    pub parts: usize,
 }
 
 /// A distance grid being baked on a worker thread.
@@ -58,6 +61,8 @@ struct Baked {
     sdf: MeshSdf,
     res: u32,
     pad: f32,
+    combine: Combine,
+    parts: usize,
     /// A newly loaded file (show it) rather than a rebake of the current one.
     new_file: bool,
 }
@@ -65,7 +70,7 @@ struct Baked {
 impl App {
     /// Loads an OBJ and bakes its distance grid, without blocking the UI.
     pub fn start_mesh_load(&mut self, path: PathBuf) {
-        let (res, pad) = (self.mesh_res, self.mesh_pad);
+        let (res, pad, combine) = (self.mesh_res, self.mesh_pad, self.mesh_combine);
         let name = path.file_stem().map_or("mesh".into(), |n| n.to_string_lossy().into_owned());
         let (tx, rx) = mpsc::channel();
         let label = format!("Loading {name}…");
@@ -74,8 +79,9 @@ impl App {
                 let (normalized, norm) = mesh.normalized();
                 // Open sheets (terrains) need a finer grid to look right; a default setting is raised for them.
                 let res = if res == DEFAULT_RES && crate::meshsdf::MeshQuery::new(&normalized).is_open() { open_mesh_res(&normalized, pad) } else { res };
-                let sdf = MeshSdf::build(&normalized, res, pad, &AtomicU32::new(0));
-                Baked { name, normalized: Arc::new(normalized), norm, sdf, res, pad, new_file: true }
+                let parts = crate::meshsdf::split_parts(&normalized).len();
+                let sdf = MeshSdf::build_with(&normalized, res, pad, &AtomicU32::new(0), combine);
+                Baked { name, normalized: Arc::new(normalized), norm, sdf, res, pad, combine, parts, new_file: true }
             });
             let _ = tx.send(baked);
         });
@@ -85,13 +91,13 @@ impl App {
     /// Bakes the current mesh again at the resolution and padding now set in the panel.
     pub fn start_mesh_rebake(&mut self) {
         let Some(m) = &self.mesh else { return };
-        let (res, pad) = (self.mesh_res, self.mesh_pad);
+        let (res, pad, combine, parts) = (self.mesh_res, self.mesh_pad, self.mesh_combine, m.parts);
         let (name, normalized, norm) = (m.name.clone(), m.normalized.clone(), m.norm);
         let (tx, rx) = mpsc::channel();
         let label = format!("Rebuilding the distance grid of {name}…");
         std::thread::spawn(move || {
-            let sdf = MeshSdf::build(&normalized, res, pad, &AtomicU32::new(0));
-            let _ = tx.send(Ok(Baked { name, normalized, norm, sdf, res, pad, new_file: false }));
+            let sdf = MeshSdf::build_with(&normalized, res, pad, &AtomicU32::new(0), combine);
+            let _ = tx.send(Ok(Baked { name, normalized, norm, sdf, res, pad, combine, parts, new_file: false }));
         });
         self.mesh_job = Some(MeshJob { label, done: rx });
     }
@@ -116,7 +122,7 @@ impl App {
         let (texture, view) = b.sdf.upload(&self.rs.device, &self.rs.queue);
         self.status = format!("{}: {} triangles, distance grid {nx}×{ny}×{nz}", b.name, b.normalized.triangles.len());
         let bounds = b.normalized.bounds();
-        self.mesh = Some(MeshState { name: b.name, normalized: b.normalized, norm: b.norm, bounds, sdf: Arc::new(b.sdf), view, _texture: texture, res: b.res, pad: b.pad });
+        self.mesh = Some(MeshState { name: b.name, normalized: b.normalized, norm: b.norm, bounds, sdf: Arc::new(b.sdf), view, _texture: texture, res: b.res, pad: b.pad, combine: b.combine, parts: b.parts });
         self.mesh_gen += 1;
         if b.new_file {
             self.pv.prim = MESH_PRIM;
@@ -130,7 +136,7 @@ impl App {
         ui.heading("Mesh");
         ui.horizontal(|ui| {
             if ui.button("Import mesh (OBJ)…").clicked() {
-                if let Some(p) = rfd::FileDialog::new().add_filter("Mesh (OBJ, PLY, STL)", &["obj", "ply", "stl"]).pick_file() {
+                if let Some(p) = rfd::FileDialog::new().add_filter("Mesh (OBJ, PLY, STL, glTF, FBX)", &["obj", "ply", "stl", "gltf", "glb", "fbx"]).pick_file() {
                     self.start_mesh_load(p);
                 }
             }
@@ -148,9 +154,9 @@ impl App {
             ui.weak("Import a low-resolution mesh to shape it with the graph. It shows up as the Mesh shape in the 3D view.");
             return;
         };
-        let reach = view::push_range(self.graph.density_range(), self.pv.amount, self.mesh_mask.range());
+        let reach = view::push_range(self.graph.density_range(), self.pv.amount * self.detail_scale(), self.mesh_mask.range());
         let reach = reach.0.abs().max(reach.1.abs());
-        let (name, tris, dims, grid_res, grid_pad) = (m.name.clone(), m.normalized.triangles.len(), m.sdf.dims, m.res, m.pad);
+        let (name, tris, dims, grid_res, grid_pad, baked_combine, parts) = (m.name.clone(), m.normalized.triangles.len(), m.sdf.dims, m.res, m.pad, m.combine, m.parts);
         ui.label(format!("{name}: {tris} triangles"));
         ui.weak(format!("distance grid {}×{}×{}", dims[0], dims[1], dims[2]));
         if self.mesh.as_ref().is_some_and(|m| m.sdf.open) {
@@ -159,13 +165,33 @@ impl App {
         let max_res = if self.mesh.as_ref().is_some_and(|m| m.sdf.open) { 768 } else { 384 };
         crate::row(ui, &mut self.mesh_res, DEFAULT_RES, |ui, v| _ = ui.add(egui::Slider::new(v, 32..=max_res).text("grid resolution")));
         crate::row(ui, &mut self.mesh_pad, DEFAULT_PAD, |ui, v| _ = ui.add(egui::Slider::new(v, 0.1..=2.0).text("grid padding")));
-        if (self.mesh_res, self.mesh_pad) != (grid_res, grid_pad) && self.mesh_job.is_none() && ui.button("Rebuild distance grid").clicked() {
+        if parts > 1 {
+            ui.weak(format!("{parts} separate parts. How they combine decides what counts as inside:"));
+            crate::row(ui, &mut self.mesh_combine.mode, CombineMode::Union, |ui, v| {
+                egui::ComboBox::from_id_salt("combine mode").selected_text(v.label()).show_ui(ui, |ui| {
+                    for m in CombineMode::ALL {
+                        ui.selectable_value(v, m, m.label());
+                    }
+                });
+            });
+            if self.mesh_combine.mode.is_smooth() {
+                crate::row(ui, &mut self.mesh_combine.smooth, Combine::default().smooth, |ui, v| _ = ui.add(egui::Slider::new(v, 0.0..=0.5).text("blend width")));
+            }
+            ui.weak("Union fills every part; Intersect keeps only where all parts overlap (interior spaces); the smooth ones round the seams.");
+        }
+        let combine_changed = parts > 1 && (self.mesh_combine.mode != baked_combine.mode || (self.mesh_combine.mode.is_smooth() && self.mesh_combine.smooth != baked_combine.smooth));
+        if ((self.mesh_res, self.mesh_pad) != (grid_res, grid_pad) || combine_changed) && self.mesh_job.is_none() && ui.button("Rebuild distance grid").clicked() {
             self.start_mesh_rebake();
         }
         // The displaced surface can only move as far as the grid extends past the mesh.
         if reach > grid_pad - 0.05 {
             ui.colored_label(crate::editor::ORANGE, format!("Displacement reaches {reach:.2} but the grid only extends {grid_pad:.2} past the mesh: the shape will be clipped. Raise the padding."));
         }
+        crate::row(ui, &mut self.mesh_object_units, false, |ui, v| {
+            ui.checkbox(v, "noise in object units (1 tile = 1 unit)").on_hover_text(
+                "Off: the mesh is scaled to a unit sphere first, so the noise is the same size relative to every mesh.\nOn: tile size and displacement are in the mesh file's own units (one tile is 1 unit, 1 m for a mesh modelled in metres), so a big mesh gets finer grain relative to its size and every mesh gets the same detail size. Applies to the preview, exports and batches.",
+            );
+        });
         self.mask_ui(ui);
         if ui.button("Export displaced mesh…").clicked() {
             self.mesh_export_open = true;
@@ -183,7 +209,22 @@ pub struct MeshExportJob {
 impl App {
     /// How far the current displacement can move the surface, limited to what the distance grid covers.
     fn displacement_reach(&self, grid_pad: f32) -> f32 {
-        meshexport::reach(&self.graph, self.pv.amount, self.mesh_mask.range(), grid_pad)
+        meshexport::reach(&self.graph, self.pv.amount * self.detail_scale(), self.mesh_mask.range(), grid_pad)
+    }
+
+    /// With "noise in object units" on, the factor from the preview's tile size and displacement (in the mesh file's
+    /// units) to the normalized space the mesh is baked in: one tile is then one unit of the file, whatever the mesh's size.
+    pub fn detail_scale(&self) -> f32 {
+        match &self.mesh {
+            Some(m) if self.mesh_object_units => 1.0 / m.norm.scale,
+            _ => 1.0,
+        }
+    }
+
+    /// How the preview displaces the loaded mesh, which the export repeats.
+    fn mesh_displace(&self) -> Displace {
+        let k = self.detail_scale();
+        Displace { amount: self.pv.amount * k, tile_size: self.pv.tile_size * k, prim_size: self.pv.prim_size, mask: self.mesh_mask.pack() }
     }
 
     /// The Export displaced mesh window.
@@ -207,7 +248,7 @@ impl App {
             return;
         };
         let (lo, hi) = m.normalized.bounds();
-        let displace = Displace { amount: self.pv.amount, tile_size: self.pv.tile_size, prim_size: self.pv.prim_size, mask: self.mesh_mask.pack() };
+        let displace = self.mesh_displace();
         let reach = self.displacement_reach(m.pad);
         let name = m.name.clone();
         let mut open = true;
@@ -218,18 +259,78 @@ impl App {
             crate::row(ui, &mut s.res, d.res, |ui, v| {
                 ui.add(egui::DragValue::new(v).range(32..=1024).speed(4.0).suffix(" samples")).on_hover_text("Samples along the longest side of the exported region. The mesh gets as much detail as this allows.");
             });
+            if s.uv.is_some() {
+                s.format = Format::Obj;
+            }
             crate::row(ui, &mut s.format, d.format, |ui, v| {
                 ui.selectable_value(v, Format::Obj, "OBJ");
-                ui.selectable_value(v, Format::Ply, "PLY (binary)").on_hover_text("Much smaller and faster to write than OBJ for big meshes.");
+                ui.add_enabled_ui(s.uv.is_none(), |ui| ui.selectable_value(v, Format::Ply, "PLY (binary)").on_hover_text("Much smaller and faster to write than OBJ for big meshes. Not available with UVs."));
             });
             crate::row(ui, &mut s.cull, d.cull, |ui, v| {
                 ui.add(egui::Slider::new(v, 0.0..=0.25).fixed_decimals(3).text("remove small parts"))
                     .on_hover_text("Drops separate pieces whose surface area is below this fraction of the largest piece's.\nSeveral big pieces are all kept; 0 keeps everything.");
             });
+            crate::row(ui, &mut s.remesh, d.remesh, |ui, v| {
+                let mut on = v.is_some();
+                if ui.checkbox(&mut on, "remesh to").on_hover_text("Adaptive remeshing: small, even triangles where the surface bends, large ones where it is flat, onto the exact displaced surface. Instead of the uniform grid mesh, which has a triangle for every sample.").changed() {
+                    *v = on.then_some(20_000);
+                }
+                if let Some(n) = v {
+                    ui.add(egui::DragValue::new(n).range(200..=2_000_000).speed(100.0).suffix(" triangles"));
+                }
+            });
+            crate::row(ui, &mut s.uv, d.uv, |ui, v| {
+                let mut on = v.is_some() || s.bake.is_some();
+                if ui.checkbox(&mut on, "UVs").on_hover_text("Unwrap the mesh into an atlas of islands packed in the 0 to 1 square, with no overlaps. Written with OBJ meshes. Baking maps needs UVs.").changed() {
+                    *v = on.then(Default::default);
+                    if !on {
+                        s.bake = None;
+                    }
+                }
+            });
+            if let Some(uv) = &mut s.uv {
+                ui.indent("uv settings", |ui| {
+                    ui.add(egui::DragValue::new(&mut uv.resolution).range(256..=8192).speed(32.0).suffix(" px atlas")).on_hover_text("The texture size the atlas is packed for; it sets how much padding between islands is worth in texels.");
+                    ui.add(egui::DragValue::new(&mut uv.smoothing).range(0..=60).speed(0.5).prefix("chart smoothing ")).on_hover_text("Rounds of smoothing applied to the surface the islands are cut from. A bumpy surface otherwise breaks into hundreds of tiny islands; the UVs still map the true surface.");
+                    ui.checkbox(&mut uv.absorb_tiny, "fold tiny islands into neighbours");
+                    ui.checkbox(&mut uv.brute_force, "best packing (slower)").on_hover_text("Fills the square better, but takes several times longer on meshes with many islands.");
+                });
+            }
+            crate::row(ui, &mut s.bake, d.bake, |ui, v| {
+                let mut on = v.is_some();
+                if ui.checkbox(&mut on, "bake maps").on_hover_text("Sample normal, occlusion and other maps straight from the displaced surface onto the new mesh's UVs: no high-poly mesh is needed. PNG files are written next to the mesh.").changed() {
+                    *v = on.then(Default::default);
+                }
+            });
+            if s.bake.is_some() && s.uv.is_none() {
+                s.uv = Some(Default::default());
+            }
+            if let Some(b) = &mut s.bake {
+                ui.indent("bake settings", |ui| {
+                    egui::ComboBox::from_id_salt("bake size").selected_text(format!("{0} × {0}", b.size)).show_ui(ui, |ui| {
+                        for n in [512u32, 1024, 2048, 4096] {
+                            ui.selectable_value(&mut b.size, n, format!("{n} × {n}"));
+                        }
+                    });
+                    ui.add(egui::DragValue::new(&mut b.padding).range(0..=64).prefix("padding ").suffix(" px"));
+                    ui.add(egui::DragValue::new(&mut b.samples).range(1..=4).prefix("samples ").suffix(" per side")).on_hover_text("Anti-aliasing: the map is baked at this many times the size and averaged down (not above 4096 px in all).");
+                    for c in crate::bake::Channel::ALL {
+                        let mut on = b.channels.contains(&c);
+                        if ui.checkbox(&mut on, c.name()).changed() {
+                            if on { b.channels.push(c) } else { b.channels.retain(|x| *x != c) }
+                        }
+                    }
+                    ui.checkbox(&mut b.green_up, "normal map green up (Blender, Unity, glTF)").on_hover_text("Off: green down, as Unreal expects.");
+                });
+            }
             let grid = meshexport::Grid::plan(lo, hi, displace, reach, s.res);
             let [nx, ny, nz] = grid.dims;
-            ui.weak(format!("{nx}×{ny}×{nz} samples ({:.0} million)", grid.samples() as f64 / 1e6));
-            if grid.samples() > 400_000_000 {
+            if s.remesh.is_some() {
+                ui.weak("The remesh starts from a coarse grid it chooses itself; the samples above do not apply.");
+            } else {
+                ui.weak(format!("{nx}×{ny}×{nz} samples ({:.0} million)", grid.samples() as f64 / 1e6));
+            }
+            if s.remesh.is_none() && grid.samples() > 400_000_000 {
                 ui.colored_label(crate::editor::ORANGE, "⚠ This is a lot of samples: it will take a while and the result will be a huge mesh.");
             }
             ui.weak(format!("Displacement {:.2} × the graph, tile size {:.2}, shape size {:.2}, seed {}: the same as the 3D view.", displace.amount, displace.tile_size, displace.prim_size, self.pv.seed));
@@ -259,7 +360,7 @@ impl App {
             return;
         };
         let (lo, hi) = m.normalized.bounds();
-        let displace = Displace { amount: self.pv.amount, tile_size: self.pv.tile_size, prim_size: self.pv.prim_size, mask: self.mesh_mask.pack() };
+        let displace = self.mesh_displace();
         let reach = self.displacement_reach(m.pad);
         let (graph, seed, norm) = (self.graph.clone(), self.pv.seed, m.norm);
         let (device, queue) = (self.rs.device.clone(), self.rs.queue.clone());
@@ -322,7 +423,7 @@ impl App {
             ui.label("Shapes every mesh with the same graph and writes a high-resolution mesh for each.");
             ui.horizontal(|ui| {
                 if ui.button("Add meshes (OBJ)…").clicked() {
-                    if let Some(files) = rfd::FileDialog::new().add_filter("Mesh (OBJ, PLY, STL)", &["obj", "ply", "stl"]).pick_files() {
+                    if let Some(files) = rfd::FileDialog::new().add_filter("Mesh (OBJ, PLY, STL, glTF, FBX)", &["obj", "ply", "stl", "gltf", "glb", "fbx"]).pick_files() {
                         for f in files {
                             if !self.batch_files.contains(&f) {
                                 self.batch_files.push(f);
@@ -375,6 +476,7 @@ impl App {
                 SeedMode::Increment => format!("The first mesh uses the global seed ({base}), the next {}, and so on.", base + 1),
                 SeedMode::Random => format!("Each mesh gets a different seed, repeatable from the global seed ({base}). Seeds are in the file names."),
             });
+            ui.weak(if self.mesh_object_units { "Tile size and displacement are in each mesh's own units (see the Mesh section)." } else { "Tile size and displacement scale with each mesh (see the Mesh section)." });
             ui.weak("Displacement, tile size, shape size and the graph come from the current 3D view; samples, format and small-part removal from Export displaced mesh; the distance grid from the Mesh section. Existing files are never overwritten.");
             ui.separator();
             match &self.batch_job {
@@ -404,7 +506,8 @@ impl App {
         let (graph, base, mode, var) = (self.graph.clone(), self.pv.seed, self.batch_seeds, self.batch_amount_var);
         let d = Displace { amount: self.pv.amount, tile_size: self.pv.tile_size, prim_size: self.pv.prim_size, mask: self.mesh_mask.pack() };
         let settings = self.mesh_export.clone();
-        let (grid_res, grid_pad) = (self.mesh_res, self.mesh_pad);
+        let (grid_res, grid_pad, combine) = (self.mesh_res, self.mesh_pad, self.mesh_combine);
+        let object_scale = self.mesh_object_units.then_some(1.0);
         let (device, queue) = (self.rs.device.clone(), self.rs.queue.clone());
         let index = Arc::new(AtomicU32::new(0));
         let file_progress = meshexport::Progress::default();
@@ -425,7 +528,7 @@ impl App {
                 let label = if mode == SeedMode::Same { stem.clone() } else { format!("{stem}_seed{seed}") };
                 let output = unique_path(&dir, &format!("{label}_displaced"), settings.format.extension());
                 let d = Displace { amount: d.amount * meshexport::amount_factor(base, i, var), ..d };
-                let job = FileJob { device: &device, queue: &queue, graph: &graph, seed, d, settings: settings.clone(), grid_res, grid_pad };
+                let job = FileJob { device: &device, queue: &queue, graph: &graph, seed, d, settings: settings.clone(), grid_res, grid_pad, combine, object_scale };
                 // One bad file (or a GPU error inside it) must not stop the rest.
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| job.run(input, &output, &fp)));
                 match result {
@@ -448,84 +551,96 @@ impl App {
 impl App {
     /// The Displacement mask section: terms that vary how strongly the noise displaces the mesh.
     fn mask_ui(&mut self, ui: &mut egui::Ui) {
-        use crate::meshmask::{MAX_TERMS, MaskKind, MaskTerm};
         let has_colors = self.mesh.as_ref().is_some_and(|m| m.sdf.colors.is_some());
-        egui::CollapsingHeader::new("Displacement mask").default_open(!self.mesh_mask.terms.is_empty()).show(ui, |ui| {
-            ui.weak("Varies how strongly the noise displaces each part of the mesh. With no terms every part moves equally. Strength is the sum of weight × term; every term is measured on the mesh itself. Applies to the Mesh shape.");
-            ui.add_enabled(!self.mesh_mask.terms.is_empty(), egui::Checkbox::new(&mut self.pv.show_mask, "Show mask on the mesh"))
-                .on_hover_text("Colours the surface by mask strength: blue 0, green 0.5, red 1; magenta above 1, black below 0. The preview only.");
-            let mut remove = None;
-            for (i, t) in self.mesh_mask.terms.iter_mut().enumerate() {
-                ui.group(|ui| {
-                    ui.horizontal(|ui| {
-                        let before = t.kind;
-                        egui::ComboBox::from_id_salt(("mask kind", i)).selected_text(t.kind.name()).show_ui(ui, |ui| {
-                            for k in MaskKind::ALL {
-                                ui.selectable_value(&mut t.kind, k, k.name());
-                            }
-                        });
-                        if t.kind != before {
-                            // A new kind starts from its own defaults (range, axis or channel, direction).
-                            let fresh = MaskTerm::new(t.kind);
-                            (t.lo, t.hi, t.axis, t.negative) = (fresh.lo, fresh.hi, fresh.axis, fresh.negative);
+        mask_terms_ui(ui, &mut self.mesh_mask, &mut self.pv.show_mask, has_colors);
+    }
+}
+
+fn mask_terms_ui(ui: &mut egui::Ui, mask: &mut crate::meshmask::MaskSettings, show_mask: &mut bool, has_colors: bool) {
+    use crate::meshmask::{MAX_TERMS, MaskKind, MaskTerm};
+    egui::CollapsingHeader::new("Displacement mask").default_open(!mask.terms.is_empty()).show(ui, |ui| {
+        ui.weak("Varies how strongly the noise displaces each part of the mesh. With no terms every part moves equally. Strength is the sum of weight × term; every term is measured on the mesh itself. Applies to the Mesh shape.");
+        ui.add_enabled(!mask.terms.is_empty(), egui::Checkbox::new(show_mask, "Show mask on the mesh"))
+            .on_hover_text("Colours the surface by mask strength: blue 0, green 0.5, red 1; magenta above 1, black below 0. The preview only.");
+        let mut remove = None;
+        for (i, t) in mask.terms.iter_mut().enumerate() {
+            ui.group(|ui| {
+                ui.horizontal(|ui| {
+                    let before = t.kind;
+                    egui::ComboBox::from_id_salt(("mask kind", i)).selected_text(t.kind.name()).show_ui(ui, |ui| {
+                        for k in MaskKind::ALL {
+                            ui.selectable_value(&mut t.kind, k, k.name());
                         }
-                        if ui.small_button("×").on_hover_text("Remove this term").clicked() {
-                            remove = Some(i);
+                    }).response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::ComboBox, true, "Mask term kind"));
+                    if t.kind != before {
+                        // A new kind starts from its own defaults (range, axis or channel, direction).
+                        let fresh = MaskTerm::new(t.kind);
+                        (t.lo, t.hi, t.axis, t.negative) = (fresh.lo, fresh.hi, fresh.axis, fresh.negative);
+                    }
+                    if ui.small_button("×").on_hover_text("Remove this term").clicked() {
+                        remove = Some(i);
+                    }
+                });
+                crate::row(ui, &mut t.weight, 1.0, |ui, v| _ = ui.add(egui::Slider::new(v, -2.0..=2.0).text("weight")));
+                if matches!(t.kind, MaskKind::Position | MaskKind::Normal) {
+                    let word = if t.kind == MaskKind::Position { "along" } else { "facing" };
+                    crate::row(ui, &mut t.axis, 1, |ui, v| {
+                        ui.label(word);
+                        for (a, name) in [(0, "X"), (1, "Y"), (2, "Z")] {
+                            ui.selectable_value(v, a, name);
                         }
                     });
-                    crate::row(ui, &mut t.weight, 1.0, |ui, v| _ = ui.add(egui::Slider::new(v, -2.0..=2.0).text("weight")));
-                    if matches!(t.kind, MaskKind::Position | MaskKind::Normal) {
-                        let word = if t.kind == MaskKind::Position { "along" } else { "facing" };
-                        crate::row(ui, &mut t.axis, 1, |ui, v| {
-                            ui.label(word);
-                            for (a, name) in [(0, "X"), (1, "Y"), (2, "Z")] {
-                                ui.selectable_value(v, a, name);
-                            }
-                        });
-                        crate::row(ui, &mut t.negative, false, |ui, v| _ = ui.checkbox(v, "negative direction"));
-                    }
-                    if t.kind == MaskKind::VertexColor {
-                        crate::row(ui, &mut t.axis, 0, |ui, v| {
-                            ui.label("channel");
-                            for (a, name) in [(0, "R"), (1, "G"), (2, "B"), (3, "Luminance")] {
-                                ui.selectable_value(v, a, name);
-                            }
-                        });
-                        if !has_colors {
-                            ui.colored_label(crate::editor::ORANGE, "This mesh has no vertex colours, so this term is meaningless.");
+                    crate::row(ui, &mut t.negative, false, |ui, v| _ = ui.checkbox(v, "negative direction"));
+                }
+                if t.kind == MaskKind::VertexColor {
+                    crate::row(ui, &mut t.axis, 0, |ui, v| {
+                        ui.label("channel");
+                        for (a, name) in [(0, "R"), (1, "G"), (2, "B"), (3, "Luminance")] {
+                            ui.selectable_value(v, a, name);
                         }
+                    });
+                    if !has_colors {
+                        ui.colored_label(crate::editor::ORANGE, "This mesh has no vertex colours, so this term is meaningless.");
                     }
-                    if t.kind != MaskKind::Constant {
-                        let (dlo, dhi) = t.kind.default_range();
-                        let speed = if t.kind == MaskKind::Curvature { 0.05 } else { 0.01 };
-                        crate::row(ui, &mut (t.lo, t.hi), (dlo, dhi), |ui, v| {
-                            ui.add(egui::DragValue::new(&mut v.0).speed(speed).prefix("0 at "));
-                            ui.add(egui::DragValue::new(&mut v.1).speed(speed).prefix("1 at "));
-                        });
-                        crate::row(ui, &mut t.invert, false, |ui, v| _ = ui.checkbox(v, "invert"));
+                }
+                if t.kind != MaskKind::Constant {
+                    let (dlo, dhi) = t.kind.default_range();
+                    let speed = if t.kind == MaskKind::Curvature { 0.05 } else { 0.01 };
+                    // The pair is copied out and back: `row` edits a value it owns, and a temporary tuple would drop the edit.
+                    let mut range = (t.lo, t.hi);
+                    crate::row(ui, &mut range, (dlo, dhi), |ui, v| {
+                        ui.add(egui::DragValue::new(&mut v.0).speed(speed).prefix("0 at "));
+                        ui.add(egui::DragValue::new(&mut v.1).speed(speed).prefix("1 at "));
+                    });
+                    (t.lo, t.hi) = range;
+                    crate::row(ui, &mut t.invert, false, |ui, v| _ = ui.checkbox(v, "invert"));
+                    crate::row(ui, &mut t.power, 1.0, |ui, v| {
+                        ui.add(egui::Slider::new(v, 0.1..=8.0).logarithmic(true).text("power")).on_hover_text(
+                            "Shapes the ramp after the range and invert: 1 is linear, above 1 pulls the middle down (only the strongest parts stay high), below 1 lifts it (a softer, wider mask).",
+                        );
+                    });
+                }
+                ui.weak(t.kind.help());
+            });
+        }
+        if let Some(i) = remove {
+            mask.terms.remove(i);
+        }
+        if mask.terms.len() < MAX_TERMS {
+            ui.menu_button("Add term", |ui| {
+                for k in MaskKind::ALL {
+                    if ui.button(k.name()).on_hover_text(k.help()).clicked() {
+                        mask.terms.push(MaskTerm::new(k));
+                        ui.close();
                     }
-                    ui.weak(t.kind.help());
-                });
-            }
-            if let Some(i) = remove {
-                self.mesh_mask.terms.remove(i);
-            }
-            if self.mesh_mask.terms.len() < MAX_TERMS {
-                ui.menu_button("Add term", |ui| {
-                    for k in MaskKind::ALL {
-                        if ui.button(k.name()).on_hover_text(k.help()).clicked() {
-                            self.mesh_mask.terms.push(MaskTerm::new(k));
-                            ui.close();
-                        }
-                    }
-                });
-            }
-            if self.mesh_mask.range() != (1.0, 1.0) {
-                let (lo, hi) = self.mesh_mask.range();
-                ui.weak(format!("Strength ranges from {lo:.2} to {hi:.2}."));
-            }
-        });
-    }
+                }
+            });
+        }
+        if mask.range() != (1.0, 1.0) {
+            let (lo, hi) = mask.range();
+            ui.weak(format!("Strength ranges from {lo:.2} to {hi:.2}."));
+        }
+    });
 }
 
 #[cfg(test)]
@@ -534,9 +649,35 @@ mod tests {
 
     #[test]
     fn a_flat_open_mesh_gets_more_voxels_along_its_length_than_a_cube() {
-        let flat = Mesh { positions: vec![[-1.0, -0.02, -1.0], [1.0, 0.02, -1.0], [1.0, 0.0, 1.0], [-1.0, 0.0, 1.0]], triangles: vec![[0, 1, 2], [0, 2, 3]], colors: Vec::new() };
+        let flat = Mesh { positions: vec![[-1.0, -0.02, -1.0], [1.0, 0.02, -1.0], [1.0, 0.0, 1.0], [-1.0, 0.0, 1.0]], triangles: vec![[0, 1, 2], [0, 2, 3]], colors: Vec::new(), uvs: Vec::new() };
         let cube = crate::mesh::shapes::icosphere(1.0, 1);
         assert!(open_mesh_res(&flat, 0.5) > open_mesh_res(&cube, 0.5));
         assert!(open_mesh_res(&flat, 0.5) <= 768);
+    }
+
+    /// The range fields of a mask term can be typed into (they once ignored edits).
+    #[test]
+    fn mask_term_range_and_power_can_be_edited() {
+        use crate::meshmask::{MaskKind, MaskSettings, MaskTerm};
+        use egui_kittest::{kittest::Queryable, Harness};
+        let state = (MaskSettings { terms: vec![MaskTerm::new(MaskKind::Curvature)] }, true);
+        let mut h = Harness::builder().with_size(egui::Vec2::new(500.0, 500.0)).with_step_dt(1.0 / 60.0).build_ui_state(
+            |ui, (mask, show): &mut (MaskSettings, bool)| {
+                egui_extras::install_image_loaders(ui.ctx());
+                mask_terms_ui(ui, mask, show, true);
+            },
+            state,
+        );
+        h.run();
+        let spin = egui::accesskit::Role::SpinButton;
+        for (label, text) in [("0 at", "0.1"), ("1 at", "0.9"), ("power", "3")] {
+            h.get_by_role_and_label(spin, label).click();
+            h.run();
+            h.get_by_role_and_label(spin, label).type_text(text);
+            h.key_press(egui::Key::Enter);
+            h.run();
+        }
+        let t = &h.state().0.terms[0];
+        assert!((t.lo - 0.1).abs() < 1e-4 && (t.hi - 0.9).abs() < 1e-4 && (t.power - 3.0).abs() < 1e-3, "lo {} hi {} power {}", t.lo, t.hi, t.power);
     }
 }

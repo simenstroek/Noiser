@@ -57,6 +57,7 @@ pub fn ops(g: &Graph, seed: u32) -> Result<Value, String> {
             let ty = if g.yields_vector(id) { "vector" } else { "float" };
             let mut op = match &g.nodes[&id].kind {
                 NodeKind::Position => json!({"op": "position"}),
+                NodeKind::LoadMesh(_) | NodeKind::NoiseGraph(_) | NodeKind::Remesh { .. } | NodeKind::AutoUv(_) | NodeKind::Bake(_) | NodeKind::OutMesh(_) | NodeKind::OutImage(_) | NodeKind::ImageSplit | NodeKind::ImageCombine | NodeKind::ImageLevels { .. } | NodeKind::TransferUv => json!({"op": "value", "value": 0.0}), // mesh graph nodes have no .noiser form
                 // A passthrough, written as adding zero.
                 NodeKind::NamedReroute { .. } | NodeKind::NamedRerouteUse { .. } => unreachable!("readers look through named reroutes"),
                 NodeKind::Reroute => json!({"op": "math", "fn": "add", "a": input(id, 0), "b": 0.0}),
@@ -82,11 +83,13 @@ pub fn ops(g: &Graph, seed: u32) -> Result<Value, String> {
                         MathOp::Sqrt => "sqrt",
                         MathOp::Modulo => "modulo",
                         MathOp::Greater => "greater",
+                        MathOp::Lerp => "lerp",
+                        MathOp::InverseLerp => "inverse_lerp",
                     };
                     // An unconnected operand is its constant.
                     let operand = |port, c: f32| reference(id, port).map_or(json!(c), |s| json!({"node": s}));
                     let mut o = json!({"op": "math", "fn": f, "a": operand(0, *a), "b": operand(1, *b)});
-                    if op.is_smooth() {
+                    if op.is_ternary() {
                         o["k"] = operand(2, *c);
                     }
                     o

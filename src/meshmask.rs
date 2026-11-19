@@ -83,6 +83,8 @@ pub struct MaskTerm {
     pub lo: f32,
     pub hi: f32,
     pub invert: bool,
+    /// The ramp raised to this power after the range and the invert: 1 is linear.
+    pub power: f32,
     /// Position and Normal: the axis (0 X, 1 Y, 2 Z) and whether the direction is along its negative side.
     pub axis: u32,
     pub negative: bool,
@@ -92,7 +94,7 @@ impl MaskTerm {
     pub fn new(kind: MaskKind) -> MaskTerm {
         let (lo, hi) = kind.default_range();
         // Position and Normal start along Y; a vertex colour starts on the red channel (axis 0).
-        MaskTerm { kind, weight: 1.0, lo, hi, invert: false, axis: if kind == MaskKind::VertexColor { 0 } else { 1 }, negative: false }
+        MaskTerm { kind, weight: 1.0, lo, hi, invert: false, power: 1.0, axis: if kind == MaskKind::VertexColor { 0 } else { 1 }, negative: false }
     }
 }
 
@@ -104,7 +106,7 @@ pub struct MaskSettings {
 /// A mask packed for the shaders: two vec4 per term, the number of terms, and the range of its value.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PackedMask {
-    /// Per term: (kind code, weight, lo, hi) and (direction x, y, z, invert).
+    /// Per term: (kind code, weight, lo, hi) and (direction x, y, z, power); a negative power means inverted.
     pub terms: [[f32; 4]; 2 * MAX_TERMS],
     pub count: u32,
     pub range: (f32, f32),
@@ -127,7 +129,7 @@ impl MaskSettings {
                 dir[(t.axis as usize).min(2)] = if t.negative { -1.0 } else { 1.0 };
             }
             packed.terms[2 * i] = [t.kind.code() as f32, t.weight, t.lo, t.hi];
-            packed.terms[2 * i + 1] = [dir[0], dir[1], dir[2], if t.invert { 1.0 } else { 0.0 }];
+            packed.terms[2 * i + 1] = [dir[0], dir[1], dir[2], if t.invert { -t.power } else { t.power }];
         }
         packed.count = self.terms.len().min(MAX_TERMS) as u32;
         packed.range = self.range();
@@ -171,7 +173,7 @@ mod tests {
         assert_eq!(p.range, (-0.5, 1.0));
         assert_eq!(p.terms[0], [1.0, 1.0, 0.0, 1.0]);
         assert_eq!(p.terms[2], [2.0, -0.5, 0.0, 1.0]);
-        assert_eq!(p.terms[3], [0.0, 0.0, -1.0, 1.0]);
+        assert_eq!(p.terms[3], [0.0, 0.0, -1.0, -1.0]);
         // More terms than fit are ignored, not a panic.
         let many = MaskSettings { terms: vec![MaskTerm::new(MaskKind::Curvature); MAX_TERMS + 3] };
         assert_eq!(many.pack().count, MAX_TERMS as u32);

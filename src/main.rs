@@ -14,6 +14,14 @@ mod mesh;
 mod meshapp;
 mod meshmask;
 mod meshexport;
+mod meshquality;
+mod remesh;
+mod uvgen;
+mod bake;
+mod meshgraph;
+mod meshgraph_ui;
+mod meshworkspace;
+mod uvtransfer;
 mod meshformats;
 mod meshsdf;
 mod shaderexport;
@@ -133,6 +141,9 @@ struct App {
     rs: egui_wgpu::RenderState,
     graph: Graph,
     editor: editor::Editor,
+    /// Which graph the window shows, and the mesh graph's state.
+    workspace: meshworkspace::Workspace,
+    mesh_ws: meshworkspace::MeshWorkspace,
     /// File the graph was last opened from / saved to.
     path: Option<std::path::PathBuf>,
     status: String,
@@ -165,6 +176,8 @@ struct App {
     /// Grid settings for the next bake (see the Mesh section of the panel).
     mesh_res: u32,
     mesh_pad: f32,
+    /// How the separate parts of an imported mesh are combined (see `meshsdf::Combine`).
+    mesh_combine: meshsdf::Combine,
     mesh_export_open: bool,
     mesh_export: meshexport::Settings,
     mesh_export_job: Option<meshapp::MeshExportJob>,
@@ -174,6 +187,8 @@ struct App {
     batch_seeds: meshexport::SeedMode,
     /// Batch: each mesh's displacement amount varies by up to this fraction.
     batch_amount_var: f32,
+    /// Mesh: tile size and displacement are in the mesh file's units instead of relative to the mesh (see `App::detail_scale`).
+    mesh_object_units: bool,
     batch_job: Option<meshapp::BatchJob>,
     /// How strongly the noise displaces each part of a mesh (see meshmask.rs).
     mesh_mask: meshmask::MaskSettings,
@@ -210,6 +225,11 @@ impl App {
         // `noiser [graph.noisegraph] [--mesh file.obj] [--open-mesh-export] [--batch-out DIR --batch-file FILE ...] [--mask KIND ...]`
         let mut args = std::env::args().skip(1);
         let (mut graph_arg, mut mesh_arg, mut open_mesh_export) = (None, None, false);
+        let mut mesh_tab = false;
+        let mut auto_preview = false;
+        let mut uv_view = false;
+        let mut map_view = false;
+        let (mut mesh_graph_arg, mut run_mesh_graph): (Option<std::path::PathBuf>, bool) = (None, false);
         let (mut batch_dir, mut batch_files): (Option<std::path::PathBuf>, Vec<std::path::PathBuf>) = (None, Vec::new());
         let mut mask_terms = Vec::new();
         let mut show_mask = false;
@@ -236,6 +256,20 @@ impl App {
                 show_mask = true;
             } else if a == "--open-mesh-export" {
                 open_mesh_export = true;
+            } else if a == "--mesh-tab" {
+                mesh_tab = true;
+            } else if a == "--window" {
+                args.next(); // read below
+            } else if a == "--mesh-graph" {
+                mesh_graph_arg = args.next().map(std::path::PathBuf::from);
+            } else if a == "--run-mesh-graph" {
+                run_mesh_graph = true;
+            } else if a == "--auto-preview" {
+                auto_preview = true;
+            } else if a == "--uv-view" {
+                uv_view = true;
+            } else if a == "--map-view" {
+                map_view = true;
             } else if a == "--mask" {
                 // A displacement-mask term of the named kind with its default settings.
                 let name = args.next().unwrap_or_default().to_lowercase();
@@ -244,6 +278,9 @@ impl App {
                 batch_dir = args.next().map(std::path::PathBuf::from);
             } else if a == "--batch-file" {
                 batch_files.extend(args.next().map(std::path::PathBuf::from));
+            } else if a.to_lowercase().ends_with(".meshgraph") {
+                // A mesh graph given as a plain file name ("open with") opens in the Mesh graph tab.
+                mesh_graph_arg = Some(std::path::PathBuf::from(a));
             } else if graph_arg.is_none() {
                 graph_arg = Some(std::path::PathBuf::from(a));
             }
@@ -288,6 +325,8 @@ impl App {
             saved: graph.clone(),
             graph,
             editor,
+            workspace: Default::default(),
+            mesh_ws: Default::default(),
             path,
             status,
             built: None,
@@ -308,6 +347,7 @@ impl App {
             mesh_gen: 0,
             mesh_res: meshapp::DEFAULT_RES,
             mesh_pad: meshapp::DEFAULT_PAD,
+            mesh_combine: meshsdf::Combine::default(),
             mesh_export_open: false,
             mesh_export: meshexport::Settings::default(),
             mesh_export_job: None,
@@ -316,6 +356,7 @@ impl App {
             batch_dir: None,
             batch_seeds: meshexport::SeedMode::Same,
             batch_amount_var: 0.0,
+            mesh_object_units: false,
             batch_job: None,
             mesh_mask: meshmask::MaskSettings::default(),
             history: history::History::new(&saved_for_history),
@@ -331,8 +372,28 @@ impl App {
             close_ok: false,
             recent: cc.storage.and_then(|s| s.get_string(RECENT_KEY)).and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default(),
         };
+        let graph_from_arg = mesh_graph_arg.is_some();
+        if mesh_tab || mesh_graph_arg.is_some() {
+            app.workspace = meshworkspace::Workspace::Mesh;
+        }
+        if let Some(p) = mesh_graph_arg {
+            match std::fs::read_to_string(&p).map_err(|e| e.to_string()).and_then(|s| Graph::from_json(&s)) {
+                Ok(g) => app.mesh_ws.open_graph(g, p),
+                Err(e) => app.status = format!("Could not open {}: {e}", p.display()),
+            }
+        }
+        app.mesh_ws.autorun = run_mesh_graph;
+        app.mesh_ws.auto_preview = auto_preview;
+        app.mesh_ws.show_uv = uv_view;
+        app.mesh_ws.show_map = map_view;
         if let Some(p) = mesh_arg {
             app.start_mesh_load(p);
+        }
+        // The mesh graph as it was left (an unsaved one included), with the file it belongs to.
+        // (a graph named on the command line wins)
+        if let Some(g) = cc.storage.and_then(|s| s.get_string(MESH_GRAPH_KEY)).and_then(|s| Graph::from_json(&s).ok()).filter(|_| !graph_from_arg) {
+            let path = cc.storage.and_then(|s| s.get_string(MESH_GRAPH_PATH_KEY)).filter(|p| !p.is_empty()).map(std::path::PathBuf::from);
+            app.mesh_ws.restore(g, path);
         }
         app.mesh_mask.terms = mask_terms;
         app.pv.show_mask = show_mask;
@@ -342,6 +403,9 @@ impl App {
         app.pv.cloud = cloud_arg;
         if let Some(a) = amount_arg {
             app.pv.amount = a;
+        }
+        if let Some(n) = select_arg.filter(|n| app.workspace == meshworkspace::Workspace::Mesh && app.mesh_ws.graph.nodes.contains_key(n)) {
+            app.mesh_ws.editor.selected.insert(n);
         }
         if let Some(n) = select_arg.filter(|n| app.graph.nodes.contains_key(n)) {
             app.editor.selected.insert(n);
@@ -536,19 +600,20 @@ impl App {
         // The displacement mask only applies to a mesh.
         let mesh_on = pv.prim == meshapp::MESH_PRIM && self.mesh.is_some();
         let mask = if mesh_on { self.mesh_mask.pack() } else { meshmask::PackedMask::NONE };
-        let push = view::push_range(range, pv.amount, mask.range);
+        let k = if mesh_on { self.detail_scale() } else { 1.0 };
+        let push = view::push_range(range, pv.amount * k, mask.range);
         let (mesh_origin, mesh_voxel) = self.mesh.as_ref().map_or(([0.0; 3], 1.0), |m| (m.sdf.origin, m.sdf.voxel));
         let (mesh_lo, mesh_hi) = self.mesh.as_ref().map_or(([0.0; 3], [0.0; 3]), |m| m.bounds);
         Uniforms {
             cam_pos: pos,
             aspect: aspect(view3d),
             cam_fwd: fwd,
-            amount: pv.amount,
+            amount: pv.amount * k,
             cam_right: right,
             step_scale: pv.step_scale,
             cam_up: up,
             seed: pv.seed,
-            tile_size: pv.tile_size,
+            tile_size: pv.tile_size * k,
             prim_size: pv.prim_size,
             // Logical points are fine here: only the ratio to the view height matters.
             pixel: 2.0 / (view3d.height() * pv.render_scale).max(1.0),
@@ -648,7 +713,9 @@ impl App {
                 None => return,
             },
         };
-        match std::fs::write(&path, self.graph.to_json()) {
+        let text = self.graph.to_json();
+        keep_previous_version(&path, &text);
+        match std::fs::write(&path, text) {
             Ok(()) => {
                 self.saved = self.graph.clone();
                 self.status = format!("Saved {}", path.display());
@@ -732,8 +799,8 @@ fn preview_props(ui: &mut egui::Ui, pv: &mut Preview, mesh_loaded: bool, tab: Si
         });
     });
     row(ui, &mut pv.prim_size, d.prim_size, |ui, v| _ = ui.add(egui::Slider::new(v, 0.25..=2.0).text("shape size")));
-    row(ui, &mut pv.amount, d.amount, |ui, v| _ = ui.add(egui::Slider::new(v, 0.0..=1.0).text("displacement")));
-    row(ui, &mut pv.tile_size, d.tile_size, |ui, v| _ = ui.add(egui::Slider::new(v, 0.25..=4.0).logarithmic(true).text("tile size")));
+    row(ui, &mut pv.amount, d.amount, |ui, v| _ = ui.add(egui::Slider::new(v, 0.0..=1.0).clamping(egui::SliderClamping::Never).text("displacement")));
+    row(ui, &mut pv.tile_size, d.tile_size, |ui, v| _ = ui.add(egui::Slider::new(v, 0.25..=4.0).logarithmic(true).clamping(egui::SliderClamping::Never).text("tile size")));
     row(ui, &mut pv.seed, d.seed, |ui, v| _ = ui.add(egui::Slider::new(v, 0..=100).text("global seed")));
     if pv.cloud {
         row(ui, &mut pv.cloud_density, d.cloud_density, |ui, v| _ = ui.add(egui::Slider::new(v, 0.5..=64.0).logarithmic(true).text("cloud density")));
@@ -1005,10 +1072,38 @@ fn node_props(ui: &mut egui::Ui, kind: &mut NodeKind, names: &[String]) {
             }
         }
         NodeKind::OutDensity | NodeKind::OutNormal => {}
+        NodeKind::LoadMesh(_) | NodeKind::NoiseGraph(_) | NodeKind::Remesh { .. } | NodeKind::AutoUv(_) | NodeKind::Bake(_) | NodeKind::OutMesh(_) | NodeKind::OutImage(_) | NodeKind::ImageSplit | NodeKind::ImageCombine | NodeKind::ImageLevels { .. } | NodeKind::TransferUv => _ = meshgraph_ui::props(ui, kind),
+    }
+}
+
+/// Before a graph file is overwritten with different content, its old content goes to `<name>.history/` with a
+/// timestamp, so a noise graph a mesh graph uses can always be taken back (graphs are small; the newest 100 are kept).
+fn keep_previous_version(path: &std::path::Path, new_text: &str) {
+    let Ok(old) = std::fs::read_to_string(path) else { return };
+    if old == new_text {
+        return;
+    }
+    let (Some(name), Some(dir)) = (path.file_name(), path.parent()) else { return };
+    let history = dir.join(format!("{}.history", name.to_string_lossy()));
+    if std::fs::create_dir_all(&history).is_err() {
+        return;
+    }
+    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+    let ext = path.extension().map_or("noisegraph".to_string(), |e| e.to_string_lossy().into_owned());
+    let _ = std::fs::write(history.join(format!("{stamp}.{ext}")), old);
+    // Old versions beyond the newest 100 go.
+    if let Ok(entries) = std::fs::read_dir(&history) {
+        let mut files: Vec<_> = entries.filter_map(|e| e.ok().map(|e| e.path())).collect();
+        files.sort();
+        for old in files.iter().take(files.len().saturating_sub(100)) {
+            let _ = std::fs::remove_file(old);
+        }
     }
 }
 
 const PICKS_KEY: &str = "node_picks";
+const MESH_GRAPH_KEY: &str = "mesh_graph";
+const MESH_GRAPH_PATH_KEY: &str = "mesh_graph_path";
 const SHORTCUTS: [(&str, &str); 18] = [
     ("Ctrl+S / Ctrl+Shift+S / Ctrl+O / Ctrl+N", "Save / Save As / Open / New"),
     ("Ctrl+Z", "Undo"),
@@ -1080,6 +1175,8 @@ impl eframe::App for App {
         if let Ok(s) = serde_json::to_string(&self.editor.picks) {
             storage.set_string(PICKS_KEY, s);
         }
+        storage.set_string(MESH_GRAPH_KEY, self.mesh_ws.graph.to_json());
+        storage.set_string(MESH_GRAPH_PATH_KEY, self.mesh_ws.path.as_ref().map_or(String::new(), |p| p.to_string_lossy().into_owned()));
         if let Ok(s) = serde_json::to_string(&self.recent) {
             storage.set_string(RECENT_KEY, s);
         }
@@ -1114,7 +1211,9 @@ impl eframe::App for App {
         // Files dropped on the window: .obj becomes the mesh, anything else is opened as a graph.
         for f in ctx.input(|i| i.raw.dropped_files.clone()) {
             { let p = f.path().to_path_buf();
-                if meshformats::is_mesh_file(&p) {
+                if self.workspace == meshworkspace::Workspace::Mesh {
+                    self.mesh_ws.drop_file(p);
+                } else if meshformats::is_mesh_file(&p) {
                     self.start_mesh_load(p);
                 } else {
                     self.request(Pending::Path(p));
@@ -1251,7 +1350,9 @@ impl eframe::App for App {
         }
         // File shortcuts work even with a text field focused (Ctrl+S would otherwise do nothing there).
         let (ctrl_s, ctrl_o, ctrl_shift) = ui.input(|i| (i.modifiers.command && i.key_pressed(egui::Key::S), i.modifiers.command && i.key_pressed(egui::Key::O), i.modifiers.shift));
-        if ctrl_s {
+        if self.workspace == meshworkspace::Workspace::Mesh {
+            // The mesh graph tab handles its own keys.
+        } else if ctrl_s {
             self.save(ctrl_shift);
         } else if ctrl_o {
             self.open();
@@ -1259,7 +1360,7 @@ impl eframe::App for App {
             self.request(Pending::New);
         }
         // Ctrl+Z / Ctrl+Y (or Ctrl+Shift+Z), unless a text field has the keyboard.
-        if !ui.ctx().egui_wants_keyboard_input() {
+        if !ui.ctx().egui_wants_keyboard_input() && self.workspace == meshworkspace::Workspace::Noise {
             let (z, y, shift) = ui.input(|i| (i.modifiers.command && i.key_pressed(egui::Key::Z), i.modifiers.command && i.key_pressed(egui::Key::Y), i.modifiers.shift));
             if y || (z && shift) {
                 self.undo(true);
@@ -1309,7 +1410,7 @@ impl eframe::App for App {
                     }
                     ui.separator();
                     if ui.button("Import mesh (OBJ)…").clicked() {
-                        if let Some(p) = rfd::FileDialog::new().add_filter("Mesh (OBJ, PLY, STL)", &["obj", "ply", "stl"]).pick_file() {
+                        if let Some(p) = rfd::FileDialog::new().add_filter("Mesh (OBJ, PLY, STL, glTF, FBX)", &["obj", "ply", "stl", "gltf", "glb", "fbx"]).pick_file() {
                             self.start_mesh_load(p);
                         }
                     }
@@ -1370,9 +1471,17 @@ impl eframe::App for App {
                         ui.close();
                     }
                 });
+                ui.separator();
+                ui.selectable_value(&mut self.workspace, meshworkspace::Workspace::Noise, "Noise graph");
+                ui.selectable_value(&mut self.workspace, meshworkspace::Workspace::Mesh, "Mesh graph");
+                ui.separator();
                 ui.weak(&self.status);
             });
         });
+        if self.workspace == meshworkspace::Workspace::Mesh {
+            self.mesh_workspace_ui(ui);
+            return;
+        }
         // The side panel: viewport settings in tabs on top, the selected node's settings in the bottom half.
         egui::Panel::right("props").default_size(320.0).show(ui, |ui| {
             let half = ui.available_height() * 0.5;
