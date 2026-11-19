@@ -1046,12 +1046,17 @@ impl Graph {
         upstream(behind, false).difference(&evaluated).copied().collect()
     }
 
+    /// Whether what feeds `port` of `to` is a vector: the output pin matters (a generator's second output is one).
+    pub fn input_is_vector(&self, to: NodeId, port: usize) -> bool {
+        self.input_from(to, port).is_some_and(|(src, fp)| self.output_type_at(src, fp) == PortType::Vector)
+    }
+
     pub fn yields_vector(&self, id: NodeId) -> bool {
         match &self.nodes[&id].kind {
             NodeKind::Vec3(_) | NodeKind::Position | NodeKind::Radial(_) | NodeKind::Normal { .. } | NodeKind::Combine { .. } => true,
-            NodeKind::Reroute | NodeKind::NamedReroute { .. } => self.input(id, 0).is_some_and(|s| self.yields_vector(s)),
-            NodeKind::NamedRerouteUse { name } => self.named_declaration(name).and_then(|d| self.input(d, 0)).is_some_and(|s| self.yields_vector(s)),
-            NodeKind::Math { op, .. } => *op != MathOp::Dot && (0..2).any(|p| self.input(id, p).is_some_and(|s| self.yields_vector(s))),
+            NodeKind::Reroute | NodeKind::NamedReroute { .. } => self.input_is_vector(id, 0),
+            NodeKind::NamedRerouteUse { name } => self.named_declaration(name).is_some_and(|d| self.input_is_vector(d, 0)),
+            NodeKind::Math { op, .. } => *op != MathOp::Dot && (0..2).any(|p| self.input_is_vector(id, p)),
             _ => false,
         }
     }
@@ -1209,7 +1214,7 @@ impl Graph {
             NodeKind::Combine { .. } => {
                 // A whole position feeding one of the float inputs is averaged to a single number, which shifts by
                 // a third per tile: not a coordinate any more (Separate XYZ takes one exact component).
-                let averaged = (0..3).any(|p| self.input(id, p).is_some_and(|src| self.yields_vector(src)) && input(p, memo, stack) == Some(Coord));
+                let averaged = (0..3).any(|p| self.input_is_vector(id, p) && input(p, memo, stack) == Some(Coord));
                 let ts: Vec<Tiling> = (0..3).filter_map(|p| input(p, memo, stack)).collect();
                 if averaged {
                     Broken("a position is averaged into one number here (use Separate XYZ to take a component)".into())
@@ -1392,7 +1397,7 @@ impl Graph {
             NodeKind::OutImage(_) | NodeKind::ImageSplit | NodeKind::ImageCombine | NodeKind::ImageLevels { .. } => PortType::Image,
             NodeKind::Noise(_) | NodeKind::Grid { .. } | NodeKind::Pattern(_) | NodeKind::OutNormal | NodeKind::Separate => PortType::Vector,
             NodeKind::Math { op, .. } if port < 2 => {
-                let vector = *op == MathOp::Dot || (0..2).any(|p| self.input(id, p).is_some_and(|s| self.yields_vector(s)));
+                let vector = *op == MathOp::Dot || (0..2).any(|p| self.input_is_vector(id, p));
                 if vector { PortType::Vector } else { PortType::Float }
             }
             _ => PortType::Float,
@@ -1576,6 +1581,16 @@ fn math_range(op: MathOp, (a0, a1): Range, (b0, b1): Range, (k0, k1): Range) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_displacement_output_makes_math_a_vector() {
+        let mut g = Graph::default_graph(); // 0 Position -> 1 Noise -> 2 OutDensity
+        let m = g.add(NodeKind::Math { op: MathOp::Multiply, a: 0.0, b: 2.0, c: 0.5 }, [0.0; 2]);
+        g.connect_from(1, 0, m, 0);
+        assert_eq!(g.output_type(m), PortType::Float);
+        g.connect_from(1, 1, m, 0);
+        assert_eq!((g.output_type(m), g.input_type(m, 0)), (PortType::Vector, PortType::Vector));
+    }
 
     #[test]
     fn density_range_follows_math() {
