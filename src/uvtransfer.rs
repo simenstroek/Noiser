@@ -140,7 +140,7 @@ pub struct Stats {
 }
 
 /// The source mesh's islands: triangles joined across edges whose UVs agree at both ends.
-fn islands(mesh: &Mesh) -> Vec<u32> {
+pub fn islands(mesh: &Mesh) -> Vec<u32> {
     let n = mesh.triangles.len();
     let mut parent: Vec<u32> = (0..n as u32).collect();
     fn root(parent: &mut [u32], mut i: u32) -> u32 {

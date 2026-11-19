@@ -36,6 +36,8 @@ pub struct MeshWorkspace {
     pub autorun: bool,
     /// The first mesh the last run wrote, for the view above the graph.
     preview: Option<Preview>,
+    /// Show the preview's UV layout instead of the shaded mesh.
+    pub show_uv: bool,
     /// The images the last run wrote, as thumbnails under the view.
     thumbnails: Vec<(String, egui::TextureHandle)>,
     /// Redo the quick preview a moment after the graph (or the noise graph it uses) changes.
@@ -54,6 +56,9 @@ struct Preview {
     positions: Vec<[f32; 3]>,
     triangles: Vec<[u32; 3]>,
     name: String,
+    /// The texture coordinates of each triangle's corners (V up) and the island each triangle is in; empty without UVs.
+    uvs: Vec<[[f32; 2]; 3]>,
+    island: Vec<u32>,
 }
 
 impl Preview {
@@ -63,7 +68,34 @@ impl Preview {
         let centre = [0, 1, 2].map(|a| 0.5 * (lo[a] + hi[a]));
         let radius = (0..3).map(|a| hi[a] - lo[a]).fold(0.0, f32::max).max(1e-9) * 0.5;
         let positions = mesh.positions.iter().map(|p| [0, 1, 2].map(|a| (p[a] - centre[a]) / radius)).collect();
-        Ok(Preview { positions, triangles: mesh.triangles, name: path.file_name().map_or(String::new(), |n| n.to_string_lossy().into_owned()) })
+        let island = if mesh.uvs.len() == mesh.triangles.len() && !mesh.uvs.is_empty() { crate::uvtransfer::islands(&mesh) } else { Vec::new() };
+        Ok(Preview { positions, triangles: mesh.triangles, name: path.file_name().map_or(String::new(), |n| n.to_string_lossy().into_owned()), uvs: mesh.uvs, island })
+    }
+
+    /// The UV layout: the 0 to 1 square with every triangle, filled by island.
+    fn paint_uv(&self, painter: &egui::Painter, rect: egui::Rect) {
+        let side = (rect.width().min(rect.height()) - 24.0).max(50.0);
+        let square = egui::Rect::from_center_size(rect.center(), egui::vec2(side, side));
+        painter.rect_filled(square, 0.0, egui::Color32::from_gray(40));
+        let at = |uv: [f32; 2]| egui::pos2(square.left() + uv[0] * side, square.bottom() - uv[1] * side);
+        let mut mesh = egui::epaint::Mesh::default();
+        let mut lines = Vec::new();
+        for (t, uv) in self.uvs.iter().enumerate() {
+            let h = self.island[t].wrapping_mul(2_654_435_761);
+            let colour = egui::Color32::from_rgb(90 + (h & 0x7f) as u8, 90 + ((h >> 8) & 0x7f) as u8, 90 + ((h >> 16) & 0x7f) as u8);
+            let p = uv.map(at);
+            let base = mesh.vertices.len() as u32;
+            for q in p {
+                mesh.vertices.push(egui::epaint::Vertex { pos: q, uv: egui::epaint::WHITE_UV, color: colour });
+            }
+            mesh.indices.extend([base, base + 1, base + 2]);
+            lines.push(egui::Shape::closed_line(p.to_vec(), egui::Stroke::new(0.5, egui::Color32::from_black_alpha(140))));
+        }
+        painter.add(egui::Shape::mesh(mesh));
+        if self.uvs.len() <= 60_000 {
+            painter.extend(lines);
+        }
+        painter.rect_stroke(square, 0.0, egui::Stroke::new(1.0, egui::Color32::from_gray(140)), egui::StrokeKind::Outside);
     }
 
     /// Flat-shaded triangles, far ones first, as one egui mesh in `rect`.
@@ -121,7 +153,7 @@ impl Default for MeshWorkspace {
         let mut editor = crate::editor::Editor::default();
         editor.mesh_mode = true;
         editor.frame_next = true;
-        MeshWorkspace { saved: graph.clone(), graph, editor, path: None, cache: Arc::new(Mutex::new(MeshCache::default())), job: None, log: Vec::new(), written: Vec::new(), seed: 0, autorun: false, preview: None, thumbnails: Vec::new(), auto_preview: false, preview_key: 0, changed_since: None, history: crate::history::History::new(&Graph::default()), yaw: 0.6, pitch: 0.35, zoom: 1.0 }
+        MeshWorkspace { saved: graph.clone(), graph, editor, path: None, cache: Arc::new(Mutex::new(MeshCache::default())), job: None, log: Vec::new(), written: Vec::new(), seed: 0, autorun: false, preview: None, show_uv: false, thumbnails: Vec::new(), auto_preview: false, preview_key: 0, changed_since: None, history: crate::history::History::new(&Graph::default()), yaw: 0.6, pitch: 0.35, zoom: 1.0 }
     }
 }
 
@@ -585,8 +617,23 @@ impl crate::App {
             }
             match &self.mesh_ws.preview {
                 Some(p) => {
-                    p.paint(&painter, view_rect, self.mesh_ws.yaw, self.mesh_ws.pitch, self.mesh_ws.zoom);
-                    painter.text(rect.left_top() + egui::vec2(8.0, 6.0), egui::Align2::LEFT_TOP, format!("{}: {} triangles. Drag to turn, scroll to zoom, double-click to reset.", p.name, p.triangles.len()), egui::FontId::proportional(12.0), egui::Color32::from_gray(160));
+                    let uv = self.mesh_ws.show_uv && !p.uvs.is_empty();
+                    if uv {
+                        p.paint_uv(&painter, view_rect);
+                    } else {
+                        p.paint(&painter, view_rect, self.mesh_ws.yaw, self.mesh_ws.pitch, self.mesh_ws.zoom);
+                    }
+                    let hint = if uv { "UV layout" } else { "Drag to turn, scroll to zoom, double-click to reset." };
+                    painter.text(rect.left_top() + egui::vec2(8.0, 6.0), egui::Align2::LEFT_TOP, format!("{}: {} triangles. {hint}", p.name, p.triangles.len()), egui::FontId::proportional(12.0), egui::Color32::from_gray(160));
+                    if !p.uvs.is_empty() {
+                        let corner = egui::Rect::from_min_size(egui::pos2(rect.right() - 190.0, rect.top() + 4.0), egui::vec2(186.0, 22.0));
+                        ui.scope_builder(egui::UiBuilder::new().max_rect(corner), |ui| {
+                            ui.horizontal(|ui| {
+                                ui.selectable_value(&mut self.mesh_ws.show_uv, false, "Shaded");
+                                ui.selectable_value(&mut self.mesh_ws.show_uv, true, "UV layout");
+                            });
+                        });
+                    }
                 }
                 None => _ = painter.text(rect.center(), egui::Align2::CENTER_CENTER, "Run the graph to see its mesh here", egui::FontId::proportional(14.0), egui::Color32::from_gray(120)),
             }

@@ -227,6 +227,7 @@ impl App {
         let (mut graph_arg, mut mesh_arg, mut open_mesh_export) = (None, None, false);
         let mut mesh_tab = false;
         let mut auto_preview = false;
+        let mut uv_view = false;
         let (mut mesh_graph_arg, mut run_mesh_graph): (Option<std::path::PathBuf>, bool) = (None, false);
         let (mut batch_dir, mut batch_files): (Option<std::path::PathBuf>, Vec<std::path::PathBuf>) = (None, Vec::new());
         let mut mask_terms = Vec::new();
@@ -264,6 +265,8 @@ impl App {
                 run_mesh_graph = true;
             } else if a == "--auto-preview" {
                 auto_preview = true;
+            } else if a == "--uv-view" {
+                uv_view = true;
             } else if a == "--mask" {
                 // A displacement-mask term of the named kind with its default settings.
                 let name = args.next().unwrap_or_default().to_lowercase();
@@ -374,6 +377,7 @@ impl App {
         }
         app.mesh_ws.autorun = run_mesh_graph;
         app.mesh_ws.auto_preview = auto_preview;
+        app.mesh_ws.show_uv = uv_view;
         if let Some(p) = mesh_arg {
             app.start_mesh_load(p);
         }
