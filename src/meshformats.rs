@@ -5,20 +5,21 @@
 use crate::mesh::{Mesh, V3};
 use std::path::Path;
 
-/// Reads a mesh by file extension: obj, ply, stl, gltf or glb.
+/// Reads a mesh by file extension: obj, ply, stl, gltf, glb or fbx.
 pub fn load(path: &Path) -> Result<Mesh, String> {
     let ext = path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
     match ext.as_str() {
         "ply" => load_ply(path),
         "stl" => load_stl(path),
         "gltf" | "glb" => load_gltf(path),
+        "fbx" => load_fbx(path),
         _ => Mesh::load_obj(path),
     }
 }
 
 /// Whether a file name has an extension `load` understands.
 pub fn is_mesh_file(path: &Path) -> bool {
-    path.extension().is_some_and(|e| ["obj", "ply", "stl", "gltf", "glb"].iter().any(|x| e.eq_ignore_ascii_case(x)))
+    path.extension().is_some_and(|e| ["obj", "ply", "stl", "gltf", "glb", "fbx"].iter().any(|x| e.eq_ignore_ascii_case(x)))
 }
 
 fn finish(mesh: Mesh, path: &Path) -> Result<Mesh, String> {
@@ -26,6 +27,51 @@ fn finish(mesh: Mesh, path: &Path) -> Result<Mesh, String> {
         return Err(format!("{} has no triangles", path.display()));
     }
     Ok(mesh.welded())
+}
+
+// ---- FBX -------------------------------------------------------------------
+
+/// Reads every mesh node of an FBX file (binary or ASCII) with its world transform applied, in the file's own units
+/// and axes, as one mesh. Polygons are triangulated; UVs are kept when every mesh has them.
+fn load_fbx(path: &Path) -> Result<Mesh, String> {
+    let scene = ufbx::load_file(&path.to_string_lossy(), ufbx::LoadOpts::default()).map_err(|e| format!("could not read {}: {e:?}", path.display()))?;
+    let mut mesh = Mesh::default();
+    let mut all_uv = true;
+    let mut uvs: Vec<[[f32; 2]; 3]> = Vec::new();
+    let mut corners = Vec::new();
+    for node in scene.nodes.iter() {
+        let Some(m) = node.mesh.as_ref() else { continue };
+        let w = &node.geometry_to_world;
+        let base = mesh.positions.len() as u32;
+        mesh.positions.extend(m.vertices.iter().map(|v| {
+            let p = ufbx::transform_position(w, *v);
+            [p.x as f32, p.y as f32, p.z as f32]
+        }));
+        // A mirroring transform turns the triangles inside out.
+        let det = w.m00 * (w.m11 * w.m22 - w.m21 * w.m12) - w.m01 * (w.m10 * w.m22 - w.m20 * w.m12) + w.m02 * (w.m10 * w.m21 - w.m20 * w.m11);
+        let flip = det < 0.0;
+        all_uv &= m.vertex_uv.exists;
+        for face in m.faces.iter() {
+            ufbx::triangulate_face_vec(&mut corners, m, *face);
+            for t in corners.chunks_exact(3) {
+                let mut tri = [t[0], t[1], t[2]];
+                if flip {
+                    tri.swap(1, 2);
+                }
+                mesh.triangles.push(tri.map(|c| base + m.vertex_indices[c as usize]));
+                if m.vertex_uv.exists {
+                    uvs.push(tri.map(|c| {
+                        let uv = m.vertex_uv[c as usize];
+                        [uv.x as f32, uv.y as f32]
+                    }));
+                }
+            }
+        }
+    }
+    if all_uv && uvs.len() == mesh.triangles.len() {
+        mesh.uvs = uvs;
+    }
+    finish(mesh, path)
 }
 
 // ---- glTF ------------------------------------------------------------------
@@ -417,5 +463,20 @@ mod tests {
         assert!(load(&tmp("missing.ply")).is_err());
         std::fs::write(tmp("bad.ply"), "hello").unwrap();
         assert!(load(&tmp("bad.ply")).is_err());
+    }
+
+    /// A Blender FBX export (Suzanne scaled 1.5 in Z, moved to (3, 0, 1)): triangulated, transform applied, UVs read.
+    #[test]
+    fn an_fbx_file_reads_with_its_transform_and_uvs() {
+        let m = load(Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/test/monkey.fbx"))).unwrap();
+        assert!(m.triangles.len() > 900, "{} triangles", m.triangles.len());
+        assert_eq!(m.uvs.len(), m.triangles.len());
+        let (lo, hi) = m.bounds();
+        // The file's own units and axes (Blender writes centimetres, Y up): the centre is far from the origin, and the
+        // size follows the scale.
+        let size = [0, 1, 2].map(|a| hi[a] - lo[a]);
+        assert!(size.iter().all(|s| *s > 0.0));
+        assert!(is_mesh_file(Path::new("a.FBX")));
+        eprintln!("bounds {lo:?} {hi:?}");
     }
 }

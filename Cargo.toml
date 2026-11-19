@@ -19,6 +19,7 @@ pollster = "1.0.2"
 naga = { version = "30.0.2", features = ["wgsl-in", "wgsl-out", "hlsl-out", "glsl-out"] }
 xatlas-rs-v2 = "0.1.4"
 mikktspace = "0.3.0"
+ufbx = "0.11.5"
 
 # Debug builds of egui/wgpu are many times slower; optimize dependencies but keep our own code
 # quick to compile and debuggable.

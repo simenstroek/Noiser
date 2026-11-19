@@ -540,7 +540,7 @@ impl crate::App {
                     self.mesh_ws.start_preview(g, d, q);
                 }
                 if ui.add_enabled(!running, egui::Button::new("Run on files…")).on_hover_text("Runs the graph once for each mesh file you pick: a Load Mesh node whose path is {batch} reads that file, and {name} in an output name becomes its name.").clicked() {
-                    if let Some(files) = rfd::FileDialog::new().add_filter("Mesh", &["obj", "ply", "stl", "gltf", "glb"]).pick_files() {
+                    if let Some(files) = rfd::FileDialog::new().add_filter("Mesh", &["obj", "ply", "stl", "gltf", "glb", "fbx"]).pick_files() {
                         let (d, q, g) = (self.rs.device.clone(), self.rs.queue.clone(), self.graph_for_run());
                         self.mesh_ws.start(g, d, q, files.into_iter().map(Some).collect());
                     }
