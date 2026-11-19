@@ -229,33 +229,53 @@ fn merge_small_charts(mesh: &RawMesh, charts: &[Vec<u32>], min_faces: usize) -> 
 
 /// The faces of `mesh` whose UV triangle has a texel centre strictly inside another face's (a fold-over or overlap),
 /// rasterized on a `res` by `res` grid.
-fn overlapping_faces(mesh: &UvMesh, res: usize) -> Vec<bool> {
+fn overlapping_faces(mesh: &UvMesh, res: usize, island: &[u32]) -> Vec<bool> {
     let n = mesh.triangles.len();
     let mut owner = vec![u32::MAX; res * res];
     let mut bad = vec![false; n];
     let size = res as f32;
-    for (f, tri) in mesh.triangles.iter().enumerate() {
+    let edge = |a: [f32; 2], b: [f32; 2], x: f32, y: f32| (b[0] - a[0]) * (y - a[1]) - (b[1] - a[1]) * (x - a[0]);
+    // `grow` texels beyond the triangle's edges count as covered too.
+    let cover = |tri: &[u32; 3], grow: f32, visit: &mut dyn FnMut(usize)| {
         let q = tri.map(|i| {
             let uv = mesh.uvs[i as usize];
             [uv[0] * size, uv[1] * size]
         });
-        let span = |c: usize| (q.iter().map(|p| p[c]).fold(f32::MAX, f32::min).floor().max(0.0) as usize, (q.iter().map(|p| p[c]).fold(f32::MIN, f32::max).ceil().max(0.0) as usize).min(res));
+        let span = |c: usize| ((q.iter().map(|p| p[c]).fold(f32::MAX, f32::min) - grow).floor().max(0.0) as usize, ((q.iter().map(|p| p[c]).fold(f32::MIN, f32::max) + grow).ceil().max(0.0) as usize).min(res));
         let ((x0, x1), (y0, y1)) = (span(0), span(1));
-        let edge = |a: [f32; 2], b: [f32; 2], x: f32, y: f32| (b[0] - a[0]) * (y - a[1]) - (b[1] - a[1]) * (x - a[0]);
+        let len = [0, 1, 2].map(|k| {
+            let (a, b) = (q[k], q[(k + 1) % 3]);
+            ((b[0] - a[0]).powi(2) + (b[1] - a[1]).powi(2)).sqrt().max(1e-6) * grow
+        });
         for y in y0..y1 {
             for x in x0..x1 {
                 let (cx, cy) = (x as f32 + 0.5, y as f32 + 0.5);
                 let w = [edge(q[0], q[1], cx, cy), edge(q[1], q[2], cx, cy), edge(q[2], q[0], cx, cy)];
-                if w.iter().all(|v| *v > 0.0) || w.iter().all(|v| *v < 0.0) {
-                    let cell = &mut owner[y * res + x];
-                    if *cell == u32::MAX {
-                        *cell = f as u32;
-                    } else {
-                        bad[f] = true;
-                        bad[*cell as usize] = true;
-                    }
+                if (0..3).all(|k| w[k] > -len[k]) || (0..3).all(|k| w[k] < len[k]) {
+                    visit(y * res + x);
                 }
             }
+        }
+    };
+    for (f, tri) in mesh.triangles.iter().enumerate() {
+        cover(tri, 0.0, &mut |cell| {
+            if owner[cell] == u32::MAX {
+                owner[cell] = f as u32;
+            } else {
+                bad[f] = true;
+                bad[owner[cell] as usize] = true;
+            }
+        });
+    }
+    // A face one texel from another island's face would bleed into it: flag those too.
+    for (f, tri) in mesh.triangles.iter().enumerate() {
+        let mut hit = false;
+        cover(tri, 1.0, &mut |cell| {
+            let o = owner[cell];
+            hit |= o != u32::MAX && island[o as usize] != island[f];
+        });
+        if hit {
+            bad[f] = true;
         }
     }
     bad
@@ -315,16 +335,20 @@ fn absorb_tiny_islands(mesh: &mut UvMesh, min_faces: usize, res: usize) -> usize
     ratios.sort_by(|a, b| a.total_cmp(b));
     let usual = ratios[ratios.len() / 2];
     struct Merge {
+        id: u32,
         faces: Vec<u32>,
         old_tris: Vec<[u32; 3]>,
         old_uvs: Vec<(u32, [f32; 2])>,
     }
     let mut merges: Vec<Merge> = Vec::new();
+    let (mut no_border, mut conflicts, mut density) = (0, 0, 0);
+    // Faces that already moved into another island: merges never chain, so each can be undone on its own.
+    let mut absorbed = vec![false; n];
     let mut small: Vec<(usize, u32)> = members.iter().filter(|(_, f)| f.len() < min_faces).map(|(&i, f)| (f.len(), i)).collect();
     small.sort_unstable();
     for (_, id) in small {
         let Some(faces) = members.get(&id).cloned() else { continue };
-        if faces.len() >= min_faces {
+        if faces.len() >= min_faces || faces.iter().any(|&f| absorbed[f as usize]) {
             continue;
         }
         // The neighbour with the longest shared border, and for each border vertex its twin in that neighbour.
@@ -334,7 +358,7 @@ fn absorb_tiny_islands(mesh: &mut UvMesh, min_faces: usize, res: usize) -> usize
             for k in 0..3 {
                 let (a, b) = (mesh.source[t[k] as usize], mesh.source[t[(k + 1) % 3] as usize]);
                 for &(g, gk) in &edges[&(a.min(b), a.max(b))] {
-                    if island[g as usize] != id {
+                    if island[g as usize] != id && !absorbed[g as usize] {
                         let gt = mesh.triangles[g as usize];
                         // The edge runs the other way round in g: its vertex with source a is the one that ends it.
                         let (ga, gb) = (gt[gk], gt[(gk + 1) % 3]);
@@ -346,7 +370,10 @@ fn absorb_tiny_islands(mesh: &mut UvMesh, min_faces: usize, res: usize) -> usize
                 }
             }
         }
-        let Some((&target, pairs)) = border.iter().max_by_key(|(k, v)| (v.len(), std::cmp::Reverse(**k))) else { continue };
+        let Some((&target, pairs)) = border.iter().max_by_key(|(k, v)| (v.len(), std::cmp::Reverse(**k))) else {
+            no_border += 1;
+            continue;
+        };
         let mut twin: HashMap<u32, u32> = HashMap::new();
         let mut conflict = false;
         for &(mine, theirs) in pairs {
@@ -355,52 +382,117 @@ fn absorb_tiny_islands(mesh: &mut UvMesh, min_faces: usize, res: usize) -> usize
             }
         }
         if conflict {
+            conflicts += 1;
             continue;
         }
         // The inner vertices: those of this island that have no twin.
         let mut inner: Vec<u32> = faces.iter().flat_map(|&f| mesh.triangles[f as usize]).filter(|v| !twin.contains_key(v)).collect();
         inner.sort_unstable();
         inner.dedup();
-        let mut merge = Merge { faces: faces.clone(), old_tris: faces.iter().map(|&f| mesh.triangles[f as usize]).collect(), old_uvs: inner.iter().map(|&v| (v, mesh.uvs[v as usize])).collect() };
-        // Start the inner vertices at the mean of the twins, then relax them towards their neighbours.
-        let mut ring: HashMap<u32, Vec<u32>> = HashMap::new();
+        let mut merge = Merge { id, faces: faces.clone(), old_tris: faces.iter().map(|&f| mesh.triangles[f as usize]).collect(), old_uvs: inner.iter().map(|&v| (v, mesh.uvs[v as usize])).collect() };
+        // The winding of the neighbour island.
+        let reference = members[&target].iter().map(|&g| uv_area2(mesh, mesh.triangles[g as usize])).find(|a| a.abs() > 1e-12).unwrap_or(1.0).signum();
+        // Border vertices: on an edge that another island (or nothing) shares. With a twin on every one, the island is a
+        // patch inside the neighbour and its inner vertices are spread between the twins; otherwise the island hangs
+        // off the neighbour's border and is unfolded from it, triangle by triangle, with its own shape.
+        let mut border_verts = std::collections::HashSet::new();
         for &f in &faces {
             let t = mesh.triangles[f as usize];
             for k in 0..3 {
-                ring.entry(t[k]).or_default().extend([t[(k + 1) % 3], t[(k + 2) % 3]]);
+                let (a, b) = (mesh.source[t[k] as usize], mesh.source[t[(k + 1) % 3] as usize]);
+                let list = &edges[&(a.min(b), a.max(b))];
+                if list.len() < 2 || list.iter().any(|&(g, _)| island[g as usize] != id) {
+                    border_verts.insert(t[k]);
+                    border_verts.insert(t[(k + 1) % 3]);
+                }
             }
         }
-        let anchor = |v: u32, mesh: &UvMesh| twin.get(&v).map_or(mesh.uvs[v as usize], |&t| mesh.uvs[t as usize]);
+        let closed = border_verts.iter().all(|v| twin.contains_key(v));
         let mean: [f32; 2] = {
             let all: Vec<[f32; 2]> = twin.values().map(|&t| mesh.uvs[t as usize]).collect();
             [all.iter().map(|p| p[0]).sum::<f32>() / all.len() as f32, all.iter().map(|p| p[1]).sum::<f32>() / all.len() as f32]
         };
-        for &v in &inner {
+        let mut unplaced: Vec<u32> = inner.clone();
+        if !closed {
+            let mut placed: std::collections::HashSet<u32> = std::collections::HashSet::new();
+            loop {
+                let mut progress = false;
+                for &f in &faces {
+                    let t = merge.old_tris[faces.iter().position(|&x| x == f).unwrap()];
+                    let at = |v: u32, mesh: &UvMesh| twin.get(&v).map(|&w| mesh.uvs[w as usize]).or_else(|| placed.contains(&v).then(|| mesh.uvs[v as usize]));
+                    let known: Vec<bool> = t.iter().map(|&v| at(v, mesh).is_some()).collect();
+                    if known.iter().filter(|k| **k).count() != 2 {
+                        continue;
+                    }
+                    let r = known.iter().position(|k| !k).unwrap();
+                    let (pi, qi) = ((r + 1) % 3, (r + 2) % 3);
+                    let (pu, qu) = (at(t[pi], mesh).unwrap(), at(t[qi], mesh).unwrap());
+                    let (p3, q3, r3) = (mesh.positions[t[pi] as usize], mesh.positions[t[qi] as usize], mesh.positions[t[r] as usize]);
+                    let d3 = [q3[0] - p3[0], q3[1] - p3[1], q3[2] - p3[2]];
+                    let l2 = d3[0] * d3[0] + d3[1] * d3[1] + d3[2] * d3[2];
+                    if l2 < 1e-20 {
+                        continue;
+                    }
+                    let rp = [r3[0] - p3[0], r3[1] - p3[1], r3[2] - p3[2]];
+                    let a = (rp[0] * d3[0] + rp[1] * d3[1] + rp[2] * d3[2]) / l2;
+                    let foot = [rp[0] - a * d3[0], rp[1] - a * d3[1], rp[2] - a * d3[2]];
+                    let h = (foot[0] * foot[0] + foot[1] * foot[1] + foot[2] * foot[2]).sqrt() / l2.sqrt();
+                    let duv = [qu[0] - pu[0], qu[1] - pu[1]];
+                    let place = |sign: f32| [pu[0] + a * duv[0] - sign * h * duv[1], pu[1] + a * duv[1] + sign * h * duv[0]];
+                    let mut uvs3 = [[0.0f32; 2]; 3];
+                    uvs3[pi] = pu;
+                    uvs3[qi] = qu;
+                    uvs3[r] = place(1.0);
+                    let area = (uvs3[1][0] - uvs3[0][0]) * (uvs3[2][1] - uvs3[0][1]) - (uvs3[2][0] - uvs3[0][0]) * (uvs3[1][1] - uvs3[0][1]);
+                    mesh.uvs[t[r] as usize] = if area * reference > 0.0 { uvs3[r] } else { place(-1.0) };
+                    placed.insert(t[r]);
+                    progress = true;
+                }
+                if !progress {
+                    break;
+                }
+            }
+            unplaced.retain(|v| !placed.contains(v));
+        }
+        for &v in &unplaced {
             mesh.uvs[v as usize] = mean;
         }
-        for _ in 0..60 {
-            for &v in &inner {
-                let r = &ring[&v];
-                let (mut sx, mut sy) = (0.0, 0.0);
-                for &w in r {
-                    let p = anchor(w, mesh);
-                    sx += p[0];
-                    sy += p[1];
+        if closed || !unplaced.is_empty() {
+            let mut ring: HashMap<u32, Vec<u32>> = HashMap::new();
+            for &f in &faces {
+                let t = mesh.triangles[f as usize];
+                for k in 0..3 {
+                    ring.entry(t[k]).or_default().extend([t[(k + 1) % 3], t[(k + 2) % 3]]);
                 }
-                mesh.uvs[v as usize] = [sx / r.len() as f32, sy / r.len() as f32];
+            }
+            for _ in 0..60 {
+                for &v in &unplaced {
+                    let r = &ring[&v];
+                    let (mut sx, mut sy) = (0.0, 0.0);
+                    for &w in r {
+                        let p = match twin.get(&w) {
+                            Some(&t) => mesh.uvs[t as usize],
+                            None => mesh.uvs[w as usize],
+                        };
+                        sx += p[0];
+                        sy += p[1];
+                    }
+                    mesh.uvs[v as usize] = [sx / r.len() as f32, sy / r.len() as f32];
+                }
             }
         }
         for (k, &f) in faces.iter().enumerate() {
             mesh.triangles[f as usize] = merge.old_tris[k].map(|v| twin.get(&v).copied().unwrap_or(v));
         }
         // The same winding as the neighbour, and no collapsed triangles.
-        let reference = members[&target].iter().map(|&g| uv_area2(mesh, mesh.triangles[g as usize])).find(|a| a.abs() > 1e-12).unwrap_or(1.0).signum();
         let ok = faces.iter().all(|&f| {
             let a = uv_area2(mesh, mesh.triangles[f as usize]);
             let ratio = a.abs() / area3(mesh, mesh.triangles[f as usize]).max(1e-20);
-            a * reference > 1e-12 && ratio > usual / 6.0 && ratio < usual * 6.0
+            let inside = mesh.triangles[f as usize].iter().all(|&v| mesh.uvs[v as usize].iter().all(|c| (0.0..=1.0).contains(c)));
+            inside && a * reference > 1e-12 && ratio > usual / 6.0 && ratio < usual * 6.0
         });
         if !ok {
+            density += 1;
             for (k, &f) in faces.iter().enumerate() {
                 mesh.triangles[f as usize] = merge.old_tris[k];
             }
@@ -411,16 +503,18 @@ fn absorb_tiny_islands(mesh: &mut UvMesh, min_faces: usize, res: usize) -> usize
         }
         for &f in &faces {
             island[f as usize] = target;
+            absorbed[f as usize] = true;
         }
         let moved = members.remove(&id).unwrap();
         members.get_mut(&target).unwrap().extend(moved);
         merge.faces = faces;
         merges.push(merge);
     }
+    let tried = merges.len();
     // Undo the merges that landed on other charts.
     let mut undone = vec![false; merges.len()];
     loop {
-        let bad = overlapping_faces(mesh, res);
+        let bad = overlapping_faces(mesh, res, &island);
         let mut any = false;
         for (i, m) in merges.iter().enumerate() {
             if !undone[i] && m.faces.iter().any(|&f| bad[f as usize]) {
@@ -429,6 +523,9 @@ fn absorb_tiny_islands(mesh: &mut UvMesh, min_faces: usize, res: usize) -> usize
                 }
                 for &(v, uv) in &m.old_uvs {
                     mesh.uvs[v as usize] = uv;
+                }
+                for &f in &m.faces {
+                    island[f as usize] = m.id;
                 }
                 undone[i] = true;
                 any = true;
@@ -460,7 +557,11 @@ fn absorb_tiny_islands(mesh: &mut UvMesh, min_faces: usize, res: usize) -> usize
         *t = t.map(|v| map[v as usize]);
     }
     (mesh.positions, mesh.normals, mesh.uvs, mesh.source) = (positions, normals, uvs, source);
-    undone.iter().filter(|u| !**u).count()
+    let kept = undone.iter().filter(|u| !**u).count();
+    if std::env::var_os("NOISER_REMESH_DEBUG").is_some() {
+        eprintln!("tiny islands: no neighbour {no_border}, border conflict {conflicts}, density/winding {density}, undone for overlap {}, kept {kept}", tried - kept);
+    }
+    kept
 }
 
 /// UVs for `mesh`; every triangle of the input is a triangle of the output, with the same winding.
@@ -492,7 +593,7 @@ pub fn generate(mesh: &RawMesh, params: &UvParams) -> Result<UvMesh, String> {
         (uv, charts) = (u, c);
     }
     if params.absorb_tiny {
-        let absorbed = absorb_tiny_islands(&mut uv, min_faces, 1024);
+        let absorbed = absorb_tiny_islands(&mut uv, min_faces, params.resolution as usize);
         if std::env::var_os("NOISER_REMESH_DEBUG").is_some() {
             eprintln!("absorbed {absorbed} tiny islands");
         }
@@ -521,6 +622,6 @@ mod tests {
         eprintln!("{r}");
         assert!(r.overlap_fraction < 1e-4, "{r}");
         assert!(r.coverage > 0.5, "{r}");
-        assert!(uv.uvs.iter().all(|t| (0.0..=1.0).contains(&t[0]) && (0.0..=1.0).contains(&t[1])), "UVs leave the 0 to 1 square");
+        assert!(uv.uvs.iter().all(|t| (0.0..=1.0).contains(&t[0]) && (0.0..=1.0).contains(&t[1])), "UVs leave the 0 to 1 square: {:?}", uv.uvs.iter().filter(|t| !(0.0..=1.0).contains(&t[0]) || !(0.0..=1.0).contains(&t[1])).take(3).collect::<Vec<_>>());
     }
 }
