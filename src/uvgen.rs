@@ -417,8 +417,8 @@ fn absorb_tiny_islands(mesh: &mut UvMesh, min_faces: usize, res: usize) -> usize
             let mut placed: std::collections::HashSet<u32> = std::collections::HashSet::new();
             loop {
                 let mut progress = false;
-                for &f in &faces {
-                    let t = merge.old_tris[faces.iter().position(|&x| x == f).unwrap()];
+                for k in 0..faces.len() {
+                    let t = merge.old_tris[k];
                     let at = |v: u32, mesh: &UvMesh| twin.get(&v).map(|&w| mesh.uvs[w as usize]).or_else(|| placed.contains(&v).then(|| mesh.uvs[v as usize]));
                     let known: Vec<bool> = t.iter().map(|&v| at(v, mesh).is_some()).collect();
                     if known.iter().filter(|k| **k).count() != 2 {
@@ -595,7 +595,7 @@ pub fn generate(mesh: &RawMesh, params: &UvParams) -> Result<UvMesh, String> {
     if params.absorb_tiny {
         // Each round merges islands that did not absorb any in that round; the next one can then merge the grown ones.
         for round in 0..4 {
-            let absorbed = absorb_tiny_islands(&mut uv, min_faces, params.resolution as usize);
+            let absorbed = absorb_tiny_islands(&mut uv, min_faces, (params.resolution as usize).min(2048));
             if std::env::var_os("NOISER_REMESH_DEBUG").is_some() {
                 eprintln!("round {round}: absorbed {absorbed} tiny islands");
             }

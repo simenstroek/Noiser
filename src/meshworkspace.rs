@@ -69,7 +69,7 @@ impl Preview {
         let radius = (0..3).map(|a| hi[a] - lo[a]).fold(0.0, f32::max).max(1e-9) * 0.5;
         let positions = mesh.positions.iter().map(|p| [0, 1, 2].map(|a| (p[a] - centre[a]) / radius)).collect();
         let island = if mesh.uvs.len() == mesh.triangles.len() && !mesh.uvs.is_empty() { crate::uvtransfer::islands(&mesh) } else { Vec::new() };
-        Ok(Preview { positions, triangles: mesh.triangles, name: path.file_name().map_or(String::new(), |n| n.to_string_lossy().into_owned()), uvs: mesh.uvs, island })
+        Ok(Preview { positions, triangles: mesh.triangles, name: path.file_name().map_or(String::new(), |n| n.to_string_lossy().into_owned()), uvs: if island.is_empty() { Vec::new() } else { mesh.uvs }, island })
     }
 
     /// The UV layout: the 0 to 1 square with every triangle, filled by island.
