@@ -187,6 +187,8 @@ pub struct LoadedMesh {
 #[derive(Default)]
 pub struct MeshCache {
     meshes: BTreeMap<String, std::sync::Arc<LoadedMesh>>,
+    /// Keys of the meshes a batch run read from `{batch}`: dropped when the next file starts, so a long batch does not keep every mesh.
+    batch_keys: Vec<String>,
 }
 
 /// Set by the Mesh tab's Cancel button; a run stops before its next node. One run at a time, so one flag will do.
@@ -239,6 +241,9 @@ impl Runner<'_> {
         let (texture, view) = sdf.upload(self.device, self.queue);
         let (nlo, nhi) = mesh.bounds();
         let loaded = std::sync::Arc::new(LoadedMesh { _texture: texture, view, origin: sdf.origin, voxel: sdf.voxel, norm, lo: norm.to_object(nlo), hi: norm.to_object(nhi), raw });
+        if p.path == "{batch}" {
+            self.cache.batch_keys.push(key.clone());
+        }
         self.cache.meshes.insert(key, loaded.clone());
         Ok(loaded)
     }
@@ -327,6 +332,9 @@ impl Runner<'_> {
 
     /// Runs the operation nodes upstream of every output node and writes the files; returns the files written.
     pub fn run(&mut self, graph: &Graph) -> Result<Vec<PathBuf>, String> {
+        for key in std::mem::take(&mut self.cache.batch_keys) {
+            self.cache.meshes.remove(&key);
+        }
         let lowered = lowered_mesh(graph, &self.base)?;
         let outputs: Vec<NodeId> = graph.nodes.iter().filter(|(_, n)| matches!(n.kind, NodeKind::OutMesh(_) | NodeKind::OutImage(_)) && !n.muted).map(|(id, _)| *id).collect();
         if outputs.is_empty() {
