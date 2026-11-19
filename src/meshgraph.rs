@@ -227,6 +227,10 @@ impl Runner<'_> {
         (self.log)(&format!("loading {}", path.display()));
         let raw = crate::meshformats::load(&path)?;
         let (mesh, norm) = raw.normalized();
+        let topology = crate::meshquality::report(&crate::surface::RawMesh { positions: mesh.positions.clone(), normals: Vec::new(), triangles: mesh.triangles.clone() });
+        if !topology.watertight() {
+            (self.log)(&format!("  warning: this mesh is not closed ({} open edge(s), {} non-manifold): the inside of the field is unreliable near them, and thin open sheets give a thin shell", topology.boundary_edges, topology.non_manifold_edges));
+        }
         let sdf = crate::meshsdf::MeshSdf::build_with(&mesh, p.resolution, p.padding, &Default::default(), p.combine);
         let (texture, view) = sdf.upload(self.device, self.queue);
         let (nlo, nhi) = mesh.bounds();
