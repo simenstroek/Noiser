@@ -40,6 +40,13 @@ pub struct MeshWorkspace {
     pub show_uv: bool,
     /// The images the last run wrote, as thumbnails under the view.
     thumbnails: Vec<(String, egui::TextureHandle)>,
+    /// The map files behind the thumbnails, the one shown full size (and its texture), and that view's zoom and pan.
+    map_files: Vec<PathBuf>,
+    pub show_map: bool,
+    map_index: usize,
+    map_tex: Option<(usize, egui::TextureHandle)>,
+    map_zoom: f32,
+    map_pan: egui::Vec2,
     /// Redo the quick preview a moment after the graph (or the noise graph it uses) changes.
     pub auto_preview: bool,
     /// What the last preview was made from, and since when the graph has differed from it.
@@ -175,7 +182,7 @@ impl Default for MeshWorkspace {
         let mut editor = crate::editor::Editor::default();
         editor.mesh_mode = true;
         editor.frame_next = true;
-        MeshWorkspace { saved: graph.clone(), graph, editor, path: None, cache: Arc::new(Mutex::new(MeshCache::default())), job: None, log: Vec::new(), written: Vec::new(), seed: 0, autorun: false, preview: None, show_uv: false, thumbnails: Vec::new(), auto_preview: false, preview_key: 0, changed_since: None, history: crate::history::History::new(&Graph::default()), yaw: 0.6, pitch: 0.35, zoom: 1.0 }
+        MeshWorkspace { saved: graph.clone(), graph, editor, path: None, cache: Arc::new(Mutex::new(MeshCache::default())), job: None, log: Vec::new(), written: Vec::new(), seed: 0, autorun: false, preview: None, show_uv: false, thumbnails: Vec::new(), map_files: Vec::new(), show_map: false, map_index: 0, map_tex: None, map_zoom: 1.0, map_pan: egui::Vec2::ZERO, auto_preview: false, preview_key: 0, changed_since: None, history: crate::history::History::new(&Graph::default()), yaw: 0.6, pitch: 0.35, zoom: 1.0 }
     }
 }
 
@@ -354,6 +361,8 @@ impl MeshWorkspace {
         self.log.clear();
         self.written.clear();
         self.thumbnails.clear();
+        self.map_files.clear();
+        self.map_tex = None;
         self.job = Some(RunJob { progress, log, done: rx });
     }
 
@@ -450,6 +459,9 @@ impl crate::App {
                 Ok(files) => {
                     self.status = format!("Mesh graph: {} file(s) written", files.len());
                     self.mesh_ws.preview = files.iter().find(|f| f.extension().is_some_and(|e| e == "obj" || e == "ply" || e == "glb")).and_then(|f| Preview::load(f).ok());
+                    self.mesh_ws.map_files = files.iter().filter(|f| f.extension().is_some_and(|e| e == "png")).take(8).cloned().collect();
+                    self.mesh_ws.map_tex = None;
+                    self.mesh_ws.map_index = 0;
                     self.mesh_ws.thumbnails = files
                         .iter()
                         .filter(|f| f.extension().is_some_and(|e| e == "png"))
@@ -613,14 +625,26 @@ impl crate::App {
             let rect = ui.available_rect_before_wrap();
             let resp = ui.interact(rect, ui.scope_id().with("mesh preview"), egui::Sense::click_and_drag());
             let d = resp.drag_delta();
-            self.mesh_ws.yaw -= d.x * 0.01;
-            self.mesh_ws.pitch = (self.mesh_ws.pitch + d.y * 0.01).clamp(-1.5, 1.5);
-            if resp.hovered() {
-                let scroll = ui.input(|i| i.smooth_scroll_delta.y);
-                self.mesh_ws.zoom = (self.mesh_ws.zoom * (1.0 + scroll * 0.002)).clamp(0.2, 8.0);
-            }
-            if resp.double_clicked() {
-                (self.mesh_ws.yaw, self.mesh_ws.pitch, self.mesh_ws.zoom) = (0.6, 0.35, 1.0);
+            let map_view = self.mesh_ws.show_map && !self.mesh_ws.map_files.is_empty();
+            if map_view {
+                self.mesh_ws.map_pan += d;
+                if resp.hovered() {
+                    let scroll = ui.input(|i| i.smooth_scroll_delta.y);
+                    self.mesh_ws.map_zoom = (self.mesh_ws.map_zoom * (1.0 + scroll * 0.002)).clamp(0.1, 32.0);
+                }
+                if resp.double_clicked() {
+                    (self.mesh_ws.map_zoom, self.mesh_ws.map_pan) = (1.0, egui::Vec2::ZERO);
+                }
+            } else {
+                self.mesh_ws.yaw -= d.x * 0.01;
+                self.mesh_ws.pitch = (self.mesh_ws.pitch + d.y * 0.01).clamp(-1.5, 1.5);
+                if resp.hovered() {
+                    let scroll = ui.input(|i| i.smooth_scroll_delta.y);
+                    self.mesh_ws.zoom = (self.mesh_ws.zoom * (1.0 + scroll * 0.002)).clamp(0.2, 8.0);
+                }
+                if resp.double_clicked() {
+                    (self.mesh_ws.yaw, self.mesh_ws.pitch, self.mesh_ws.zoom) = (0.6, 0.35, 1.0);
+                }
             }
             let painter = ui.painter_at(rect);
             painter.rect_filled(rect, 0.0, egui::Color32::from_gray(28));
@@ -633,11 +657,62 @@ impl crate::App {
                 for (name, tex) in &self.mesh_ws.thumbnails {
                     let img = egui::Rect::from_min_size(egui::pos2(x, rect.bottom() - strip + 4.0), egui::vec2(96.0, 96.0));
                     painter.image(tex.id(), img, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), egui::Color32::WHITE);
+                    let hit = ui.interact(img, ui.scope_id().with(("map thumbnail", x as i32)), egui::Sense::click()).on_hover_text("Click to look at this map full size");
+                    let k = ((x - rect.left() - 8.0) / 104.0).round() as usize;
+                    if hit.clicked() {
+                        self.mesh_ws.map_index = k.min(self.mesh_ws.map_files.len().saturating_sub(1));
+                        self.mesh_ws.show_map = true;
+                        self.mesh_ws.show_uv = false;
+                    }
+                    if map_view && k == self.mesh_ws.map_index {
+                        painter.rect_stroke(img.expand(2.0), 0.0, egui::Stroke::new(1.5, egui::Color32::from_rgb(120, 190, 255)), egui::StrokeKind::Outside);
+                    }
                     painter.text(img.left_bottom() + egui::vec2(0.0, 2.0), egui::Align2::LEFT_TOP, name, egui::FontId::proportional(10.0), egui::Color32::from_gray(170));
                     x += 104.0;
                 }
             }
+            // The selected map at full size, loaded on first use.
+            if map_view {
+                let i = self.mesh_ws.map_index.min(self.mesh_ws.map_files.len() - 1);
+                if self.mesh_ws.map_tex.as_ref().map(|(k, _)| *k) != Some(i) {
+                    let path = self.mesh_ws.map_files[i].clone();
+                    self.mesh_ws.map_tex = image::open(&path).ok().map(|img| {
+                        let img = if img.width().max(img.height()) > 4096 { img.thumbnail(4096, 4096) } else { img }.to_rgba8();
+                        let size = [img.width() as usize, img.height() as usize];
+                        (i, ctx.load_texture(path.to_string_lossy(), egui::ColorImage::from_rgba_unmultiplied(size, img.as_raw()), egui::TextureOptions::NEAREST))
+                    });
+                }
+                if let Some((_, tex)) = &self.mesh_ws.map_tex {
+                    let side = (view_rect.width().min(view_rect.height()) - 16.0).max(50.0) * self.mesh_ws.map_zoom;
+                    let img = egui::Rect::from_center_size(view_rect.center() + self.mesh_ws.map_pan, egui::vec2(side, side));
+                    let clipped = ui.painter_at(view_rect);
+                    clipped.image(tex.id(), img, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), egui::Color32::WHITE);
+                    let name = self.mesh_ws.map_files[i].file_name().map_or(String::new(), |n| n.to_string_lossy().into_owned());
+                    painter.text(rect.left_top() + egui::vec2(8.0, 6.0), egui::Align2::LEFT_TOP, format!("{name} ({}x{}). Zoom {:.0}%. Drag to pan, scroll to zoom, double-click to fit.", tex.size()[0], tex.size()[1], self.mesh_ws.map_zoom * 100.0), egui::FontId::proportional(12.0), egui::Color32::from_gray(160));
+                } else {
+                    painter.text(view_rect.center(), egui::Align2::CENTER_CENTER, "Could not read this map", egui::FontId::proportional(14.0), egui::Color32::from_gray(150));
+                }
+            }
+            let has_maps = !self.mesh_ws.map_files.is_empty();
+            let has_uv = self.mesh_ws.preview.as_ref().is_some_and(|p| !p.uvs.is_empty());
+            if has_maps || has_uv {
+                let corner = egui::Rect::from_min_size(egui::pos2(rect.right() - 260.0, rect.top() + 4.0), egui::vec2(256.0, 22.0));
+                ui.scope_builder(egui::UiBuilder::new().max_rect(corner), |ui| {
+                    ui.horizontal(|ui| {
+                        let mut mode = if map_view { 2 } else if self.mesh_ws.show_uv { 1 } else { 0 };
+                        ui.selectable_value(&mut mode, 0, "Shaded");
+                        if has_uv {
+                            ui.selectable_value(&mut mode, 1, "UV layout");
+                        }
+                        if has_maps {
+                            ui.selectable_value(&mut mode, 2, "Maps");
+                        }
+                        (self.mesh_ws.show_uv, self.mesh_ws.show_map) = (mode == 1, mode == 2);
+                    });
+                });
+            }
             match &self.mesh_ws.preview {
+                _ if map_view => {}
                 Some(p) => {
                     let uv = self.mesh_ws.show_uv && !p.uvs.is_empty();
                     if uv {
@@ -647,15 +722,6 @@ impl crate::App {
                     }
                     let hint = if uv { "UV layout" } else { "Drag to turn, scroll to zoom, double-click to reset." };
                     painter.text(rect.left_top() + egui::vec2(8.0, 6.0), egui::Align2::LEFT_TOP, format!("{}: {} triangles. {hint}", p.name, p.triangles.len()), egui::FontId::proportional(12.0), egui::Color32::from_gray(160));
-                    if !p.uvs.is_empty() {
-                        let corner = egui::Rect::from_min_size(egui::pos2(rect.right() - 190.0, rect.top() + 4.0), egui::vec2(186.0, 22.0));
-                        ui.scope_builder(egui::UiBuilder::new().max_rect(corner), |ui| {
-                            ui.horizontal(|ui| {
-                                ui.selectable_value(&mut self.mesh_ws.show_uv, false, "Shaded");
-                                ui.selectable_value(&mut self.mesh_ws.show_uv, true, "UV layout");
-                            });
-                        });
-                    }
                 }
                 None => _ = painter.text(rect.center(), egui::Align2::CENTER_CENTER, "Run the graph to see its mesh here", egui::FontId::proportional(14.0), egui::Color32::from_gray(120)),
             }
