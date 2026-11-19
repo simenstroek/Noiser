@@ -427,7 +427,7 @@ impl crate::App {
                 }
                 Ok(files) => {
                     self.status = format!("Mesh graph: {} file(s) written", files.len());
-                    self.mesh_ws.preview = files.iter().find(|f| f.extension().is_some_and(|e| e == "obj" || e == "ply")).and_then(|f| Preview::load(f).ok());
+                    self.mesh_ws.preview = files.iter().find(|f| f.extension().is_some_and(|e| e == "obj" || e == "ply" || e == "glb")).and_then(|f| Preview::load(f).ok());
                     self.mesh_ws.thumbnails = files
                         .iter()
                         .filter(|f| f.extension().is_some_and(|e| e == "png"))
