@@ -610,7 +610,7 @@ mod tests {
     #[test]
     fn a_smooth_sphere_bakes_a_flat_normal_map_and_open_occlusion() {
         let mesh = sphere_uv(3);
-        let settings = Settings { size: 128, padding: 4, channels: vec![Channel::Normal, Channel::Occlusion, Channel::Position, Channel::Thickness, Channel::Curvature], custom: Vec::new(), green_up: false };
+        let settings = Settings { size: 128, padding: 4, channels: vec![Channel::Normal, Channel::Occlusion, Channel::Position, Channel::Thickness, Channel::Curvature], custom: Vec::new(), green_up: false, samples: 1 };
         let images = bake(&mesh, &mut Bumpy(0.0), &mut [], &settings, &|_, _| {}).unwrap();
         let get = |c: Channel| images.iter().find(|i| i.channel == Some(c)).unwrap();
         // Normal map: tangent-space z (blue) near 1 on a sphere sampled by a fine low-poly one.
@@ -643,7 +643,7 @@ mod tests {
     #[test]
     fn bumps_show_up_in_the_normal_map_and_the_height() {
         let mesh = sphere_uv(2);
-        let settings = Settings { size: 128, padding: 4, channels: vec![Channel::Normal, Channel::Depth], custom: Vec::new(), green_up: false };
+        let settings = Settings { size: 128, padding: 4, channels: vec![Channel::Normal, Channel::Depth], custom: Vec::new(), green_up: false, samples: 1 };
         let images = bake(&mesh, &mut Bumpy(0.05), &mut [], &settings, &|_, _| {}).unwrap();
         let n = images.iter().find(|i| i.channel == Some(Channel::Normal)).unwrap();
         let blues: Vec<f32> = n.data.chunks(3).map(|p| p[2]).filter(|b| *b > 0.0).collect();
