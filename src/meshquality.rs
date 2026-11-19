@@ -35,6 +35,8 @@ pub struct Report {
     pub p99_error: Option<f32>,
     /// Triangles whose normal points against the field's gradient at their centre (inside out), if measured.
     pub inverted: Option<usize>,
+    /// Triangles that cross another triangle they do not share a vertex with (set by `with_intersections`).
+    pub self_intersecting: Option<usize>,
 }
 
 impl Report {
@@ -54,6 +56,9 @@ impl fmt::Display for Report {
         }
         if let (Some(mean), Some(max)) = (self.mean_error, self.max_error) {
             write!(f, "\ndistance from the true surface: mean {mean:.5}, 99th percentile {:.5}, max {max:.5}", self.p99_error.unwrap_or(max))?;
+        }
+        if let Some(n) = self.self_intersecting {
+            write!(f, "\n{n} triangle(s) cross another triangle (self-intersections)")?;
         }
         if let Some(n) = self.inverted {
             write!(f, "\n{n} triangle(s) face against the field")?;
@@ -154,6 +159,112 @@ pub fn report(mesh: &RawMesh) -> Report {
     r
 }
 
+/// Whether segment (a, b) passes through the interior of triangle t (Moller-Trumbore; a margin keeps touching out).
+fn pierces(a: V3, b: V3, t: [V3; 3]) -> bool {
+    let d = sub(b, a);
+    let (e1, e2) = (sub(t[1], t[0]), sub(t[2], t[0]));
+    let h = cross(d, e2);
+    let det = dot(e1, h);
+    if det.abs() < 1e-20 {
+        return false;
+    }
+    let f = 1.0 / det;
+    let s = sub(a, t[0]);
+    let u = f * dot(s, h);
+    let q = cross(s, e1);
+    let v = f * dot(d, q);
+    let w = f * dot(e2, q);
+    const M: f32 = 1e-4;
+    u > M && v > M && u + v < 1.0 - M && w > M && w < 1.0 - M
+}
+
+/// Whether two triangles (corner positions and vertex ids) pass through each other: an edge of one pierces the other,
+/// not counting edges that touch a vertex the two share. Triangles that share an edge never count.
+pub fn triangles_cross(pa: [V3; 3], ia: [u32; 3], pb: [V3; 3], ib: [u32; 3]) -> bool {
+    let shared: Vec<u32> = ia.iter().copied().filter(|v| ib.contains(v)).collect();
+    if shared.len() >= 2 {
+        return false;
+    }
+    for k in 0..3 {
+        let (u, v) = (ia[k], ia[(k + 1) % 3]);
+        if !shared.contains(&u) && !shared.contains(&v) && pierces(pa[k], pa[(k + 1) % 3], pb) {
+            return true;
+        }
+        let (u, v) = (ib[k], ib[(k + 1) % 3]);
+        if !shared.contains(&u) && !shared.contains(&v) && pierces(pb[k], pb[(k + 1) % 3], pa) {
+            return true;
+        }
+    }
+    false
+}
+
+/// The triangles that pass through another triangle: some edge of one pierces the other, ignoring edges that touch a
+/// vertex the two share (those meet at the shared vertex). Edge-sharing neighbours folded over each other are not
+/// found here; the folded-edge count reports those.
+pub fn self_intersecting_triangles(mesh: &RawMesh) -> Vec<bool> {
+    let n = mesh.triangles.len();
+    let mut bad = vec![false; n];
+    if n < 2 {
+        return bad;
+    }
+    let tri = |t: usize| mesh.triangles[t].map(|i| mesh.positions[i as usize]);
+    // A uniform grid over the triangles' boxes, cells about the average triangle size.
+    let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
+    for p in &mesh.positions {
+        for a in 0..3 {
+            lo[a] = lo[a].min(p[a]);
+            hi[a] = hi[a].max(p[a]);
+        }
+    }
+    let mean_edge = {
+        let mut total = 0.0;
+        for t in 0..n {
+            let p = tri(t);
+            total += len(sub(p[1], p[0])) + len(sub(p[2], p[1])) + len(sub(p[0], p[2]));
+        }
+        (total / (3.0 * n as f32)).max(1e-9)
+    };
+    let cell = mean_edge * 2.0;
+    let dims: [usize; 3] = [0, 1, 2].map(|a| (((hi[a] - lo[a]) / cell).ceil() as usize).clamp(1, 256));
+    let cell_of = |p: V3| -> [usize; 3] { [0, 1, 2].map(|a| (((p[a] - lo[a]) / cell) as usize).min(dims[a] - 1)) };
+    let mut grid: std::collections::HashMap<usize, Vec<u32>> = std::collections::HashMap::new();
+    for t in 0..n {
+        let p = tri(t);
+        let (mut a, mut b) = (cell_of(p[0]), cell_of(p[0]));
+        for q in &p[1..] {
+            let c = cell_of(*q);
+            for k in 0..3 {
+                a[k] = a[k].min(c[k]);
+                b[k] = b[k].max(c[k]);
+            }
+        }
+        for x in a[0]..=b[0] {
+            for y in a[1]..=b[1] {
+                for z in a[2]..=b[2] {
+                    grid.entry((x * dims[1] + y) * dims[2] + z).or_default().push(t as u32);
+                }
+            }
+        }
+    }
+    let mut seen: std::collections::HashSet<(u32, u32)> = std::collections::HashSet::new();
+    for list in grid.values() {
+        for i in 0..list.len() {
+            for j in i + 1..list.len() {
+                let (ta, tb) = (list[i], list[j]);
+                if bad[ta as usize] && bad[tb as usize] || !seen.insert((ta, tb)) {
+                    continue;
+                }
+                let (ia, ib) = (mesh.triangles[ta as usize], mesh.triangles[tb as usize]);
+                if triangles_cross(tri(ta as usize), ia, tri(tb as usize), ib) {
+                    bad[ta as usize] = true;
+                    bad[tb as usize] = true;
+                }
+            }
+        }
+    }
+    bad
+}
+
 /// The triangles that are slivers (quality under 0.1) or folded back over a neighbour (normals more than 125 degrees
 /// apart): the ones that cause trouble for UV charting and baking.
 pub fn bad_faces(mesh: &RawMesh) -> Vec<bool> {
@@ -192,6 +303,11 @@ impl Report {
     /// (distance, gradient) for each; the distance to the surface is estimated as |d| / |gradient|, at every
     /// vertex and at the centre of every triangle (which is where a coarse mesh deviates most).
     #[allow(dead_code)] // the remesher will call it; tests do for now
+    pub fn with_intersections(mut self, mesh: &RawMesh) -> Report {
+        self.self_intersecting = Some(self_intersecting_triangles(mesh).iter().filter(|b| **b).count());
+        self
+    }
+
     pub fn with_surface_error(mut self, mesh: &RawMesh, sample: &mut dyn FnMut(&[V3]) -> Vec<[f32; 4]>) -> Report {
         let mut points: Vec<V3> = mesh.positions.clone();
         points.extend(mesh.triangles.iter().map(|t| {

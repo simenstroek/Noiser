@@ -413,7 +413,7 @@ impl Runner<'_> {
                 mesh.recompute_normals();
                 // The numbers that say whether the remesh is any good: triangle shape, folds, distance from the field's surface.
                 let diagonal = (0..3).map(|a| (field.hi[a] - field.lo[a]).powi(2)).sum::<f32>().sqrt();
-                let report = crate::meshquality::report(&mesh).with_surface_error(&mesh, &mut |pts| field.ev.points(d, pts, 0.0005 * diagonal));
+                let report = crate::meshquality::report(&mesh).with_surface_error(&mesh, &mut |pts| field.ev.points(d, pts, 0.0005 * diagonal)).with_intersections(&mesh);
                 for line in report.to_string().lines() {
                     (self.log)(&format!("  {line}"));
                 }

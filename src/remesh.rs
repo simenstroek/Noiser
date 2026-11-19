@@ -81,12 +81,21 @@ struct Mesh {
     tris: Vec<[u32; 3]>,
     alive: Vec<bool>,
     live: usize,
+    /// Triangles bucketed by the cells their boxes cover, to find what a moved or new triangle might cross; absent
+    /// until `build_grid`. `tri_cells` is the cell box each triangle was entered with.
+    grid: Option<Grid>,
+    tri_cells: Vec<[i32; 6]>,
+}
+
+struct Grid {
+    cell: f32,
+    cells: std::collections::HashMap<(i32, i32, i32), Vec<u32>>,
 }
 
 impl Mesh {
     fn new(raw: RawMesh) -> Mesh {
         let n = raw.positions.len();
-        let mut m = Mesh { nrm: vec![[0.0; 3]; n], size: vec![1.0; n], curv: vec![0.0; n], vt: vec![Vec::new(); n], pos: raw.positions, tris: Vec::new(), alive: Vec::new(), live: 0 };
+        let mut m = Mesh { nrm: vec![[0.0; 3]; n], size: vec![1.0; n], curv: vec![0.0; n], vt: vec![Vec::new(); n], pos: raw.positions, tris: Vec::new(), alive: Vec::new(), live: 0, grid: None, tri_cells: Vec::new() };
         for t in raw.triangles {
             if t[0] != t[1] && t[1] != t[2] && t[0] != t[2] {
                 m.add_tri(t);
@@ -103,14 +112,119 @@ impl Mesh {
         for v in t {
             self.vt[v as usize].push(id);
         }
+        self.tri_cells.push([0; 6]);
+        self.grid_insert(id);
     }
 
     fn kill_tri(&mut self, id: u32) {
+        self.grid_remove(id);
         self.alive[id as usize] = false;
         self.live -= 1;
         for v in self.tris[id as usize] {
             self.vt[v as usize].retain(|&x| x != id);
         }
+    }
+
+    /// Starts keeping the grid, with cells of `cell` units, from the live triangles.
+    fn build_grid(&mut self, cell: f32) {
+        self.grid = Some(Grid { cell: cell.max(1e-9), cells: std::collections::HashMap::new() });
+        for t in 0..self.tris.len() as u32 {
+            if self.alive[t as usize] {
+                self.grid_insert(t);
+            }
+        }
+    }
+
+    fn cell_box(&self, id: u32, cell: f32) -> [i32; 6] {
+        let p = self.tris[id as usize].map(|v| self.pos[v as usize]);
+        let mut b = [i32::MAX, i32::MAX, i32::MAX, i32::MIN, i32::MIN, i32::MIN];
+        for q in &p {
+            for a in 0..3 {
+                let c = (q[a] / cell).floor() as i32;
+                b[a] = b[a].min(c);
+                b[a + 3] = b[a + 3].max(c);
+            }
+        }
+        b
+    }
+
+    fn grid_insert(&mut self, id: u32) {
+        let Some(cell) = self.grid.as_ref().map(|g| g.cell) else { return };
+        let b = self.cell_box(id, cell);
+        self.tri_cells[id as usize] = b;
+        let g = self.grid.as_mut().unwrap();
+        for x in b[0]..=b[3] {
+            for y in b[1]..=b[4] {
+                for z in b[2]..=b[5] {
+                    g.cells.entry((x, y, z)).or_default().push(id);
+                }
+            }
+        }
+    }
+
+    fn grid_remove(&mut self, id: u32) {
+        let b = self.tri_cells[id as usize];
+        let Some(g) = self.grid.as_mut() else { return };
+        for x in b[0]..=b[3] {
+            for y in b[1]..=b[4] {
+                for z in b[2]..=b[5] {
+                    if let Some(l) = g.cells.get_mut(&(x, y, z)) {
+                        l.retain(|&t| t != id);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Enters triangle `id` again after its vertices moved.
+    fn regrid(&mut self, id: u32) {
+        if self.grid.is_some() {
+            self.grid_remove(id);
+            self.grid_insert(id);
+        }
+    }
+
+    /// Whether triangle `id` passes through another live triangle (neighbours that only share its vertices do not count).
+    fn crosses(&self, id: u32) -> bool {
+        let Some(g) = self.grid.as_ref() else { return false };
+        let b = self.cell_box(id, g.cell);
+        let tri = self.tris[id as usize];
+        let pos = |t: [u32; 3]| t.map(|v| self.pos[v as usize]);
+        let mine = pos(tri);
+        let mut candidates: Vec<u32> = Vec::new();
+        for x in b[0]..=b[3] {
+            for y in b[1]..=b[4] {
+                for z in b[2]..=b[5] {
+                    if let Some(l) = g.cells.get(&(x, y, z)) {
+                        candidates.extend(l.iter().copied().filter(|&o| o != id));
+                    }
+                }
+            }
+        }
+        candidates.sort_unstable();
+        candidates.dedup();
+        let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
+        for q in &mine {
+            for a in 0..3 {
+                lo[a] = lo[a].min(q[a]);
+                hi[a] = hi[a].max(q[a]);
+            }
+        }
+        for o in candidates {
+            if !self.alive[o as usize] {
+                continue;
+            }
+            let other = self.tris[o as usize];
+            let theirs = pos(other);
+            // Boxes that do not meet cannot cross.
+            if (0..3).any(|a| theirs.iter().all(|q| q[a] < lo[a]) || theirs.iter().all(|q| q[a] > hi[a])) {
+                continue;
+            }
+            if crate::meshquality::triangles_cross(mine, tri, theirs, other) {
+                return true;
+            }
+        }
+        false
     }
 
     fn add_vertex(&mut self, p: V3, n: V3, size: f32, curv: f32) -> u32 {
@@ -228,6 +342,9 @@ impl Mesh {
         for &(v, q) in &moves {
             self.pos[v as usize] = q;
         }
+        for &t in &around {
+            self.grid_remove(t);
+        }
         let was = |t: [u32; 3]| cross(sub(old[t[1] as usize], old[t[0] as usize]), sub(old[t[2] as usize], old[t[0] as usize]));
         for _ in 0..3 {
             let mut bad = Vec::new();
@@ -246,6 +363,41 @@ impl Mesh {
             for v in bad {
                 self.pos[v as usize] = old[v as usize];
             }
+        }
+        if self.grid.is_none() {
+            return;
+        }
+        // No move may push a triangle through another one (vertices that cannot move stay where they were).
+        let moved: std::collections::HashSet<u32> = moves.iter().map(|m| m.0).collect();
+        for iteration in 0..40 {
+            for &t in &around {
+                self.grid_insert(t);
+            }
+            let mut bad = Vec::new();
+            for &t in &around {
+                if self.crosses(t) {
+                    bad.extend(self.tris[t as usize].into_iter().filter(|v| moved.contains(v)));
+                }
+            }
+            if bad.is_empty() {
+                if iteration > 5 && std::env::var_os("NOISER_REMESH_DEBUG").is_some() {
+                    eprintln!("    commit needed {iteration} guard rounds");
+                }
+                return;
+            }
+            for &t in &around {
+                self.grid_remove(t);
+            }
+            for v in bad {
+                self.pos[v as usize] = old[v as usize];
+            }
+        }
+        // Out of patience: nothing moves.
+        for &(v, _) in &moves {
+            self.pos[v as usize] = old[v as usize];
+        }
+        for &t in &around {
+            self.grid_insert(t);
         }
     }
 
@@ -394,17 +546,21 @@ impl Mesh {
         self.pos[b as usize] = m;
         self.nrm[b as usize] = unit(add(self.nrm[a as usize], self.nrm[b as usize]));
         self.curv[b as usize] = self.curv[a as usize].max(self.curv[b as usize]);
-        if !was_folded && self.vt[b as usize].clone().iter().any(|&t| self.fold_at(t)) {
+        for t in self.vt[b as usize].clone() {
+            self.regrid(t);
+        }
+        let folds = !was_folded && self.vt[b as usize].clone().iter().any(|&t| self.fold_at(t));
+        if folds || self.vt[b as usize].clone().iter().any(|&t| self.crosses(t)) {
             // Put everything back as it was.
             for t in first..self.tris.len() as u32 {
                 if self.alive[t as usize] {
                     self.kill_tri(t);
                 }
             }
+            (self.pos[b as usize], self.nrm[b as usize], self.curv[b as usize]) = (old_pos, old_nrm, old_curv);
             for tri in saved {
                 self.add_tri(tri);
             }
-            (self.pos[b as usize], self.nrm[b as usize], self.curv[b as usize]) = (old_pos, old_nrm, old_curv);
             return false;
         }
         true
@@ -451,7 +607,7 @@ impl Mesh {
         let first = self.tris.len() as u32;
         self.add_tri([a, d, c]);
         self.add_tri([d, b, c]);
-        if !was_folded && (self.fold_at(first) || self.fold_at(first + 1)) {
+        if (!was_folded && (self.fold_at(first) || self.fold_at(first + 1))) || self.crosses(first) || self.crosses(first + 1) {
             self.kill_tri(first);
             self.kill_tri(first + 1);
             self.add_tri(old1);
@@ -540,6 +696,12 @@ impl Mesh {
         self.commit(moves);
     }
 
+    /// Debug aid: how many live triangles cross another.
+    fn crossing_now(&self) -> usize {
+        let snap = Mesh { pos: self.pos.clone(), nrm: self.nrm.clone(), size: self.size.clone(), curv: self.curv.clone(), vt: self.vt.clone(), tris: self.tris.clone(), alive: self.alive.clone(), live: self.live, grid: None, tri_cells: Vec::new() };
+        crate::meshquality::self_intersecting_triangles(&snap.finish()).iter().filter(|b| **b).count()
+    }
+
     fn finish(self) -> RawMesh {
         let mut map = vec![u32::MAX; self.pos.len()];
         let mut out = RawMesh::default();
@@ -573,6 +735,11 @@ pub fn remesh(start: RawMesh, field: Field, params: &Params, progress: &dyn Fn(u
     let a = params.adaptivity.clamp(0.0, 1.0);
     let p = &Params { min_edge: params.min_edge.max(uniform * (1.0 - 0.75 * a)), max_edge: params.max_edge.min(uniform * (1.0 + 4.0 * a)).max(uniform * (1.0 - 0.5 * a)), ..params.clone() };
     m.size.iter_mut().for_each(|s| *s = 0.25 * p.max_edge);
+    m.build_grid(uniform.max(1e-9));
+    if std::env::var_os("NOISER_REMESH_DEBUG").is_some() {
+        let raw = Mesh { pos: m.pos.clone(), nrm: m.nrm.clone(), size: m.size.clone(), curv: m.curv.clone(), vt: m.vt.clone(), tris: m.tris.clone(), alive: m.alive.clone(), live: m.live, grid: None, tri_cells: Vec::new() }.finish();
+        eprintln!("  crossing at the start: {}", crate::meshquality::self_intersecting_triangles(&raw).iter().filter(|b| **b).count());
+    }
     m.project(field, 2, p.blur);
     let rounds = p.iterations;
     let mut extra = 0;
@@ -585,16 +752,31 @@ pub fn remesh(start: RawMesh, field: Field, params: &Params, progress: &dyn Fn(u
         let e = m.solve_e(p, p.target as f32 / corr);
         m.set_sizes(e, p);
         let before = m.live;
-        let (sp, co) = (m.split_pass(), m.collapse_pass());
+        let dbg = std::env::var_os("NOISER_REMESH_DEBUG").is_some() && round < 2;
+        let c0 = if dbg { m.crossing_now() } else { 0 };
+        let sp = m.split_pass();
+        let c1 = if dbg { m.crossing_now() } else { 0 };
+        let co = m.collapse_pass();
+        let c2 = if dbg { m.crossing_now() } else { 0 };
         let fl = m.flip_pass();
+        let c3 = if dbg { m.crossing_now() } else { 0 };
         m.smooth_pass();
+        let c4 = if dbg { m.crossing_now() } else { 0 };
         let fl2 = m.flip_pass();
+        if dbg {
+            eprintln!("  crossings: start {c0}, split {c1}, collapse {c2}, flip {c3}, smooth {c4}, flip {}", m.crossing_now());
+        }
         let ratio = m.live as f32 / m.estimate(e, p).max(1.0);
         corr = if round == 0 { ratio } else { 0.5 * corr + 0.5 * ratio };
         if std::env::var_os("NOISER_REMESH_DEBUG").is_some() {
             eprintln!("round {round}: e {e:.2e}, {before} -> {} triangles ({sp} splits, {co} collapses, {fl}+{fl2} flips), estimated {:.0}", m.live, m.estimate(e, p));
         }
         m.project(field, 1, p.blur);
+        if std::env::var_os("NOISER_REMESH_DEBUG").is_some() {
+            let snap = Mesh { grid: None, ..Mesh { pos: m.pos.clone(), nrm: m.nrm.clone(), size: m.size.clone(), curv: m.curv.clone(), vt: m.vt.clone(), tris: m.tris.clone(), alive: m.alive.clone(), live: m.live, grid: None, tri_cells: Vec::new() } };
+            let raw = snap.finish();
+            eprintln!("  crossing after round {round}: {}", crate::meshquality::self_intersecting_triangles(&raw).iter().filter(|b| **b).count());
+        }
         round += 1;
         // The count settles late in the run; a few more rounds if it is still off by more than 6%.
         if round == rounds + extra && extra < 6 && (m.live as f32 - p.target as f32).abs() > 0.06 * p.target as f32 {
@@ -614,6 +796,7 @@ pub fn remesh(start: RawMesh, field: Field, params: &Params, progress: &dyn Fn(u
     progress(rounds + extra, rounds + extra);
     m.finish()
 }
+
 
 #[cfg(test)]
 mod tests {
@@ -736,6 +919,8 @@ mod tests {
 {r}");
             assert!(r.watertight() && r.components == 1, "{r}");
             assert!(r.max_normal_deviation < 120.0 && r.thin_fraction < 0.05, "{r}");
+            let crossing = meshquality::self_intersecting_triangles(&out).iter().filter(|b| **b).count();
+            assert_eq!(crossing, 0, "{crossing} triangles cross another at {target} triangles");
         }
     }
 

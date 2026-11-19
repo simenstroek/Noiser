@@ -591,7 +591,7 @@ impl Job<'_> {
             let (lo, hi) = mesh.positions.iter().fold(([f32::MAX; 3], [f32::MIN; 3]), |(lo, hi), p| ([0, 1, 2].map(|a| lo[a].min(p[a])), [0, 1, 2].map(|a| hi[a].max(p[a]))));
             let diagonal = (0..3).map(|a| (hi[a] - lo[a]).powi(2)).sum::<f32>().sqrt();
             let (d, eps) = (self.d, 0.0005 * diagonal);
-            let mut r = crate::meshquality::report(&mesh).with_surface_error(&mesh, &mut |pts| self.ev.points(d, pts, eps));
+            let mut r = crate::meshquality::report(&mesh).with_surface_error(&mesh, &mut |pts| self.ev.points(d, pts, eps)).with_intersections(&mesh);
             // Distances in the mesh's own units, like the file.
             let to_object = self.norm.scale / self.d.prim_size;
             (r.mean_error, r.max_error) = (r.mean_error.map(|v| v * to_object), r.max_error.map(|v| v * to_object));
