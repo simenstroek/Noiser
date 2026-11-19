@@ -571,6 +571,31 @@ impl Default for NoiseParams {
     }
 }
 
+/// How a Radial position describes a point.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RadialMode {
+    /// (distance from the axis, angle around it, height along it).
+    #[default]
+    Cylindrical,
+    /// (distance from the centre, angle around the axis, angle from the axis).
+    Spherical,
+}
+
+/// A position in radial coordinates: the angles are in radians, the angle around the axis jumps from pi to -pi on one half plane.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RadialParams {
+    pub mode: RadialMode,
+    pub center: [f32; 3],
+    /// The direction of the centre line (any length; zero means Z).
+    pub axis: [f32; 3],
+}
+
+impl Default for RadialParams {
+    fn default() -> Self {
+        RadialParams { mode: RadialMode::Cylindrical, center: [0.0; 3], axis: [0.0, 0.0, 1.0] }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum NodeKind {
     Float(f32),
@@ -610,6 +635,8 @@ pub enum NodeKind {
     /// A regular pattern (see `PatternParams`). Input: position (defaults to world position).
     Pattern(PatternParams),
     Position,
+    /// Position in cylindrical or spherical coordinates around a centre and an axis (see `RadialParams`). Input: position (defaults to world position).
+    Radial(RadialParams),
     /// A waypoint on a wire: passes its input through (every reader skips it, like a muted node).
     Reroute,
     /// The named end of a wire (Unreal's named reroute): passes its input on, and any `NamedRerouteUse` with the
@@ -658,7 +685,8 @@ impl NodeKind {
         match self {
             NodeKind::Separate => 3,
             NodeKind::ImageSplit => 4,
-            NodeKind::LoadMesh(_) => 2,
+            // The second output of a generator is its displacement vector.
+            NodeKind::LoadMesh(_) | NodeKind::Noise(_) | NodeKind::Pattern(_) | NodeKind::Grid { .. } => 2,
             NodeKind::Bake(s) => (s.channels.len() + s.custom.len()).max(1),
             NodeKind::OutDensity | NodeKind::OutNormal | NodeKind::OutMesh(_) | NodeKind::OutImage(_) => 0,
             _ => 1,
@@ -675,7 +703,7 @@ impl NodeKind {
             NodeKind::Mix { .. } | NodeKind::Combine { .. } => 3,
             NodeKind::Separate => 1,
             NodeKind::Curve { .. } => 1,
-            NodeKind::Normal { .. } | NodeKind::Noise(_) | NodeKind::Grid { .. } | NodeKind::Pattern(_) | NodeKind::OutDensity | NodeKind::OutNormal => 1,
+            NodeKind::Normal { .. } | NodeKind::Noise(_) | NodeKind::Grid { .. } | NodeKind::Pattern(_) | NodeKind::Radial(_) | NodeKind::OutDensity | NodeKind::OutNormal => 1,
             NodeKind::LoadMesh(_) | NodeKind::NoiseGraph(_) | NodeKind::Remesh { .. } | NodeKind::AutoUv(_) | NodeKind::OutMesh(_) | NodeKind::OutImage(_) | NodeKind::ImageSplit | NodeKind::ImageLevels { .. } => 1,
             NodeKind::Bake(s) => 2 + s.custom.len(),
             NodeKind::ImageCombine => 4,
@@ -828,6 +856,23 @@ impl Graph {
             let m = g.nodes.get_mut(id).unwrap();
             m.kind = NodeKind::Math { op: MathOp::Multiply, a: 0.0, b: amount, c: default_smooth() };
             g.connect(new, *id, 0);
+        }
+        // The displacement output of a generator (output 1): its unit gradient times its value.
+        let generators: BTreeSet<NodeId> = self
+            .edges
+            .iter()
+            .filter(|e| e.from_port == 1 && self.nodes.get(&e.from).is_some_and(|n| !n.muted && matches!(n.kind, NodeKind::Noise(_) | NodeKind::Pattern(_) | NodeKind::Grid { .. })))
+            .map(|e| e.from)
+            .collect();
+        for id in generators {
+            let normal = g.add(NodeKind::Normal { flip: false }, [0.0; 2]);
+            let times = g.add(NodeKind::Math { op: MathOp::Multiply, a: 0.0, b: 0.0, c: default_smooth() }, [0.0; 2]);
+            for e in g.edges.iter_mut().filter(|e| e.from == id && e.from_port == 1) {
+                (e.from, e.from_port) = (times, 0);
+            }
+            g.connect(id, normal, 0);
+            g.connect(normal, times, 0);
+            g.connect(id, times, 1);
         }
         g
     }
@@ -1001,12 +1046,17 @@ impl Graph {
         upstream(behind, false).difference(&evaluated).copied().collect()
     }
 
+    /// Whether what feeds `port` of `to` is a vector: the output pin matters (a generator's second output is one).
+    pub fn input_is_vector(&self, to: NodeId, port: usize) -> bool {
+        self.input_from(to, port).is_some_and(|(src, fp)| self.output_type_at(src, fp) == PortType::Vector)
+    }
+
     pub fn yields_vector(&self, id: NodeId) -> bool {
         match &self.nodes[&id].kind {
-            NodeKind::Vec3(_) | NodeKind::Position | NodeKind::Normal { .. } | NodeKind::Combine { .. } => true,
-            NodeKind::Reroute | NodeKind::NamedReroute { .. } => self.input(id, 0).is_some_and(|s| self.yields_vector(s)),
-            NodeKind::NamedRerouteUse { name } => self.named_declaration(name).and_then(|d| self.input(d, 0)).is_some_and(|s| self.yields_vector(s)),
-            NodeKind::Math { op, .. } => *op != MathOp::Dot && (0..2).any(|p| self.input(id, p).is_some_and(|s| self.yields_vector(s))),
+            NodeKind::Vec3(_) | NodeKind::Position | NodeKind::Radial(_) | NodeKind::Normal { .. } | NodeKind::Combine { .. } => true,
+            NodeKind::Reroute | NodeKind::NamedReroute { .. } => self.input_is_vector(id, 0),
+            NodeKind::NamedRerouteUse { name } => self.named_declaration(name).is_some_and(|d| self.input_is_vector(d, 0)),
+            NodeKind::Math { op, .. } => *op != MathOp::Dot && (0..2).any(|p| self.input_is_vector(id, p)),
             _ => false,
         }
     }
@@ -1153,6 +1203,7 @@ impl Graph {
             NodeKind::LoadMesh(_) => Broken("a loaded mesh does not tile".into()),
             NodeKind::NoiseGraph(_) | NodeKind::Remesh { .. } | NodeKind::AutoUv(_) | NodeKind::Bake(_) | NodeKind::OutMesh(_) | NodeKind::OutImage(_) | NodeKind::ImageSplit | NodeKind::ImageCombine | NodeKind::ImageLevels { .. } | NodeKind::TransferUv => Const,
             NodeKind::Position => Coord,
+            NodeKind::Radial(_) => Broken("a radial position does not tile".into()),
             NodeKind::Reroute | NodeKind::NamedReroute { .. } => input(0, memo, stack).unwrap_or(Const),
             NodeKind::NamedRerouteUse { name } => match self.named_declaration(name).and_then(|d| self.input(d, 0)) {
                 Some(src) => self.tiling_of(src, memo, stack),
@@ -1163,7 +1214,7 @@ impl Graph {
             NodeKind::Combine { .. } => {
                 // A whole position feeding one of the float inputs is averaged to a single number, which shifts by
                 // a third per tile: not a coordinate any more (Separate XYZ takes one exact component).
-                let averaged = (0..3).any(|p| self.input(id, p).is_some_and(|src| self.yields_vector(src)) && input(p, memo, stack) == Some(Coord));
+                let averaged = (0..3).any(|p| self.input_is_vector(id, p) && input(p, memo, stack) == Some(Coord));
                 let ts: Vec<Tiling> = (0..3).filter_map(|p| input(p, memo, stack)).collect();
                 if averaged {
                     Broken("a position is averaged into one number here (use Separate XYZ to take a component)".into())
@@ -1323,6 +1374,9 @@ impl Graph {
         if port == 1 && matches!(self.nodes.get(&id).map(|n| &n.kind), Some(NodeKind::LoadMesh(_))) {
             return PortType::Mesh;
         }
+        if port == 1 && matches!(self.nodes.get(&id).map(|n| &n.kind), Some(NodeKind::Noise(_) | NodeKind::Pattern(_) | NodeKind::Grid { .. })) {
+            return PortType::Vector;
+        }
         self.output_type(id)
     }
 
@@ -1343,7 +1397,7 @@ impl Graph {
             NodeKind::OutImage(_) | NodeKind::ImageSplit | NodeKind::ImageCombine | NodeKind::ImageLevels { .. } => PortType::Image,
             NodeKind::Noise(_) | NodeKind::Grid { .. } | NodeKind::Pattern(_) | NodeKind::OutNormal | NodeKind::Separate => PortType::Vector,
             NodeKind::Math { op, .. } if port < 2 => {
-                let vector = *op == MathOp::Dot || (0..2).any(|p| self.input(id, p).is_some_and(|s| self.yields_vector(s)));
+                let vector = *op == MathOp::Dot || (0..2).any(|p| self.input_is_vector(id, p));
                 if vector { PortType::Vector } else { PortType::Float }
             }
             _ => PortType::Float,
@@ -1398,7 +1452,7 @@ impl Graph {
         let r = match &self.nodes[&id].kind {
             NodeKind::Float(v) => (*v, *v),
             NodeKind::Vec3(v) => (v.iter().cloned().fold(f32::MAX, f32::min), v.iter().cloned().fold(f32::MIN, f32::max)),
-            NodeKind::Position | NodeKind::LoadMesh(_) | NodeKind::NoiseGraph(_) | NodeKind::Remesh { .. } | NodeKind::AutoUv(_) | NodeKind::Bake(_) | NodeKind::OutMesh(_) | NodeKind::OutImage(_) | NodeKind::ImageSplit | NodeKind::ImageCombine | NodeKind::ImageLevels { .. } | NodeKind::TransferUv => UNBOUNDED,
+            NodeKind::Position | NodeKind::Radial(_) | NodeKind::LoadMesh(_) | NodeKind::NoiseGraph(_) | NodeKind::Remesh { .. } | NodeKind::AutoUv(_) | NodeKind::Bake(_) | NodeKind::OutMesh(_) | NodeKind::OutImage(_) | NodeKind::ImageSplit | NodeKind::ImageCombine | NodeKind::ImageLevels { .. } | NodeKind::TransferUv => UNBOUNDED,
             NodeKind::Separate => match self.input(id, 0) {
                 Some(src) => self.range_of(src, stack),
                 None => (0.0, 0.0),
@@ -1527,6 +1581,16 @@ fn math_range(op: MathOp, (a0, a1): Range, (b0, b1): Range, (k0, k1): Range) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_displacement_output_makes_math_a_vector() {
+        let mut g = Graph::default_graph(); // 0 Position -> 1 Noise -> 2 OutDensity
+        let m = g.add(NodeKind::Math { op: MathOp::Multiply, a: 0.0, b: 2.0, c: 0.5 }, [0.0; 2]);
+        g.connect_from(1, 0, m, 0);
+        assert_eq!(g.output_type(m), PortType::Float);
+        g.connect_from(1, 1, m, 0);
+        assert_eq!((g.output_type(m), g.input_type(m, 0)), (PortType::Vector, PortType::Vector));
+    }
 
     #[test]
     fn density_range_follows_math() {

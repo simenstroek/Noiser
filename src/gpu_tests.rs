@@ -1867,6 +1867,24 @@ fn a_mesh_graph_transfers_the_uvs_of_its_mesh_to_the_remeshed_result() {
     assert!(log.iter().any(|l| l.contains("island")), "{log:?}");
 }
 
+/// A mesh file in centimetres (1 unit = 1 cm) gets the noise's frequency divided and its amplitude multiplied by 100.
+#[test]
+fn the_unit_of_the_mesh_scales_the_noise_graphs_frequency_and_amplitude() {
+    let noise = noise_graph(NoiseParams { kind: NoiseKind::Perlin, scale: 3.0, ..Default::default() });
+    let constants = |unit_cm: f32| {
+        let mut g = Graph::default();
+        g.add(NodeKind::LoadMesh(crate::meshgraph::LoadMeshParams { path: "m.obj".into(), unit_cm, ..Default::default() }), [0.0; 2]);
+        g.add(NodeKind::NoiseGraph(crate::meshgraph::NoiseGraphParams { embedded: noise.to_json(), frequency: 2.0, amplitude: 0.5, ..Default::default() }), [0.0; 2]);
+        let lowered = crate::meshgraph::lowered_mesh(&g, std::path::Path::new(".")).unwrap();
+        let mut k: Vec<f32> = lowered.nodes.values().filter_map(|n| if let NodeKind::Math { op: crate::graph::MathOp::Multiply, b, .. } = &n.kind { Some(*b) } else { None }).collect();
+        k.sort_by(|a, b| a.total_cmp(b));
+        k
+    };
+    assert_eq!(constants(100.0), vec![0.5, 2.0], "metres: unchanged");
+    let cm = constants(1.0);
+    assert!((cm[0] - 0.02).abs() < 1e-6 && (cm[1] - 50.0).abs() < 1e-4, "{cm:?}");
+}
+
 /// A level of detail: the UVs of an unwrapped Remesh carried onto a coarser Remesh of the same field.
 #[test]
 fn a_coarser_remesh_takes_the_uvs_of_an_unwrapped_one_through_transfer_uvs() {
@@ -2662,4 +2680,54 @@ fn write_showcase_graphs() {
     label(&mut g, er, "Erosion");
     finish(&mut g, sub, 660.0);
     save("sponge", &g);
+}
+
+#[test]
+fn radial_positions_and_displacement_outputs() {
+    use crate::graph::{MathOp, RadialMode, RadialParams};
+    let Some(gpu) = gpu() else { return eprintln!("no GPU adapter; skipping") };
+    let pts = [[3.0, 4.0, 5.0], [-1.0, 0.5, 2.0], [0.0, 0.0, 1.0]];
+    // Cylindrical about the Z axis through (0, 0, 0): (distance from the axis, angle, height); then the same about X.
+    let cases: [([f32; 3], fn([f32; 3]) -> [f32; 3]); 2] = [([0.0, 0.0, 1.0], |p: [f32; 3]| [p[0].hypot(p[1]), p[1].atan2(p[0]), p[2]]), ([2.0, 0.0, 0.0], |p: [f32; 3]| [p[1].hypot(p[2]), p[2].atan2(p[1]).rem_euclid(std::f32::consts::TAU), p[0]])];
+    for (axis, expect) in cases {
+        for part in 0..3 {
+            let mut g = Graph::default();
+            let r = g.add(NodeKind::Radial(RadialParams { mode: RadialMode::Cylindrical, center: [0.0; 3], axis }), [0.0; 2]);
+            let s = g.add(NodeKind::Separate, [0.0; 2]);
+            let o = g.add(NodeKind::OutDensity, [0.0; 2]);
+            g.connect(r, s, 0);
+            g.connect_from(s, part, o, 0);
+            let got = eval(&gpu, &g, &pts);
+            for (p, v) in pts.iter().zip(&got) {
+                let want = expect(*p)[part];
+                // The angle jumps by a turn on one half plane, so compare it modulo a turn.
+                let turn = if part == 1 { std::f32::consts::TAU } else { f32::MAX };
+                assert!((v - want).abs() < 1e-4 || ((v - want).abs() - turn).abs() < 1e-4, "axis {axis:?} part {part} at {p:?}: {v} != {want}");
+            }
+        }
+    }
+    // Spherical: the distance from the centre and the angle from the axis.
+    let mut g = Graph::default();
+    let r = g.add(NodeKind::Radial(RadialParams { mode: RadialMode::Spherical, center: [1.0, 0.0, 0.0], axis: [0.0, 0.0, 1.0] }), [0.0; 2]);
+    let s = g.add(NodeKind::Separate, [0.0; 2]);
+    let o = g.add(NodeKind::OutDensity, [0.0; 2]);
+    g.connect(r, s, 0);
+    g.connect_from(s, 2, o, 0);
+    let got = eval(&gpu, &g, &[[1.0, 0.0, 2.0], [1.0, 3.0, 0.0]]);
+    assert!(got[0].abs() < 1e-4 && (got[1] - std::f32::consts::FRAC_PI_2).abs() < 1e-4, "{got:?}");
+
+    // The displacement output of a noise is its unit gradient times its value: its self dot product is the value squared.
+    let base = noise_graph(NoiseParams { kind: NoiseKind::Perlin, scale: 3.0, amount: 0.7, seed: Some(3), ..Default::default() });
+    let mut g = base.clone();
+    let n = g.find(|k| matches!(k, NodeKind::Noise(_))).unwrap();
+    let dot = g.add(NodeKind::Math { op: MathOp::Dot, a: 0.0, b: 0.0, c: 0.5 }, [0.0; 2]);
+    g.connect_from(n, 1, dot, 0);
+    g.connect_from(n, 1, dot, 1);
+    let o = g.find(|k| *k == NodeKind::OutDensity).unwrap();
+    g.connect(dot, o, 0);
+    let p = points(64, 9);
+    let (value, squared) = (eval(&gpu, &base, &p), eval(&gpu, &g, &p));
+    for (v, s) in value.iter().zip(&squared) {
+        assert!((v * v - s).abs() < 1e-4, "{v}^2 != {s}");
+    }
 }

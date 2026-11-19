@@ -19,11 +19,14 @@ pub struct LoadMeshParams {
     /// Margin around the mesh in normalized units (the mesh is scaled to a unit sphere for baking).
     pub padding: f32,
     pub combine: crate::meshsdf::Combine,
+    /// How many centimetres one unit of the file is (100: the file is in metres). Noise Graph nodes work in metres:
+    /// their frequency and amplitude are scaled by this, so the same noise fits a mesh in metres or in centimetres.
+    pub unit_cm: f32,
 }
 
 impl Default for LoadMeshParams {
     fn default() -> Self {
-        LoadMeshParams { path: String::new(), resolution: 128, padding: 0.5, combine: Default::default() }
+        LoadMeshParams { path: String::new(), resolution: 128, padding: 0.5, combine: Default::default(), unit_cm: 100.0 }
     }
 }
 
@@ -85,6 +88,9 @@ pub fn noise_graph_source(p: &NoiseGraphParams, base: &Path) -> Result<Graph, St
 pub fn lowered_mesh(g: &Graph, base: &Path) -> Result<Graph, String> {
     use crate::graph::MathOp;
     let mut out = g.clone();
+    // The unit of the first Load Mesh node (a file in centimetres: 1) turns the noise's metres into the file's units.
+    let unit_cm = g.nodes.values().filter(|n| !n.muted).find_map(|n| if let NodeKind::LoadMesh(p) = &n.kind { Some(p.unit_cm) } else { None }).filter(|u| u.is_finite() && *u > 0.0).unwrap_or(100.0);
+    let (freq_k, amp_k) = (unit_cm / 100.0, 100.0 / unit_cm);
     let ids: Vec<_> = g.nodes.iter().filter(|(_, n)| matches!(n.kind, NodeKind::NoiseGraph(_)) && !n.muted).map(|(id, _)| *id).collect();
     for id in ids {
         let NodeKind::NoiseGraph(p) = g.nodes[&id].kind.clone() else { continue };
@@ -93,7 +99,7 @@ pub fn lowered_mesh(g: &Graph, base: &Path) -> Result<Graph, String> {
         // The position the sub graph sees: the node's input (or the world position) times the frequency.
         let world = out.add(NodeKind::Position, [0.0; 2]);
         let pos_in = out.edges.iter().find(|e| e.to == id && e.port == 0).map(|e| (e.from, e.from_port));
-        let scaled = out.add(NodeKind::Math { op: MathOp::Multiply, a: 0.0, b: p.frequency, c: 0.5 }, [0.0; 2]);
+        let scaled = out.add(NodeKind::Math { op: MathOp::Multiply, a: 0.0, b: p.frequency * freq_k, c: 0.5 }, [0.0; 2]);
         match pos_in {
             Some((from, port)) => out.connect_from(from, port, scaled, 0),
             None => out.connect(world, scaled, 0),
@@ -136,7 +142,7 @@ pub fn lowered_mesh(g: &Graph, base: &Path) -> Result<Graph, String> {
         let Some(src) = sub.edges.iter().find(|e| e.to == out_id && e.port == 0) else { return Err("the noise graph's Density Output is not connected".into()) };
         let Some(&src_new) = map.get(&src.from) else { return Err("the noise graph's Density Output reads a missing node".into()) };
         out.edges.retain(|e| !(e.to == id));
-        out.nodes.get_mut(&id).unwrap().kind = NodeKind::Math { op: MathOp::Multiply, a: 0.0, b: p.amplitude, c: 0.5 };
+        out.nodes.get_mut(&id).unwrap().kind = NodeKind::Math { op: MathOp::Multiply, a: 0.0, b: p.amplitude * amp_k, c: 0.5 };
         out.connect_from(src_new, src.from_port, id, 0);
     }
     Ok(out)

@@ -7,6 +7,22 @@
 
 fn safe_normalize(v: vec3f) -> vec3f { return v / max(length(v), 1e-12); }
 
+// A position in cylindrical (radius from the axis, angle around it, height along it) or spherical (radius from the
+// centre, angle around the axis, angle from the axis) coordinates; the angles are in radians.
+fn radial_coords(q: vec3f, center: vec3f, axis: vec3f, spherical: bool) -> vec3f {
+    let a = select(vec3f(0.0, 0.0, 1.0), axis / max(length(axis), 1e-12), length(axis) > 1e-9);
+    // The angle is measured from X (or from Y when the axis is X): atan2(y, x) about Z, atan2(z, y) about X.
+    let reference = select(vec3f(1.0, 0.0, 0.0), vec3f(0.0, 1.0, 0.0), abs(a.x) > 0.9);
+    let u = normalize(reference - a * dot(reference, a));
+    let w = cross(a, u);
+    let d = q - center;
+    let h = dot(d, a);
+    let rv = d - a * h;
+    let angle = atan2(dot(rv, w), dot(rv, u));
+    if (spherical) { return vec3f(length(d), angle, atan2(length(rv), h)); }
+    return vec3f(length(rv), angle, h);
+}
+
 // pcg3d (Jarzynski & Olano 2020): integer-only, so every sampler can reproduce it exactly.
 fn pcg3d(v_in: vec3u) -> vec3u {
     var v = v_in * 1664525u + 1013904223u;

@@ -49,6 +49,7 @@ pub fn props(ui: &mut egui::Ui, kind: &mut NodeKind) -> bool {
             let d = crate::meshgraph::LoadMeshParams::default();
             crate::row(ui, &mut p.resolution, d.resolution, |ui, v| _ = ui.add(egui::DragValue::new(v).range(32..=512).suffix(" samples")).on_hover_text("Resolution of the distance grid the mesh is baked into."));
             crate::row(ui, &mut p.padding, d.padding, |ui, v| _ = ui.add(egui::DragValue::new(v).range(0.1..=4.0).speed(0.01).prefix("padding ")).on_hover_text("Room around the mesh in the grid, in units of the mesh's radius: displacement cannot reach past it."));
+            crate::row(ui, &mut p.unit_cm, d.unit_cm, |ui, v| _ = ui.add(egui::DragValue::new(v).range(0.0001..=1.0e6).speed(0.5).prefix("1 unit = ").suffix(" cm")).on_hover_text("The size of one unit of this file: 100 for a file in metres, 1 for centimetres (Unreal and many FBX files). Noise Graph nodes work in metres, so their frequency and amplitude are scaled to the file's units."));
             crate::row(ui, &mut p.combine.mode, d.combine.mode, |ui, v| {
                 egui::ComboBox::from_id_salt("combine mode").selected_text(v.label()).show_ui(ui, |ui| {
                     for m in crate::meshsdf::CombineMode::ALL {

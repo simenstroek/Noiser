@@ -1055,6 +1055,24 @@ fn node_props(ui: &mut egui::Ui, kind: &mut NodeKind, names: &[String]) {
             amount_row(ui, &mut n.amount);
         }
         NodeKind::Position => _ = ui.label("World position. Feeds noise inputs by default."),
+        NodeKind::Radial(r) => {
+            let d = graph::RadialParams::default();
+            row(ui, &mut r.mode, d.mode, |ui, v| {
+                ui.selectable_value(v, graph::RadialMode::Cylindrical, "Cylindrical").on_hover_text("(distance from the axis, angle around it, height along it)");
+                ui.selectable_value(v, graph::RadialMode::Spherical, "Spherical").on_hover_text("(distance from the centre, angle around the axis, angle from the axis)");
+            });
+            row(ui, &mut r.center, d.center, |ui, v| {
+                for (c, label) in v.iter_mut().zip(["Centre X ", "Y ", "Z "]) {
+                    ui.add(egui::DragValue::new(c).speed(0.01).prefix(label));
+                }
+            });
+            row(ui, &mut r.axis, d.axis, |ui, v| {
+                for (c, label) in v.iter_mut().zip(["Axis X ", "Y ", "Z "]) {
+                    ui.add(egui::DragValue::new(c).speed(0.01).prefix(label));
+                }
+            });
+            ui.weak("The centre line runs through the centre along the axis. Angles are in radians; the angle around the axis jumps from 3.14 to -3.14 on one half plane. Breaks tiling.");
+        }
         NodeKind::Reroute => _ = ui.weak("A waypoint on a wire: it passes its input through unchanged."),
         NodeKind::NamedReroute { name } => {
             ui.add(egui::TextEdit::singleline(name).hint_text("name"));
