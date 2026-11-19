@@ -237,6 +237,8 @@ pub struct UvReport {
     pub mean_stretch: f32,
     pub p95_stretch: f32,
     pub max_stretch: f32,
+    /// Triangles whose stretch is over 100 or whose UV area is zero (the maximum alone is capped at 1000 and says little).
+    pub degenerate: usize,
     /// Texel density (UV size per surface size) of the 95th over the 5th percentile triangle: 1 means even.
     pub density_spread: f32,
     /// Triangles wound the other way in UV space than most of their island (mirrored or folded over).
@@ -247,7 +249,7 @@ impl fmt::Display for UvReport {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f, "UVs: {} triangles, {} vertices, {} island(s), {} tiny, {} single-triangle", self.triangles, self.vertices, self.islands, self.tiny_islands, self.single_triangle_islands)?;
         writeln!(f, "coverage {:.1}% of the 0 to 1 square, overlap {:.3}%", 100.0 * self.coverage, 100.0 * self.overlap_fraction)?;
-        write!(f, "stretch (1 = none): mean {:.2}, 95th percentile {:.2}, max {:.2}; texel density spread {:.1}x; {} flipped", self.mean_stretch, self.p95_stretch, self.max_stretch, self.density_spread, self.flipped)
+        write!(f, "stretch (1 = none): mean {:.2}, 95th percentile {:.2}, {} triangle(s) over 100; texel density spread {:.1}x; {} flipped", self.mean_stretch, self.p95_stretch, self.degenerate, self.density_spread, self.flipped)
     }
 }
 
@@ -289,6 +291,7 @@ pub fn uv_report(mesh: &crate::uvgen::UvMesh, res: usize) -> UvReport {
         e.0 += 0.5 * a2.abs();
         e.1 += 1;
         if a2.abs() < 1e-14 {
+            r.degenerate += 1;
             continue;
         }
         // The surface vector per unit of s and of t (Sander et al.): its two singular values are the stretch factors.
@@ -300,6 +303,7 @@ pub fn uv_report(mesh: &crate::uvgen::UvMesh, res: usize) -> UvReport {
         let root_term = ((a - c) * (a - c) + 4.0 * b * b).sqrt();
         let (big, small) = (0.5 * (a + c + root_term), (0.5 * (a + c - root_term)).max(1e-20));
         stretch.push((big / small).sqrt().min(1000.0));
+        r.degenerate += ((big / small).sqrt() >= 100.0) as usize;
         density.push((big * small).sqrt().sqrt());
     }
     // Winding per island: the sign most of its triangles have; the others are flipped.

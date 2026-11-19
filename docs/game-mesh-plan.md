@@ -112,3 +112,16 @@ The 0.001% overlap seen earlier was a counting artefact: the log counted at 512 
 
 The absorb step turned out to reject 249 of 290 candidate islands on the rock, almost all on density or winding: a one-triangle island that is welded along one edge had its third vertex pulled onto the line between the two twins (a collapsed triangle). Islands that hang off the neighbour's border (not enclosed by it) are now unfolded from it triangle by triangle with their own 3D shape, on the neighbour's side of the winding; enclosed ones are still spread between their twins. A latent bug showed up with it: merges could chain (an island that had absorbed another was itself absorbed, or used as a target), so undoing one left the other half-restored and overlapping. Merges no longer chain, a merge that leaves the 0 to 1 square is refused, and the overlap check now also refuses faces within one texel of another island's. Result at the shipped defaults: rock 20k 234 to 157 tiny islands (294 to 216 islands), IslandRock 30 to 22, vehicle 17 to 9, rock 100k 1077 to 666 (1237 to 831 islands); overlap 0.000% everywhere, no flipped triangles, coverage and stretch unchanged. What remains are islands whose unfolded shape would fold over itself on a bumpy surface; they stay as they are.
 
+### Measured with the defaults of v0.13.0 (absorb with unfolding; overlap counted at 2048)
+
+| Mesh (20k triangles unless noted) | Islands (tiny) | Coverage | Mean stretch (p95) | Triangles over 100x | Overlap / flipped |
+|---|---|---|---|---|---|
+| Rock (RockShape + noise) | 209 (150) | 66.2% | 1.25 (1.86) | 0 | 0.000% / 0 |
+| IslandRock_Complex_01 | 108 (21) | 58.2% | 1.15 (1.38) | 1 | 0.000% / 0 |
+| Vehicle SDF export | 28 (6) | 67.5% | 1.04 (1.07) | 0 | 0.000% / 0 |
+| Leaves sculpt (open sheets) | 648 (482) | 62.2% | 2.42 (2.86) | 36 | 0.000% / 0 |
+| Rock, 100k triangles | 795 (630) | 68.1% | 1.25 (1.62) | 11 | 0.000% / 0 |
+| Rock transferred onto a 20k remesh (Transfer UVs) | 49 (17) | 62.9% | 1.16 (1.57) | 1 | 0.000% / 1 |
+
+The log now reports the number of triangles stretched over 100x instead of the maximum, which was capped at 1000 and looked like an error; those are slivers of the remesh or zero-area UV triangles.
+
