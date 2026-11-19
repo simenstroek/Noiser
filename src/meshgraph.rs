@@ -414,7 +414,12 @@ impl Runner<'_> {
                 let (target_src, _) = input(0)?;
                 let (source_src, _) = input(1)?;
                 let Value::Mesh(target) = self.value(original, lowered, target_src, memo, fields)? else { return Err(format!("node {id} (Transfer UVs): the target needs a mesh without UVs, such as Remesh")) };
-                let Value::Source(source) = self.value(original, lowered, source_src, memo, fields)? else { return Err(format!("node {id} (Transfer UVs): the UV source must be a Load Mesh's mesh output")) };
+                let source = match self.value(original, lowered, source_src, memo, fields)? {
+                    Value::Source(m) => m,
+                    // The UVs of an unwrapped mesh (another level of detail, say) carried onto this one.
+                    Value::Uv(u) => crate::mesh::Mesh { positions: u.positions.clone(), triangles: u.triangles.clone(), colors: Vec::new(), uvs: u.triangles.iter().map(|t| t.map(|i| [u.uvs[i as usize][0], 1.0 - u.uvs[i as usize][1]])).collect() },
+                    _ => return Err(format!("node {id} (Transfer UVs): the UV source must be a Load Mesh's mesh output or a mesh with UVs")),
+                };
                 (self.log)("transferring UVs");
                 let (uv, stats) = crate::uvtransfer::transfer(&target, &source)?;
                 (self.log)(&format!("  {} island(s) used; {} corner(s) farther than 2% of the mesh size from the source surface", stats.islands, stats.far_corners));

@@ -1867,6 +1867,37 @@ fn a_mesh_graph_transfers_the_uvs_of_its_mesh_to_the_remeshed_result() {
     assert!(log.iter().any(|l| l.contains("island")), "{log:?}");
 }
 
+/// A level of detail: the UVs of an unwrapped Remesh carried onto a coarser Remesh of the same field.
+#[test]
+fn a_coarser_remesh_takes_the_uvs_of_an_unwrapped_one_through_transfer_uvs() {
+    let Some(gpu) = gpu() else { return eprintln!("no GPU adapter; skipping") };
+    let dir = std::env::temp_dir().join("noiser-lod-test");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let sphere = crate::mesh::shapes::icosphere(1.0, 3);
+    crate::surface::RawMesh { normals: sphere.positions.clone(), positions: sphere.positions, triangles: sphere.triangles }.write_obj(&dir.join("ball.obj")).unwrap();
+    let mut g = Graph::default();
+    let mesh = g.add(NodeKind::LoadMesh(crate::meshgraph::LoadMeshParams { path: "ball.obj".into(), resolution: 64, ..Default::default() }), [0.0; 2]);
+    let lod0 = g.add(NodeKind::Remesh { triangles: 3000, adaptivity: 1.0 }, [0.0; 2]);
+    let uv = g.add(NodeKind::AutoUv(crate::uvgen::UvParams { resolution: 512, ..Default::default() }), [0.0; 2]);
+    let lod1 = g.add(NodeKind::Remesh { triangles: 800, adaptivity: 1.0 }, [0.0; 2]);
+    let transfer = g.add(NodeKind::TransferUv, [0.0; 2]);
+    let out = g.add(NodeKind::OutMesh(crate::meshgraph::OutParams { folder: "out".into(), name: "lod1".into(), ..Default::default() }), [0.0; 2]);
+    g.connect(mesh, lod0, 0);
+    g.connect(lod0, uv, 0);
+    g.connect(mesh, lod1, 0);
+    g.connect(lod1, transfer, 0);
+    g.connect(uv, transfer, 1);
+    g.connect(transfer, out, 0);
+    assert_eq!(g.edges.len(), 6, "the wires were accepted");
+    let mut cache = crate::meshgraph::MeshCache::default();
+    let mut note = |_: &str| {};
+    let written = crate::meshgraph::Runner { device: &gpu.device, queue: &gpu.queue, cache: &mut cache, base: dir.clone(), seed: 0, progress: Default::default(), log: &mut note, batch_file: None, max_triangles: None, numbering: Default::default() }.run(&g).unwrap();
+    let loaded = crate::meshformats::load(&written[0]).unwrap();
+    assert!((600..1100).contains(&loaded.triangles.len()), "{} triangles", loaded.triangles.len());
+    assert_eq!(loaded.uvs.len(), loaded.triangles.len(), "the coarser mesh has UVs");
+}
+
 /// Writes a demo mesh graph for a real mesh: `NOISER_TEST_MESH=mesh.obj NOISER_TEST_OUT=dir cargo test write_demo_mesh_graph -- --ignored`.
 /// The graph blends two of the repository's noise graphs by how much the surface faces up.
 #[test]
