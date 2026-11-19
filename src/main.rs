@@ -996,7 +996,7 @@ fn node_props(ui: &mut egui::Ui, kind: &mut NodeKind, names: &[String]) {
             pattern_props(ui, p);
             amount_row(ui, &mut p.amount);
         }
-        NodeKind::Grid { counts, corners, cubic } => {
+        NodeKind::Grid { counts, corners, cubic, amount } => {
             row(ui, counts, [8.0; 3], |ui, v| {
                 for (c, label) in v.iter_mut().zip(["X ", "Y ", "Z "]) {
                     ui.add(egui::DragValue::new(c).range(1.0..=64.0).speed(0.1).prefix(label));
@@ -1011,6 +1011,7 @@ fn node_props(ui: &mut egui::Ui, kind: &mut NodeKind, names: &[String]) {
                 ui.selectable_value(v, true, "Cubic").on_hover_text("Sharp-cornered boxes: the largest offset along any axis, abs(0.5 - fract(position * cells))");
             });
             ui.weak("Cells per tile on each axis; whole numbers tile. Outputs the distance to the nearest cell centre (or corner): -1 there, +1 as far from it as the grid gets. Cubic measures it as the largest offset along any axis, so the cells are boxes rather than spheres.");
+            amount_row(ui, amount);
         }
         NodeKind::Normal { flip } => row(ui, flip, false, |ui, f| _ = ui.checkbox(f, "flip")),
         NodeKind::Noise(n) => {

@@ -1149,7 +1149,7 @@ fn curve_matches_reference() {
 #[test]
 fn a_cubic_grid_makes_boxes() {
     let Some(gpu) = gpu() else { return eprintln!("no GPU adapter; skipping") };
-    let g = single_node_graph(NodeKind::Grid { counts: [4.0; 3], corners: false, cubic: true });
+    let g = single_node_graph(NodeKind::Grid { counts: [4.0; 3], corners: false, cubic: true, amount: 1.0 });
     // In the first cell (0..0.25): its centre, a point on a face's middle, and the cell corner (a box is 1 there too).
     let v = eval(&gpu, &g, &[[0.125; 3], [0.25, 0.125, 0.125], [0.25, 0.25, 0.25], [0.0, 0.125, 0.125 + 0.0625], [0.125 + 0.0625, 0.125 + 0.03125, 0.125]]);
     near(v[0], -1.0, "centre");
@@ -1158,6 +1158,9 @@ fn a_cubic_grid_makes_boxes() {
     near(v[3], 1.0, "other face");
     // Half way from the centre to a face along x (0.25 of a cell), with smaller offsets on the other axes: the largest offset decides.
     near(v[4], 0.0, "largest offset");
+    // The amount scales it like it does a noise.
+    let scaled = single_node_graph(NodeKind::Grid { counts: [4.0; 3], corners: false, cubic: true, amount: 0.25 });
+    near(eval(&gpu, &scaled, &[[0.25, 0.125, 0.125]])[0], 0.25, "amount");
 }
 
 #[test]
@@ -1165,7 +1168,7 @@ fn grid_spans_minus_one_to_one_and_tiles() {
     let Some(gpu) = gpu() else { return eprintln!("no GPU adapter; skipping") };
     for corners in [false, true] {
         for counts in [[8.0, 8.0, 8.0], [8.0, 4.0, 2.0]] {
-            let g = single_node_graph(NodeKind::Grid { counts, corners, cubic: false });
+            let g = single_node_graph(NodeKind::Grid { counts, corners, cubic: false, amount: 1.0 });
             let centre = [0.5 / counts[0], 0.5 / counts[1], 0.5 / counts[2]];
             let corner = [1.0 / counts[0], 2.0 / counts[1], 1.0 / counts[2]];
             let v = eval(&gpu, &g, &[centre, corner]);
@@ -1203,7 +1206,7 @@ fn bricks_distance_without_offset_is_the_grid_distance() {
         p.steps = 1;
         p.counts = [8.0, 4.0, 2.0];
     });
-    let grid = single_node_graph(NodeKind::Grid { counts: [8.0, 4.0, 2.0], corners: false, cubic: false });
+    let grid = single_node_graph(NodeKind::Grid { counts: [8.0, 4.0, 2.0], corners: false, cubic: false, amount: 1.0 });
     let (a, b) = (eval(&gpu, &bricks, &pts), eval(&gpu, &grid, &pts));
     let worst = a.iter().zip(&b).map(|(x, y)| (x - y).abs()).fold(0.0, f32::max);
     assert!(worst < 1e-4, "bricks (no row offset) differ from the grid by {worst}");
@@ -1336,8 +1339,8 @@ fn render_pattern_images() {
         ("bricks_distance", bricks_graph(|p| p.output = Distance)),
         ("bricks_cells", bricks_graph(|p| p.output = CellValue)),
         ("bricks_thirds", bricks_graph(|p| { p.output = Shape; p.steps = 3; p.counts = [6.0, 24.0, 8.0]; })),
-        ("grid_centres", single_node_graph(NodeKind::Grid { counts: [8.0; 3], corners: false, cubic: false })),
-        ("grid_corners", single_node_graph(NodeKind::Grid { counts: [8.0; 3], corners: true, cubic: false })),
+        ("grid_centres", single_node_graph(NodeKind::Grid { counts: [8.0; 3], corners: false, cubic: false, amount: 1.0 })),
+        ("grid_corners", single_node_graph(NodeKind::Grid { counts: [8.0; 3], corners: true, cubic: false, amount: 1.0 })),
         ("checker", single_node_graph(NodeKind::Pattern(crate::graph::PatternParams::for_kind(crate::graph::PatternKind::Checker)))),
         ("stripes_square", single_node_graph(NodeKind::Pattern({ let mut p = crate::graph::PatternParams::for_kind(crate::graph::PatternKind::Stripes); p.variant = 3; p.dir = [1.0, 1.0, 0.0]; p.counts[0] = 6.0; p.width = 0.4; p }))),
         ("dimples_golf", single_node_graph(NodeKind::Pattern(crate::graph::PatternParams::for_kind(crate::graph::PatternKind::Dimples)))),
@@ -2285,7 +2288,7 @@ mod pattern_family_tests {
         // A cubic lattice's distance is the Grid node's cell-centre distance, anisotropic counts included.
         let pts = points(4000, 3);
         let cubic = pattern(Dimples, |p| { p.counts = [8.0, 4.0, 2.0]; p.variant = 0; p.output = PatternOutput::Distance; });
-        let grid = single_node_graph(NodeKind::Grid { counts: [8.0, 4.0, 2.0], corners: false, cubic: false });
+        let grid = single_node_graph(NodeKind::Grid { counts: [8.0, 4.0, 2.0], corners: false, cubic: false, amount: 1.0 });
         let (x, y) = (eval(&gpu, &cubic, &pts), eval(&gpu, &grid, &pts));
         let worst = x.iter().zip(&y).map(|(a, b)| (a - b).abs()).fold(0.0, f32::max);
         assert!(worst < 1e-4, "cubic dimple distance differs from Grid by {worst}");

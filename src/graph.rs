@@ -255,6 +255,10 @@ pub enum WorleyMetric {
     Chebyshev = 2,
 }
 
+fn default_true() -> bool {
+    true
+}
+
 fn one() -> f32 {
     1.0
 }
@@ -632,8 +636,11 @@ pub enum NodeKind {
         #[serde(default)]
         corners: bool,
         /// Square cells (the largest offset along any axis, so the cells are sharp-cornered boxes) instead of round ones.
-        #[serde(default)]
+        #[serde(default = "default_true")]
         cubic: bool,
+        /// Scales the output (see `lower`: it becomes a Multiply after the node).
+        #[serde(default = "one")]
+        amount: f32,
     },
     /// A regular pattern (see `PatternParams`). Input: position (defaults to world position).
     Pattern(PatternParams),
@@ -839,6 +846,7 @@ impl Graph {
             let amount = match &n.kind {
                 NodeKind::Noise(p) => p.amount,
                 NodeKind::Pattern(p) => p.amount,
+                NodeKind::Grid { amount, .. } => *amount,
                 _ => continue,
             };
             if amount == 1.0 || n.muted {
@@ -849,6 +857,7 @@ impl Graph {
             match &mut inner.kind {
                 NodeKind::Noise(p) => p.amount = 1.0,
                 NodeKind::Pattern(p) => p.amount = 1.0,
+                NodeKind::Grid { amount, .. } => *amount = 1.0,
                 _ => {}
             }
             let new = g.nodes.keys().next_back().map_or(0, |k| k + 1);
@@ -1754,7 +1763,7 @@ mod tests {
         g.prune_edges();
         assert!(g.input(sm, 2).is_none());
         // Ranges.
-        let grid = g.add(NodeKind::Grid { counts: [8.0; 3], corners: false, cubic: false }, [0.0; 2]);
+        let grid = g.add(NodeKind::Grid { counts: [8.0; 3], corners: false, cubic: false, amount: 1.0 }, [0.0; 2]);
         g.connect(grid, 2, 0);
         assert_eq!(g.density_range(), (-1.0, 1.0));
         let remap = g.add(NodeKind::Remap { vals: [0.0, 0.0, 1.0, -5.0, 5.0], clamp: false }, [0.0; 2]);
@@ -1770,11 +1779,11 @@ mod tests {
         assert_eq!(t(&g, remap), Tiling::Periodic);
         g.connect(0, remap, 0);
         assert!(matches!(t(&g, remap), Tiling::Broken(_))); // remapping a position
-        g.nodes.get_mut(&grid).unwrap().kind = NodeKind::Grid { counts: [8.5, 8.0, 8.0], corners: false, cubic: false };
+        g.nodes.get_mut(&grid).unwrap().kind = NodeKind::Grid { counts: [8.5, 8.0, 8.0], corners: false, cubic: false, amount: 1.0 };
         assert!(matches!(t(&g, grid), Tiling::Broken(_)));
         // The node was called Brick (without the corner option) until it was renamed.
         let old = serde_json::from_str::<NodeKind>(r#"{"Brick":{"counts":[4.0,4.0,4.0]}}"#).unwrap();
-        assert_eq!(old, NodeKind::Grid { counts: [4.0; 3], corners: false, cubic: false });
+        assert_eq!(old, NodeKind::Grid { counts: [4.0; 3], corners: false, cubic: true, amount: 1.0 });
         // A Math node saved before the blend width existed still loads.
         let old = r#"{"op":"Add","a":1.0,"b":2.0}"#;
         assert!(matches!(serde_json::from_str::<NodeKind>(&format!("{{\"Math\":{old}}}")), Ok(NodeKind::Math { c, .. }) if c == 0.5));

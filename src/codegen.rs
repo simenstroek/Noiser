@@ -135,7 +135,7 @@ fn compile_inner(g: &Graph, caches: &BTreeMap<NodeId, u32>, eps: f32, preview: b
                 params.extend(vals);
                 params.push(if *clamp { 1.0 } else { 0.0 });
             }
-            NodeKind::Grid { counts, corners, cubic } => {
+            NodeKind::Grid { counts, corners, cubic, .. } => {
                 params.extend(counts);
                 params.push(if *corners { 1.0 } else { 0.0 });
                 params.push(if *cubic { 1.0 } else { 0.0 });
@@ -482,7 +482,7 @@ pub(crate) fn random_graph(rnd: &mut impl FnMut(usize) -> usize) -> Graph {
             4 => K::Remap { vals: [0.0, 0.0, 1.0, -1.0, 2.0], clamp: rnd(2) == 0 },
             5 => K::Mix { vals: [0.5, 0.0, 1.0], clamp: rnd(2) == 0 },
             6 => K::Curve { points: vec![[1.0, 0.0], [0.0, 1.0], [0.5, 3.0]][..1 + rnd(3)].to_vec(), mode: CurveMode::ALL[rnd(4)] },
-            7 => K::Grid { counts: [4.0; 3], corners: rnd(2) == 0, cubic: rnd(2) == 0 },
+            7 => K::Grid { counts: [4.0; 3], corners: rnd(2) == 0, cubic: rnd(2) == 0, amount: 1.0 },
             8 => K::Pattern(PatternParams::for_kind(PatternKind::ALL[rnd(8)])),
             9 => K::Normal { flip: rnd(2) == 0 },
             10 => K::Reroute,
@@ -677,8 +677,8 @@ mod tests {
         let mut extra: Vec<NodeId> = ops[6..].to_vec();
         for kind in [
             NodeKind::Remap { vals: [0.0, 0.0, 1.0, -2.0, 2.0], clamp: true },
-            NodeKind::Grid { counts: [4.0; 3], corners: false, cubic: false },
-            NodeKind::Grid { counts: [4.0; 3], corners: true, cubic: false },
+            NodeKind::Grid { counts: [4.0; 3], corners: false, cubic: false, amount: 1.0 },
+            NodeKind::Grid { counts: [4.0; 3], corners: true, cubic: false, amount: 1.0 },
         ]
         .into_iter()
         .chain([crate::graph::PatternOutput::Distance, crate::graph::PatternOutput::Shape, crate::graph::PatternOutput::CellValue].map(|output| {
