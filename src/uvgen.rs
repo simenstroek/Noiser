@@ -84,7 +84,7 @@ pub struct UvParams {
 
 impl Default for UvParams {
     fn default() -> Self {
-        UvParams { resolution: 2048, padding: 4, max_cost: 4.0, normal_deviation: 2.0, brute_force: true, smoothing: 10, merge_rounds: 0, absorb_tiny: true }
+        UvParams { resolution: 2048, padding: 4, max_cost: 4.0, normal_deviation: 2.0, brute_force: true, smoothing: 3, merge_rounds: 0, absorb_tiny: true }
     }
 }
 
