@@ -56,11 +56,13 @@ pub struct OutParams {
     pub image: crate::bake::ImageFormat,
     /// Mesh outputs: PLY instead of OBJ.
     pub ply: bool,
+    /// Mesh outputs: a binary glTF (.glb) instead (takes precedence over `ply`).
+    pub glb: bool,
 }
 
 impl Default for OutParams {
     fn default() -> Self {
-        OutParams { folder: String::new(), name: "output".into(), image: Default::default(), ply: false }
+        OutParams { folder: String::new(), name: "output".into(), image: Default::default(), ply: false, glb: false }
     }
 }
 
@@ -338,14 +340,14 @@ impl Runner<'_> {
             let value = self.value(graph, &lowered, src, &mut memo, &mut fields)?;
             match (&graph.nodes[&out].kind, value) {
                 (NodeKind::OutMesh(o), Value::Uv(uv)) => {
-                    let path = self.output_path(o, "", if o.ply { "ply" } else { "obj" });
-                    (if o.ply { uv.write_ply(&path) } else { uv.write_obj(&path) }).map_err(|e| format!("{}: {e}", path.display()))?;
+                    let path = self.output_path(o, "", if o.glb { "glb" } else if o.ply { "ply" } else { "obj" });
+                    (if o.glb { crate::meshformats::write_glb(&path, &uv.positions, &uv.normals, Some(&uv.uvs), &uv.triangles) } else if o.ply { uv.write_ply(&path) } else { uv.write_obj(&path) }).map_err(|e| format!("{}: {e}", path.display()))?;
                     (self.log)(&format!("wrote {}", path.display()));
                     written.push(path);
                 }
                 (NodeKind::OutMesh(o), Value::Mesh(mesh)) => {
-                    let path = self.output_path(o, "", if o.ply { "ply" } else { "obj" });
-                    (if o.ply { mesh.write_ply(&path) } else { mesh.write_obj(&path) }).map_err(|e| format!("{}: {e}", path.display()))?;
+                    let path = self.output_path(o, "", if o.glb { "glb" } else if o.ply { "ply" } else { "obj" });
+                    (if o.glb { crate::meshformats::write_glb(&path, &mesh.positions, &mesh.normals, None, &mesh.triangles) } else if o.ply { mesh.write_ply(&path) } else { mesh.write_obj(&path) }).map_err(|e| format!("{}: {e}", path.display()))?;
                     (self.log)(&format!("wrote {}", path.display()));
                     written.push(path);
                 }

@@ -175,8 +175,17 @@ pub fn props(ui: &mut egui::Ui, kind: &mut NodeKind) -> bool {
                 });
             } else {
                 ui.horizontal(|ui| {
-                    ui.selectable_value(&mut o.ply, false, "OBJ");
-                    ui.selectable_value(&mut o.ply, true, "PLY (binary)");
+                    let (mut ply, mut glb) = (o.ply, o.glb);
+                    if ui.selectable_label(!ply && !glb, "OBJ").clicked() {
+                        (ply, glb) = (false, false);
+                    }
+                    if ui.selectable_label(ply && !glb, "PLY (binary)").clicked() {
+                        (ply, glb) = (true, false);
+                    }
+                    if ui.selectable_label(glb, "glTF (.glb)").clicked() {
+                        (ply, glb) = (false, true);
+                    }
+                    (o.ply, o.glb) = (ply, glb);
                 });
             }
             path_row(ui, "output folder", &mut o.folder, "folder (empty: next to the graph)", None);
