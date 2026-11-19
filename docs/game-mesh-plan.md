@@ -125,3 +125,5 @@ The absorb step turned out to reject 249 of 290 candidate islands on the rock, a
 
 The log now reports the number of triangles stretched over 100x instead of the maximum, which was capped at 1000 and looked like an error; those are slivers of the remesh or zero-area UV triangles.
 
+Tried and rejected after v0.13.0: packing the charts a second time after absorbing (xatlas `add_uv_mesh`, first pass without best packing, repack with it; the wrapper counts contiguous UV data in threes, so the UVs have to go in as strided bytes). Rock 20k: coverage 66.2% to 63.5%, overlap 0.000% to 0.130%, one flipped triangle, mean stretch 1.25 to 1.50, time 36 s to 30 s. The merges kept or undone differ when the first layout is not the best-packed one, and the repack does not help what they kept. Not kept.
+
