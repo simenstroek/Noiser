@@ -1867,6 +1867,24 @@ fn a_mesh_graph_transfers_the_uvs_of_its_mesh_to_the_remeshed_result() {
     assert!(log.iter().any(|l| l.contains("island")), "{log:?}");
 }
 
+/// A mesh file in centimetres (1 unit = 1 cm) gets the noise's frequency divided and its amplitude multiplied by 100.
+#[test]
+fn the_unit_of_the_mesh_scales_the_noise_graphs_frequency_and_amplitude() {
+    let noise = noise_graph(NoiseParams { kind: NoiseKind::Perlin, scale: 3.0, ..Default::default() });
+    let constants = |unit_cm: f32| {
+        let mut g = Graph::default();
+        g.add(NodeKind::LoadMesh(crate::meshgraph::LoadMeshParams { path: "m.obj".into(), unit_cm, ..Default::default() }), [0.0; 2]);
+        g.add(NodeKind::NoiseGraph(crate::meshgraph::NoiseGraphParams { embedded: noise.to_json(), frequency: 2.0, amplitude: 0.5, ..Default::default() }), [0.0; 2]);
+        let lowered = crate::meshgraph::lowered_mesh(&g, std::path::Path::new(".")).unwrap();
+        let mut k: Vec<f32> = lowered.nodes.values().filter_map(|n| if let NodeKind::Math { op: crate::graph::MathOp::Multiply, b, .. } = &n.kind { Some(*b) } else { None }).collect();
+        k.sort_by(|a, b| a.total_cmp(b));
+        k
+    };
+    assert_eq!(constants(100.0), vec![0.5, 2.0], "metres: unchanged");
+    let cm = constants(1.0);
+    assert!((cm[0] - 0.02).abs() < 1e-6 && (cm[1] - 50.0).abs() < 1e-4, "{cm:?}");
+}
+
 /// A level of detail: the UVs of an unwrapped Remesh carried onto a coarser Remesh of the same field.
 #[test]
 fn a_coarser_remesh_takes_the_uvs_of_an_unwrapped_one_through_transfer_uvs() {
