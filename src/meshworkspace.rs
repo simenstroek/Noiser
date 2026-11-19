@@ -147,6 +147,10 @@ pub struct MeshWorkspace {
     /// The ray-marched view of the field beside the software view, its worker, last picture, last error, and what was
     /// last requested (graph key, view, size) with when the graph key last changed.
     pub field_view: bool,
+    /// The mesh view's surface: 0 baked normal and occlusion lit (default), 1 smooth grey, 2 and up map k - 2 unlit.
+    surface: usize,
+    surface_tex: Option<egui::TextureHandle>,
+    surface_key: Option<(i32, i32, i32, usize, usize)>,
     ray: Option<RayWorker>,
     ray_tex: Option<egui::TextureHandle>,
     ray_error: Option<String>,
@@ -173,6 +177,44 @@ struct Preview {
     island: Vec<u32>,
     /// Smooth vertex normals (area weighted), for shading.
     normals: Vec<[f32; 3]>,
+    /// The baked maps of the run (RGB, at most 1024 px) for the textured views, and whether the normal map has green up.
+    maps: Vec<MapImage>,
+    green_up: bool,
+}
+
+/// A baked map kept in memory for the textured mesh view.
+struct MapImage {
+    name: String,
+    size: [usize; 2],
+    rgb: Vec<u8>,
+}
+
+impl MapImage {
+    fn load(path: &std::path::Path) -> Option<MapImage> {
+        let img = image::open(path).ok()?;
+        let img = if img.width().max(img.height()) > 1024 { img.thumbnail(1024, 1024) } else { img }.to_rgb8();
+        let stem = path.file_stem()?.to_string_lossy().into_owned();
+        Some(MapImage { name: stem, size: [img.width() as usize, img.height() as usize], rgb: img.into_raw() })
+    }
+
+    /// Bilinear sample at (u, v) with v down, wrapping outside 0 to 1, as 0 to 1 floats.
+    fn sample(&self, u: f32, v: f32) -> [f32; 3] {
+        let (w, h) = (self.size[0], self.size[1]);
+        let (x, y) = (u * w as f32 - 0.5, v * h as f32 - 0.5);
+        let (x0, y0) = (x.floor(), y.floor());
+        let (fx, fy) = (x - x0, y - y0);
+        let px = |i: f32, j: f32| {
+            let (i, j) = ((i as i64).clamp(0, w as i64 - 1) as usize, (j as i64).clamp(0, h as i64 - 1) as usize);
+            let at = (j * w + i) * 3;
+            [self.rgb[at] as f32, self.rgb[at + 1] as f32, self.rgb[at + 2] as f32]
+        };
+        let (a, b, c, d) = (px(x0, y0), px(x0 + 1.0, y0), px(x0, y0 + 1.0), px(x0 + 1.0, y0 + 1.0));
+        std::array::from_fn(|k| ((a[k] * (1.0 - fx) + b[k] * fx) * (1.0 - fy) + (c[k] * (1.0 - fx) + d[k] * fx) * fy) / 255.0)
+    }
+
+    fn is(&self, what: &str) -> bool {
+        self.name.to_lowercase().contains(&what.to_lowercase())
+    }
 }
 
 impl Preview {
@@ -198,7 +240,7 @@ impl Preview {
             let l = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt().max(1e-20);
             *n = [n[0] / l, n[1] / l, n[2] / l];
         }
-        Ok(Preview { normals, positions, triangles: mesh.triangles, name: path.file_name().map_or(String::new(), |n| n.to_string_lossy().into_owned()), uvs: if island.is_empty() { Vec::new() } else { mesh.uvs }, island })
+        Ok(Preview { normals, positions, triangles: mesh.triangles, name: path.file_name().map_or(String::new(), |n| n.to_string_lossy().into_owned()), uvs: if island.is_empty() { Vec::new() } else { mesh.uvs }, island, maps: Vec::new(), green_up: false })
     }
 
     /// The UV layout: the 0 to 1 square with every triangle, filled by island.
@@ -225,6 +267,110 @@ impl Preview {
             painter.extend(lines);
         }
         painter.rect_stroke(square, 0.0, egui::Stroke::new(1.0, egui::Color32::from_gray(140)), egui::StrokeKind::Outside);
+    }
+
+    /// The mesh as a picture of `size` pixels, rasterized in software with the baked maps: `surface` 0 lights the
+    /// normal map and multiplies the occlusion map, 1 and up show map `surface - 1` as it is, without light.
+    /// None when there is nothing to texture (no UVs or maps).
+    fn render(&self, size: usize, yaw: f32, pitch: f32, zoom: f32, surface: usize) -> Option<egui::ColorImage> {
+        if self.uvs.is_empty() || self.maps.is_empty() || size < 8 {
+            return None;
+        }
+        let normal_map = self.maps.iter().find(|m| m.is("normal"));
+        let occlusion = self.maps.iter().find(|m| m.is("occlusion"));
+        let unlit = surface.checked_sub(1).and_then(|k| self.maps.get(k));
+        let (cy, sy, cp, sp) = (yaw.cos(), yaw.sin(), pitch.cos(), pitch.sin());
+        let view = |p: [f32; 3]| {
+            let x = cy * p[0] + sy * p[2];
+            let z = -sy * p[0] + cy * p[2];
+            [x, cp * p[1] - sp * z, sp * p[1] + cp * z]
+        };
+        let v: Vec<[f32; 3]> = self.positions.iter().map(|p| view(*p)).collect();
+        let vn: Vec<[f32; 3]> = self.normals.iter().map(|n| view(*n)).collect();
+        let scale = 0.45 * size as f32 * zoom;
+        let c = size as f32 / 2.0;
+        let sub = |a: [f32; 3], b: [f32; 3]| [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+        let dot = |a: [f32; 3], b: [f32; 3]| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+        let cross = |a: [f32; 3], b: [f32; 3]| [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+        let unit = |a: [f32; 3]| {
+            let l = dot(a, a).sqrt().max(1e-20);
+            [a[0] / l, a[1] / l, a[2] / l]
+        };
+        let light = unit([0.35, 0.55, 0.75]);
+        let mut depth = vec![f32::MIN; size * size];
+        let mut pixels = vec![egui::Color32::TRANSPARENT; size * size];
+        for (t, tri) in self.triangles.iter().enumerate() {
+            let p = tri.map(|k| v[k as usize]);
+            let s = p.map(|q| [c + q[0] * scale, c - q[1] * scale]);
+            let area = (s[1][0] - s[0][0]) * (s[2][1] - s[0][1]) - (s[2][0] - s[0][0]) * (s[1][1] - s[0][1]);
+            if area.abs() < 1e-9 {
+                continue;
+            }
+            let face = unit(cross(sub(p[1], p[0]), sub(p[2], p[0])));
+            let back = face[2] < 0.0;
+            // Per-triangle tangent frame from the texture coordinates (v down, as the baker's tangents are).
+            let uv = self.uvs[t].map(|q| [q[0], 1.0 - q[1]]);
+            let (e1, e2) = (sub(p[1], p[0]), sub(p[2], p[0]));
+            let (du1, dv1, du2, dv2) = (uv[1][0] - uv[0][0], uv[1][1] - uv[0][1], uv[2][0] - uv[0][0], uv[2][1] - uv[0][1]);
+            let det = du1 * dv2 - du2 * dv1;
+            let (tangent, bitangent) = if det.abs() > 1e-12 {
+                let f = 1.0 / det;
+                (std::array::from_fn(|a| f * (dv2 * e1[a] - dv1 * e2[a])), std::array::from_fn(|a| f * (-du2 * e1[a] + du1 * e2[a])))
+            } else {
+                ([1.0, 0.0, 0.0], [0.0, 1.0, 0.0])
+            };
+            let (min_x, max_x) = (s.iter().map(|q| q[0]).fold(f32::MAX, f32::min).floor().max(0.0) as usize, (s.iter().map(|q| q[0]).fold(f32::MIN, f32::max).ceil().max(0.0) as usize).min(size));
+            let (min_y, max_y) = (s.iter().map(|q| q[1]).fold(f32::MAX, f32::min).floor().max(0.0) as usize, (s.iter().map(|q| q[1]).fold(f32::MIN, f32::max).ceil().max(0.0) as usize).min(size));
+            for y in min_y..max_y {
+                for x in min_x..max_x {
+                    let (px, py) = (x as f32 + 0.5, y as f32 + 0.5);
+                    let b1 = ((px - s[0][0]) * (s[2][1] - s[0][1]) - (s[2][0] - s[0][0]) * (py - s[0][1])) / area;
+                    let b2 = ((s[1][0] - s[0][0]) * (py - s[0][1]) - (px - s[0][0]) * (s[1][1] - s[0][1])) / area;
+                    let b0 = 1.0 - b1 - b2;
+                    if b0 < 0.0 || b1 < 0.0 || b2 < 0.0 {
+                        continue;
+                    }
+                    let z = b0 * p[0][2] + b1 * p[1][2] + b2 * p[2][2];
+                    if z <= depth[y * size + x] {
+                        continue;
+                    }
+                    depth[y * size + x] = z;
+                    let colour = if back {
+                        [0.43, 0.1, 0.1]
+                    } else {
+                        let w = [b0, b1, b2];
+                        let (tu, tv) = (b0 * uv[0][0] + b1 * uv[1][0] + b2 * uv[2][0], b0 * uv[0][1] + b1 * uv[1][1] + b2 * uv[2][1]);
+                        if let Some(m) = unlit {
+                            m.sample(tu, tv)
+                        } else {
+                            let n_low = unit(std::array::from_fn(|a| w[0] * vn[tri[0] as usize][a] + w[1] * vn[tri[1] as usize][a] + w[2] * vn[tri[2] as usize][a]));
+                            let n = match normal_map {
+                                Some(m) => {
+                                    let tx = m.sample(tu, tv);
+                                    let (x, mut y, zz) = (2.0 * tx[0] - 1.0, 2.0 * tx[1] - 1.0, 2.0 * tx[2] - 1.0);
+                                    if self.green_up {
+                                        y = -y;
+                                    }
+                                    let tt = unit(sub(tangent, std::array::from_fn(|a| n_low[a] * dot(tangent, n_low))));
+                                    let bb = {
+                                        let b = cross(n_low, tt);
+                                        if dot(b, bitangent) < 0.0 { [-b[0], -b[1], -b[2]] } else { b }
+                                    };
+                                    unit(std::array::from_fn(|a| tt[a] * x + bb[a] * y + n_low[a] * zz))
+                                }
+                                None => n_low,
+                            };
+                            let lit = 0.2 + 0.8 * dot(n, light).max(0.0);
+                            let ao = occlusion.map_or(1.0, |m| m.sample(tu, tv)[0]);
+                            let k = lit * (0.25 + 0.75 * ao);
+                            [0.804 * k, 0.765 * k, 0.686 * k]
+                        }
+                    };
+                    pixels[y * size + x] = egui::Color32::from_rgb((colour[0].clamp(0.0, 1.0) * 255.0) as u8, (colour[1].clamp(0.0, 1.0) * 255.0) as u8, (colour[2].clamp(0.0, 1.0) * 255.0) as u8);
+                }
+            }
+        }
+        Some(egui::ColorImage { size: [size, size], source_size: egui::vec2(size as f32, size as f32), pixels })
     }
 
     /// Smooth-shaded triangles, far ones first, as one egui mesh in `rect`.
@@ -287,7 +433,7 @@ impl Default for MeshWorkspace {
         let mut editor = crate::editor::Editor::default();
         editor.mesh_mode = true;
         editor.frame_next = true;
-        MeshWorkspace { saved: graph.clone(), graph, editor, path: None, cache: Arc::new(Mutex::new(MeshCache::default())), job: None, log: Vec::new(), written: Vec::new(), seed: 0, autorun: false, preview: None, show_uv: false, thumbnails: Vec::new(), map_files: Vec::new(), show_map: false, map_index: 0, map_tex: None, map_zoom: 1.0, map_pan: egui::Vec2::ZERO, field_view: true, ray: None, ray_tex: None, ray_error: None, ray_sent: None, ray_key: (0, None), auto_preview: false, preview_key: 0, changed_since: None, history: crate::history::History::new(&Graph::default()), yaw: 0.6, pitch: 0.35, zoom: 1.0 }
+        MeshWorkspace { saved: graph.clone(), graph, editor, path: None, cache: Arc::new(Mutex::new(MeshCache::default())), job: None, log: Vec::new(), written: Vec::new(), seed: 0, autorun: false, preview: None, show_uv: false, thumbnails: Vec::new(), map_files: Vec::new(), show_map: false, map_index: 0, map_tex: None, map_zoom: 1.0, map_pan: egui::Vec2::ZERO, field_view: true, surface: 0, surface_tex: None, surface_key: None, ray: None, ray_tex: None, ray_error: None, ray_sent: None, ray_key: (0, None), auto_preview: false, preview_key: 0, changed_since: None, history: crate::history::History::new(&Graph::default()), yaw: 0.6, pitch: 0.35, zoom: 1.0 }
     }
 }
 
@@ -565,8 +711,14 @@ impl crate::App {
                     self.status = format!("Mesh graph: {} file(s) written", files.len());
                     self.mesh_ws.preview = files.iter().find(|f| f.extension().is_some_and(|e| e == "obj" || e == "ply" || e == "glb")).and_then(|f| Preview::load(f).ok());
                     self.mesh_ws.map_files = files.iter().filter(|f| f.extension().is_some_and(|e| e == "png")).take(8).cloned().collect();
+                    self.mesh_ws.surface = 0;
+                    self.mesh_ws.surface_key = None;
                     self.mesh_ws.map_tex = None;
                     self.mesh_ws.map_index = 0;
+                    if let Some(p) = &mut self.mesh_ws.preview {
+                        p.maps = self.mesh_ws.map_files.iter().filter_map(|f| MapImage::load(f)).collect();
+                        p.green_up = self.mesh_ws.graph.nodes.values().any(|n| matches!(&n.kind, NodeKind::Bake(b) if b.green_up));
+                    }
                     self.mesh_ws.thumbnails = files
                         .iter()
                         .filter(|f| f.extension().is_some_and(|e| e == "png"))
@@ -872,8 +1024,59 @@ impl crate::App {
                 painter.line_segment([egui::pos2(view_rect.min.x, view_rect.min.y), egui::pos2(view_rect.min.x, view_rect.max.y)], egui::Stroke::new(1.0, egui::Color32::from_gray(60)));
                 painter.text(fr.left_top() + egui::vec2(8.0, 22.0), egui::Align2::LEFT_TOP, "Field (ray marched)", egui::FontId::proportional(11.0), egui::Color32::from_gray(120));
             }
+            let preview = self.mesh_ws.preview.take();
+            match &preview {
+                _ if map_view => {}
+                Some(p) => {
+                    let uv = self.mesh_ws.show_uv && !p.uvs.is_empty();
+                    if uv {
+                        p.paint_uv(&painter, view_rect);
+                    } else {
+                        let ws = &mut self.mesh_ws;
+                        let side = (view_rect.width().min(view_rect.height()) as usize).clamp(64, 800);
+                        let textured = ws.surface != 1 && !p.maps.is_empty() && !p.uvs.is_empty() && p.triangles.len() <= 150_000;
+                        let key = (((ws.yaw * 100.0) as i32), ((ws.pitch * 100.0) as i32), ((ws.zoom * 100.0) as i32), ws.surface, side);
+                        if textured {
+                            if ws.surface_key != Some(key) || ws.surface_tex.is_none() {
+                                if let Some(img) = p.render(side, ws.yaw, ws.pitch, ws.zoom, ws.surface) {
+                                    ws.surface_tex = Some(ctx.load_texture("mesh surface", img, egui::TextureOptions::LINEAR));
+                                    ws.surface_key = Some(key);
+                                }
+                            }
+                            if let Some(tex) = &ws.surface_tex {
+                                let img = egui::Rect::from_center_size(view_rect.center(), egui::vec2(side as f32, side as f32));
+                                painter.image(tex.id(), img, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), egui::Color32::WHITE);
+                            }
+                        } else {
+                            p.paint(&painter, view_rect, ws.yaw, ws.pitch, ws.zoom);
+                        }
+                    }
+                    let hint = if uv { "UV layout" } else { "Drag to turn, scroll to zoom, double-click to reset." };
+                    painter.text(rect.left_top() + egui::vec2(8.0, 6.0), egui::Align2::LEFT_TOP, format!("{}: {} triangles. {hint}", p.name, p.triangles.len()), egui::FontId::proportional(12.0), egui::Color32::from_gray(160));
+                }
+                None => _ = painter.text(rect.center(), egui::Align2::CENTER_CENTER, "Run the graph to see its mesh here", egui::FontId::proportional(14.0), egui::Color32::from_gray(120)),
+            }
+            self.mesh_ws.preview = preview;
             let has_maps = !self.mesh_ws.map_files.is_empty();
             let has_uv = self.mesh_ws.preview.as_ref().is_some_and(|p| !p.uvs.is_empty());
+            let surface_names: Vec<String> = self.mesh_ws.preview.as_ref().map(|p| p.maps.iter().map(|m| m.name.clone()).collect()).unwrap_or_default();
+            if !surface_names.is_empty() && !map_view && !self.mesh_ws.show_uv {
+                let at = egui::Rect::from_min_size(egui::pos2(rect.right() - 260.0, rect.top() + 30.0), egui::vec2(256.0, 22.0));
+                ui.scope_builder(egui::UiBuilder::new().max_rect(at), |ui| {
+                    let current = match self.mesh_ws.surface {
+                        0 => "Baked normal and occlusion".to_string(),
+                        1 => "Smooth grey".to_string(),
+                        k => format!("{} (unlit)", surface_names.get(k - 2).cloned().unwrap_or_default()),
+                    };
+                    egui::ComboBox::from_id_salt("mesh surface").selected_text(current).width(240.0).show_ui(ui, |ui| {
+                        ui.selectable_value(&mut self.mesh_ws.surface, 0, "Baked normal and occlusion");
+                        ui.selectable_value(&mut self.mesh_ws.surface, 1, "Smooth grey");
+                        for (k, n) in surface_names.iter().enumerate() {
+                            ui.selectable_value(&mut self.mesh_ws.surface, k + 2, format!("{n} (unlit)"));
+                        }
+                    }).response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::ComboBox, true, "Mesh surface"));
+                });
+            }
             if has_maps || has_uv {
                 let corner = egui::Rect::from_min_size(egui::pos2(rect.right() - 260.0, rect.top() + 4.0), egui::vec2(256.0, 22.0));
                 ui.scope_builder(egui::UiBuilder::new().max_rect(corner), |ui| {
@@ -889,20 +1092,6 @@ impl crate::App {
                         (self.mesh_ws.show_uv, self.mesh_ws.show_map) = (mode == 1, mode == 2);
                     });
                 });
-            }
-            match &self.mesh_ws.preview {
-                _ if map_view => {}
-                Some(p) => {
-                    let uv = self.mesh_ws.show_uv && !p.uvs.is_empty();
-                    if uv {
-                        p.paint_uv(&painter, view_rect);
-                    } else {
-                        p.paint(&painter, view_rect, self.mesh_ws.yaw, self.mesh_ws.pitch, self.mesh_ws.zoom);
-                    }
-                    let hint = if uv { "UV layout" } else { "Drag to turn, scroll to zoom, double-click to reset." };
-                    painter.text(rect.left_top() + egui::vec2(8.0, 6.0), egui::Align2::LEFT_TOP, format!("{}: {} triangles. {hint}", p.name, p.triangles.len()), egui::FontId::proportional(12.0), egui::Color32::from_gray(160));
-                }
-                None => _ = painter.text(rect.center(), egui::Align2::CENTER_CENTER, "Run the graph to see its mesh here", egui::FontId::proportional(14.0), egui::Color32::from_gray(120)),
             }
         });
         // Double-clicking a Noise Graph node goes to that graph.
