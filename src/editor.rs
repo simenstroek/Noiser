@@ -350,6 +350,38 @@ impl Editor {
                 }
                 graph.frames[i].pos = [lo[0] + d.x, lo[1] + d.y];
             }
+            // Each side resizes the frame from that side (a thin strip centred on the border); the corner does two at once.
+            let w = 8.0 * z;
+            let strips = [
+                (Rect::from_min_max(Pos2::new(rect.left() - w / 2.0, rect.top() + 22.0 * z), Pos2::new(rect.left() + w / 2.0, rect.bottom() - 16.0 * z)), egui::CursorIcon::ResizeHorizontal, [true, false, false, false]),
+                (Rect::from_min_max(Pos2::new(rect.right() - w / 2.0, rect.top() + 22.0 * z), Pos2::new(rect.right() + w / 2.0, rect.bottom() - 16.0 * z)), egui::CursorIcon::ResizeHorizontal, [false, true, false, false]),
+                (Rect::from_min_max(Pos2::new(rect.left() + 16.0 * z, rect.top() - w / 2.0), Pos2::new(rect.right() - 16.0 * z, rect.top() + w / 2.0)), egui::CursorIcon::ResizeVertical, [false, false, true, false]),
+                (Rect::from_min_max(Pos2::new(rect.left() + 16.0 * z, rect.bottom() - w / 2.0), Pos2::new(rect.right() - 16.0 * z, rect.bottom() + w / 2.0)), egui::CursorIcon::ResizeVertical, [false, false, false, true]),
+            ];
+            for (k, (strip, cursor, [left, right, top, bottom])) in strips.into_iter().enumerate() {
+                let r = ui.interact(strip, ui.scope_id().with(("frame edge", i, k)), Sense::drag()).on_hover_cursor(cursor);
+                if r.dragged_by(egui::PointerButton::Primary) {
+                    let d = r.drag_delta() / z;
+                    let f = &mut graph.frames[i];
+                    let (min_w, min_h) = (80.0, 50.0);
+                    if left {
+                        let new_w = (f.size[0] - d.x).max(min_w);
+                        f.pos[0] += f.size[0] - new_w;
+                        f.size[0] = new_w;
+                    }
+                    if right {
+                        f.size[0] = (f.size[0] + d.x).max(min_w);
+                    }
+                    if top {
+                        let new_h = (f.size[1] - d.y).max(min_h);
+                        f.pos[1] += f.size[1] - new_h;
+                        f.size[1] = new_h;
+                    }
+                    if bottom {
+                        f.size[1] = (f.size[1] + d.y).max(min_h);
+                    }
+                }
+            }
             let corner = Rect::from_min_size(rect.right_bottom() - Vec2::splat(16.0 * z), Vec2::splat(16.0 * z));
             painter.line_segment([corner.right_bottom() - Vec2::new(12.0 * z, 2.0 * z), corner.right_bottom() - Vec2::new(2.0 * z, 12.0 * z)], Stroke::new(1.5, Color32::from_gray(150)));
             let grip = ui.interact(corner, ui.scope_id().with(("frame grip", i)), Sense::drag());
@@ -878,6 +910,14 @@ impl Editor {
                     if let Some(n) = graph.nodes.get_mut(id).filter(|n| !matches!(n.kind, NodeKind::OutDensity | NodeKind::OutNormal)) {
                         n.muted = !n.muted;
                     }
+                }
+            }
+            // C: a comment frame around the selected nodes (with room for its title bar).
+            if ui.input(|i| i.key_pressed(egui::Key::C) && !i.modifiers.command) && !self.selected.is_empty() {
+                let bounds = self.selected.iter().filter_map(|id| layouts.get(id)).map(|l| l.rect).reduce(|a, b| a.union(b));
+                if let Some(b) = bounds {
+                    let (lo, hi) = (self.to_graph(origin, b.min), self.to_graph(origin, b.max));
+                    graph.frames.push(crate::graph::Frame { title: "Frame".into(), pos: [lo.x - 16.0, lo.y - 38.0], size: [hi.x - lo.x + 32.0, hi.y - lo.y + 54.0] });
                 }
             }
             if ui.input(|i| i.key_pressed(egui::Key::F) && !i.modifiers.command) {
@@ -1417,6 +1457,33 @@ mod tests {
         h.event(egui::Event::Key { key: egui::Key::M, physical_key: Some(egui::Key::M), pressed: true, repeat: false, modifiers: Default::default() });
         h.run();
         assert!(h.state().1.nodes.values().filter(|n| n.muted).count() == 2);
+    }
+
+    /// C puts a frame around the selected nodes.
+    #[test]
+    fn c_frames_the_selection() {
+        use egui_kittest::Harness;
+        let mut h = Harness::builder().with_size(Vec2::new(900.0, 600.0)).with_step_dt(1.0 / 60.0).build_ui_state(
+            |ui, (ed, g): &mut (Editor, Graph)| {
+                egui_extras::install_image_loaders(ui.ctx());
+                ed.debug_origin = ui.available_rect_before_wrap().min;
+                ed.show(ui, g, &BTreeMap::new());
+            },
+            (Editor::default(), Graph::default_graph()),
+        );
+        h.run();
+        h.state_mut().0.selected = BTreeSet::from([0, 1]);
+        h.hover_at(Pos2::new(450.0, 300.0));
+        h.run();
+        h.event(egui::Event::Key { key: egui::Key::C, physical_key: Some(egui::Key::C), pressed: true, repeat: false, modifiers: Default::default() });
+        h.run();
+        let g = &h.state().1;
+        assert_eq!(g.frames.len(), 1);
+        let f = &g.frames[0];
+        for id in [0, 1] {
+            let p = g.nodes[&id].pos;
+            assert!(p[0] > f.pos[0] && p[1] > f.pos[1] + 22.0 && p[0] < f.pos[0] + f.size[0] && p[1] < f.pos[1] + f.size[1], "node {id} at {p:?} outside {f:?}");
+        }
     }
 
     /// The operator dropdown on a Math node switches the mode without the details panel, and a
