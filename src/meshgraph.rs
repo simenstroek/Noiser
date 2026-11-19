@@ -204,6 +204,8 @@ pub struct Runner<'a> {
     pub batch_file: Option<PathBuf>,
     /// Quick previews: Remesh nodes make at most this many triangles.
     pub max_triangles: Option<u32>,
+    /// The number the files of this run share when a name was taken (`rock_3.obj`, `rock_Normal_3.png`): the highest used so far.
+    pub numbering: std::cell::Cell<u32>,
 }
 
 impl Runner<'_> {
@@ -287,7 +289,17 @@ impl Runner<'_> {
         let dir = if o.folder.is_empty() { self.base.clone() } else { self.resolve(&o.folder) };
         let _ = std::fs::create_dir_all(&dir);
         let stem = self.batch_file.as_ref().and_then(|f| f.file_stem()).map_or(String::new(), |s| s.to_string_lossy().into_owned());
-        crate::meshapp::unique_path(&dir, &format!("{}{suffix}", o.name.replace("{name}", &stem)), ext)
+        let name = format!("{}{suffix}", o.name.replace("{name}", &stem));
+        // Never overwrite. The files of one run share their number when they can, so a mesh and its maps match.
+        let mut n = self.numbering.get().max(1);
+        loop {
+            let path = dir.join(if n == 1 { format!("{name}.{ext}") } else { format!("{name}_{n}.{ext}") });
+            if !path.exists() {
+                self.numbering.set(n);
+                return path;
+            }
+            n += 1;
+        }
     }
 
     /// The first Remesh result upstream of the first mesh output, at the triangle limit: a quick look at the shape
