@@ -77,7 +77,7 @@ tiling 3D texture for the preview, and the nodes it covers get a green outline. 
 
 **Crash recovery.** Rolling backups; after a crash you are offered the last one on the next start. A panic is also written to `crash.log` in Noiser's data folder (`%APPDATA%\Noiser\data` on Windows); please attach it to bug reports.
 
-**Meshes.** Import a low-resolution OBJ, PLY, STL, glTF or FBX (FBX is read in its own units and axes, with node transforms applied; UVs are kept) (File menu, drag and drop, or `noiser.exe --mesh file.obj`) and it appears as the
+**Meshes.** Import a low-resolution OBJ, PLY, STL, glTF or FBX (FBX is read in its own units and axes, with node transforms applied; UVs are kept; hidden meshes and all but the first level of a LOD group are skipped) (File menu, drag and drop, or `noiser.exe --mesh file.obj`) and it appears as the
 *Mesh* shape in the 3D view, shaped live by your graph. *Export displaced mesh* then writes a high-resolution
 OBJ or PLY of the same surface (as many samples along the longest side as you ask for), with small floating
 bits removed and the mesh's own size and position restored. The mesh can be made of overlapping parts, and when it has several separate ones the Mesh tab says how they combine: *union* (the default), *intersect* (only where all overlap, for interior spaces), or *smooth union / smooth intersect* with a blend width (`--combine MODE --combine-smooth W` headless). A
