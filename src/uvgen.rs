@@ -593,9 +593,15 @@ pub fn generate(mesh: &RawMesh, params: &UvParams) -> Result<UvMesh, String> {
         (uv, charts) = (u, c);
     }
     if params.absorb_tiny {
-        let absorbed = absorb_tiny_islands(&mut uv, min_faces, params.resolution as usize);
-        if std::env::var_os("NOISER_REMESH_DEBUG").is_some() {
-            eprintln!("absorbed {absorbed} tiny islands");
+        // Each round merges islands that did not absorb any in that round; the next one can then merge the grown ones.
+        for round in 0..4 {
+            let absorbed = absorb_tiny_islands(&mut uv, min_faces, params.resolution as usize);
+            if std::env::var_os("NOISER_REMESH_DEBUG").is_some() {
+                eprintln!("round {round}: absorbed {absorbed} tiny islands");
+            }
+            if absorbed == 0 {
+                break;
+            }
         }
     }
     Ok(uv)
