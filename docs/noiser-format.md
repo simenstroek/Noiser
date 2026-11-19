@@ -104,7 +104,9 @@ range of its points); the value is `(2t³−3t²+1)·y_i + (t³−2t²+t)·h·m_
 (`center` or `corner`). With `n = counts` and `f = fract(q·n)`, the offset from the reference point is
 `d = (f − 0.5) / n` for `center`, or `d = min(f, 1 − f) / n` (per component) for `corner`. The result is
 `|d| / (0.5·|1/n|)·2 − 1`: −1 at the reference point and +1 as far from it as the grid gets (the cell
-corners for `center`, the cell centres for `corner`). Tiles when every count is a whole number. Type float.
+corners for `center`, the cell centres for `corner`). With `"shape": "cubic"` (optional, absent means round) the
+result is instead `max(|f − 0.5|)·4 − 1` for `center` (`max(min(f, 1 − f))·4 − 1` for `corner`): the largest offset along
+any axis in cell units, so the cells are boxes. Tiles when every count is a whole number. Type float.
 
 ### `pattern`
 `kind` selects the pattern; version 1 has `bricks`, `checker`, `stripes`, `dimples`, `gyroid`, `fractal`, `truchet` and `honeycomb`. Common fields: `position` (op id or `null` for

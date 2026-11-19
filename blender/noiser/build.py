@@ -497,6 +497,8 @@ def build(data, name, tree_type=GN):
             elif kind == "grid":
                 # The format's formula, node by node: f = fract(q n); d = (f - 0.5) / n (centre) or min(f, 1 - f) / n
                 # (corner); the result is |d| / (0.5 |1 / n|) * 2 - 1.
+                if op.get("shape") == "cubic":
+                    raise Unsupported("cubic grid")
                 q = pos if op["position"] is None else out[op["position"]]
                 nx, ny, nz = [float(c) for c in op["counts"]]
                 f = b.vmath("FRACTION", b.vmath("MULTIPLY", q, (nx, ny, nz)))

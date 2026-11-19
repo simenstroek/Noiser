@@ -279,9 +279,15 @@ fn remap(x: f32, a: f32, b: f32, c: f32, d: f32, clamped: bool) -> f32 {
 // Distance to the centre of the grid cell containing q (or, with `corners`, to the nearest cell
 // corner), for n cells per tile on each axis, scaled to [-1, 1]: -1 at the reference point, +1 as far
 // from it as the grid gets. Tiles when every count is a whole number.
-fn grid_dist(q: vec3f, n_in: vec3f, corners: bool) -> f32 {
+// With `cubic` the offset is the largest one along any axis, in cell units (the cell is a box with sharp corners):
+// max(abs(0.5 - fract(q * n))) * 2 - 1.
+fn grid_dist(q: vec3f, n_in: vec3f, corners: bool, cubic: bool) -> f32 {
     let n = max(n_in, vec3f(1e-3));
     let f = fract(q * n);
+    if (cubic) {
+        let e = abs(select(f - 0.5, min(f, 1.0 - f), corners));
+        return max(e.x, max(e.y, e.z)) * 4.0 - 1.0;
+    }
     let d = select(f - 0.5, min(f, 1.0 - f), corners) / n;
     return length(d) / (0.5 * length(1.0 / n)) * 2.0 - 1.0;
 }

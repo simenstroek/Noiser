@@ -116,8 +116,13 @@ pub fn ops(g: &Graph, seed: u32) -> Result<Value, String> {
                     let sorted = crate::graph::curve_points(points);
                     json!({"op": "curve", "value": reference(id, 0).map_or(json!(0.0), |s| json!({"node": s})), "points": sorted, "mode": mode.label().to_lowercase()})
                 }
-                NodeKind::Grid { counts, corners } => {
-                    json!({"op": "grid", "position": input(id, 0), "counts": counts, "reference": if *corners { "corner" } else { "center" }})
+                NodeKind::Grid { counts, corners, cubic } => {
+                    let mut o = json!({"op": "grid", "position": input(id, 0), "counts": counts, "reference": if *corners { "corner" } else { "center" }});
+                    // Only when set, so older samplers keep working on older graphs.
+                    if *cubic {
+                        o["shape"] = json!("cubic");
+                    }
+                    o
                 }
                 NodeKind::Pattern(p) => {
                     let output = match p.output {

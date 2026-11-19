@@ -272,7 +272,7 @@ fn noise_palette() -> Vec<(&'static str, NodeKind)> {
             ("Named reroute", NodeKind::NamedReroute { name: "name".into() }),
             ("Use named reroute", NodeKind::NamedRerouteUse { name: "name".into() }),
             ("Curve", NodeKind::Curve { points: vec![[0.0, 0.0], [1.0, 1.0]], mode: crate::graph::CurveMode::Linear }),
-            ("Grid", NodeKind::Grid { counts: [8.0; 3], corners: false }),
+            ("Grid", NodeKind::Grid { counts: [8.0; 3], corners: false, cubic: false }),
             ("Bricks", NodeKind::Pattern(crate::graph::PatternParams::for_kind(crate::graph::PatternKind::Bricks))),
             ("Dimples", NodeKind::Pattern(crate::graph::PatternParams::for_kind(crate::graph::PatternKind::Dimples))),
             ("Checker", NodeKind::Pattern(crate::graph::PatternParams::for_kind(crate::graph::PatternKind::Checker))),

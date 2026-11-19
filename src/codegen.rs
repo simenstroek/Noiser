@@ -135,9 +135,10 @@ fn compile_inner(g: &Graph, caches: &BTreeMap<NodeId, u32>, eps: f32, preview: b
                 params.extend(vals);
                 params.push(if *clamp { 1.0 } else { 0.0 });
             }
-            NodeKind::Grid { counts, corners } => {
+            NodeKind::Grid { counts, corners, cubic } => {
                 params.extend(counts);
                 params.push(if *corners { 1.0 } else { 0.0 });
+                params.push(if *cubic { 1.0 } else { 0.0 });
             }
             // 19 slots: counts (3), steps, gap, bevel, output, 2D, axis, seed (-1 = global), variant,
             // radius, profile, direction (3), width, softness, iterations. Each kind reads the ones it uses.
@@ -421,7 +422,7 @@ impl Gen<'_> {
             }
             NodeKind::Grid { .. } => {
                 let q = self.operand(id, 0, Ty::V, "p");
-                (Ty::F, format!("grid_dist({q}, vec3f(P[{s}], P[{}], P[{}]), P[{}] > 0.5)", s + 1, s + 2, s + 3))
+                (Ty::F, format!("grid_dist({q}, vec3f(P[{s}], P[{}], P[{}]), P[{}] > 0.5, P[{}] > 0.5)", s + 1, s + 2, s + 3, s + 4))
             }
             NodeKind::Pattern(p) => {
                 let q = self.operand(id, 0, Ty::V, "p");
@@ -481,7 +482,7 @@ pub(crate) fn random_graph(rnd: &mut impl FnMut(usize) -> usize) -> Graph {
             4 => K::Remap { vals: [0.0, 0.0, 1.0, -1.0, 2.0], clamp: rnd(2) == 0 },
             5 => K::Mix { vals: [0.5, 0.0, 1.0], clamp: rnd(2) == 0 },
             6 => K::Curve { points: vec![[1.0, 0.0], [0.0, 1.0], [0.5, 3.0]][..1 + rnd(3)].to_vec(), mode: CurveMode::ALL[rnd(4)] },
-            7 => K::Grid { counts: [4.0; 3], corners: rnd(2) == 0 },
+            7 => K::Grid { counts: [4.0; 3], corners: rnd(2) == 0, cubic: rnd(2) == 0 },
             8 => K::Pattern(PatternParams::for_kind(PatternKind::ALL[rnd(8)])),
             9 => K::Normal { flip: rnd(2) == 0 },
             10 => K::Reroute,
@@ -676,8 +677,8 @@ mod tests {
         let mut extra: Vec<NodeId> = ops[6..].to_vec();
         for kind in [
             NodeKind::Remap { vals: [0.0, 0.0, 1.0, -2.0, 2.0], clamp: true },
-            NodeKind::Grid { counts: [4.0; 3], corners: false },
-            NodeKind::Grid { counts: [4.0; 3], corners: true },
+            NodeKind::Grid { counts: [4.0; 3], corners: false, cubic: false },
+            NodeKind::Grid { counts: [4.0; 3], corners: true, cubic: false },
         ]
         .into_iter()
         .chain([crate::graph::PatternOutput::Distance, crate::graph::PatternOutput::Shape, crate::graph::PatternOutput::CellValue].map(|output| {
