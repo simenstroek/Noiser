@@ -318,7 +318,7 @@ fn run_mesh_graph(args: &[String], log: &mut Log) -> Result<usize, String> {
         let lines = std::cell::RefCell::new(Vec::<String>::new());
         let mut note = |s: &str| lines.borrow_mut().push(s.to_string());
         let result = {
-            let mut runner = crate::meshgraph::Runner { device: &device, queue: &queue, cache: &mut cache, base: base.clone(), seed, progress: Default::default(), log: &mut note, batch_file: file.clone(), max_triangles: None, numbering: Default::default() };
+            let mut runner = crate::meshgraph::Runner { device: &device, queue: &queue, cache: &mut cache, base: base.clone(), seed, progress: Default::default(), log: &mut note, batch_file: file.clone(), max_triangles: None };
             runner.run(&graph)
         };
         let label = file.as_ref().map_or(String::new(), |f| format!("[{}/{}] {}: ", i + 1, batch.len(), f.display()));

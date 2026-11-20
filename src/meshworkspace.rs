@@ -86,7 +86,7 @@ impl RayWorker {
                     current = None;
                     let mut quiet = |_: &str| {};
                     let built = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        Runner { device: &device, queue: &queue, cache: &mut cache, base: req.base.clone(), seed: req.seed, progress: Default::default(), log: &mut quiet, batch_file: None, max_triangles: None, numbering: Default::default() }.field_view(&req.graph)
+                        Runner { device: &device, queue: &queue, cache: &mut cache, base: req.base.clone(), seed: req.seed, progress: Default::default(), log: &mut quiet, batch_file: None, max_triangles: None }.field_view(&req.graph)
                     }));
                     match built {
                         Ok(Ok(view)) => current = Some((req.key, view)),
@@ -602,7 +602,7 @@ impl MeshWorkspace {
             let mut cache = cache.lock().unwrap();
             let mut note = |s: &str| l.lock().unwrap().push(s.to_string());
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                let mesh = Runner { device: &device, queue: &queue, cache: &mut cache, base, seed, progress: p, log: &mut note, batch_file: None, max_triangles: Some(6000), numbering: Default::default() }.preview(&graph)?;
+                let mesh = Runner { device: &device, queue: &queue, cache: &mut cache, base, seed, progress: p, log: &mut note, batch_file: None, max_triangles: Some(6000) }.preview(&graph)?;
                 let path = std::env::temp_dir().join("noiser-mesh-preview.obj");
                 mesh.write_obj(&path).map_err(|e| format!("{}: {e}", path.display()))?;
                 Ok(vec![path])
@@ -634,7 +634,7 @@ impl MeshWorkspace {
             for (i, file) in files.into_iter().enumerate() {
                 let label = file.as_ref().map_or(String::new(), |f| format!("[{}/{total}] {}: ", i + 1, f.file_name().map_or(String::new(), |n| n.to_string_lossy().into_owned())));
                 let mut note = |s: &str| l.lock().unwrap().push(format!("{:>6.1} s  {label}{s}", t0.elapsed().as_secs_f32()));
-                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| Runner { device: &device, queue: &queue, cache: &mut cache, base: base.clone(), seed, progress: p.clone(), log: &mut note, batch_file: file, max_triangles: None, numbering: Default::default() }.run(&graph)));
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| Runner { device: &device, queue: &queue, cache: &mut cache, base: base.clone(), seed, progress: p.clone(), log: &mut note, batch_file: file, max_triangles: None }.run(&graph)));
                 match result.unwrap_or_else(|_| Err("the run crashed".into())) {
                     Ok(f) => written.extend(f),
                     Err(e) => {
