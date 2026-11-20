@@ -369,6 +369,8 @@ fn bake_raw(mesh: &UvMesh, field: &mut dyn Field, customs: &mut [&mut dyn Field]
     let channels: Vec<Channel> = Channel::ALL.into_iter().filter(|c| settings.channels.contains(c)).collect();
     let mut images: Vec<Vec<f32>> = channels.iter().map(|c| vec![0.0; size * size * c.components()]).collect();
     let mut valid = vec![false; size * size];
+    // Texels of the occlusion map that sit in a closed pocket of the field (see below): refilled from their neighbours.
+    let mut pocket = vec![false; size * size];
     let mut custom_images: Vec<Vec<f32>> = customs.iter().map(|_| vec![0.0; size * size]).collect();
     // The height map is scaled by its largest value once all texels are known.
     let mut heights: Vec<f32> = Vec::new();
@@ -458,6 +460,13 @@ fn bake_raw(mesh: &UvMesh, field: &mut dyn Field, customs: &mut [&mut dyn Field]
                     }
                 }
                 active = next;
+            }
+            // A point on the wall of a closed pocket (a void the noise left inside the solid) has no way out: nearly every
+            // ray is blocked, the ones along the normal too. A crack is open along its normal. Such texels are not the
+            // visible surface: they are marked and refilled from their neighbours after the loop.
+            for (row, t) in blocked.chunks(RAYS).zip(chunk) {
+                let hits = row.iter().filter(|b| **b > 0.0).count();
+                pocket[t.index as usize] = hits + 1 >= RAYS && row[..RAYS / 4].iter().all(|b| *b > 0.0);
             }
             blocked.chunks(RAYS).map(|row| 1.0 - row.iter().sum::<f32>() / RAYS as f32).collect()
         } else {
@@ -554,6 +563,9 @@ fn bake_raw(mesh: &UvMesh, field: &mut dyn Field, customs: &mut [&mut dyn Field]
             }
         }
     }
+    if let Some(k) = channels.iter().position(|&c| c == Channel::Occlusion) {
+        fill_pockets(&mut images[k], &pocket, &valid, size, 256);
+    }
     // Height: symmetric about 0.5, scaled by the 99.9th percentile so a stray spike does not flatten everything.
     if let Some(k) = channels.iter().position(|&c| c == Channel::Depth) {
         heights.sort_by(|a, b| a.total_cmp(b));
@@ -580,6 +592,36 @@ fn bake_raw(mesh: &UvMesh, field: &mut dyn Field, customs: &mut [&mut dyn Field]
         out.push(Image { channel: None, label: settings.custom.get(k).cloned().unwrap_or_else(|| format!("Custom{}", k + 1)), size: size as u32, components: 1, data });
     }
     Ok((out, valid))
+}
+
+/// Replaces the `pocket` texels of a one-component map with the average of their known neighbours (covered texels that are
+/// not pockets), working inwards from the edge of each pocket for up to `passes` rounds. Pockets with no known neighbour keep their value.
+fn fill_pockets(data: &mut [f32], pocket: &[bool], valid: &[bool], size: usize, passes: usize) {
+    let mut known: Vec<bool> = valid.iter().zip(pocket).map(|(v, p)| *v && !*p).collect();
+    let mut open: Vec<usize> = (0..pocket.len()).filter(|&i| pocket[i]).collect();
+    for _ in 0..passes {
+        let (mut writes, mut left) = (Vec::new(), Vec::new());
+        for &i in &open {
+            let (x, y) = ((i % size) as i32, (i / size) as i32);
+            let (mut sum, mut n) = (0.0, 0);
+            for (dx, dy) in [(-1, -1), (0, -1), (1, -1), (-1, 0), (1, 0), (-1, 1), (0, 1), (1, 1)] {
+                let (nx, ny) = (x + dx, y + dy);
+                if nx >= 0 && ny >= 0 && nx < size as i32 && ny < size as i32 && known[ny as usize * size + nx as usize] {
+                    sum += data[ny as usize * size + nx as usize];
+                    n += 1;
+                }
+            }
+            if n > 0 { writes.push((i, sum / n as f32)) } else { left.push(i) }
+        }
+        if writes.is_empty() {
+            break;
+        }
+        for (i, v) in writes {
+            data[i] = v;
+            known[i] = true;
+        }
+        open = left;
+    }
 }
 
 /// Copies valid texels into the invalid ones next to them, `passes` times, averaging when several neighbours are valid.
@@ -666,6 +708,21 @@ mod tests {
         let m = crate::mesh::shapes::icosphere(1.0, subdivisions);
         let raw = RawMesh { normals: m.positions.clone(), positions: m.positions, triangles: m.triangles };
         crate::uvgen::generate(&raw, &crate::uvgen::UvParams { resolution: 256, padding: 2, ..Default::default() }).unwrap()
+    }
+
+    #[test]
+    fn pocket_texels_are_refilled_from_their_neighbours() {
+        let n = 8;
+        let (mut data, valid) = (vec![0.8f32; n * n], vec![true; n * n]);
+        let mut pocket = vec![false; n * n];
+        for y in 2..5 {
+            for x in 2..5 {
+                pocket[y * n + x] = true;
+                data[y * n + x] = 0.0;
+            }
+        }
+        fill_pockets(&mut data, &pocket, &valid, n, 16);
+        assert!(data.iter().all(|v| (*v - 0.8).abs() < 1e-6), "{data:?}");
     }
 
     #[test]
