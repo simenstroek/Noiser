@@ -412,19 +412,54 @@ fn bake_raw(mesh: &UvMesh, field: &mut dyn Field, customs: &mut [&mut dyn Field]
         let normal: Vec<V3> = grad.iter().zip(&frame).map(|(s, f)| if dot([s[1], s[2], s[3]], [s[1], s[2], s[3]]) > 1e-12 { unit([s[1], s[2], s[3]]) } else { f.0 }).collect();
         // Probes along the normal and around the point, for the channels that need the field beyond the surface.
         let occlusion = if has(Channel::Occlusion) {
-            const STEPS: usize = 5;
-            let pts: Vec<V3> = p.iter().zip(&normal).flat_map(|(q, n)| (1..=STEPS).map(move |k| add(*q, scale(*n, (0.01 + 0.07 * k as f32) * radius)))).collect();
-            let d = field.distance(&pts);
-            d.chunks(STEPS)
-                .map(|row| {
-                    let (mut occ, mut sca) = (0.0, 1.0);
-                    for (k, dk) in row.iter().enumerate() {
-                        occ += ((0.01 + 0.07 * (k + 1) as f32) * radius - dk) / radius * sca;
-                        sca *= 0.85;
+            // Rays over the hemisphere (cosine weighted, turned a little differently for every texel so there is no
+            // banding), each sphere-traced out to the reach; a hit counts less the farther away it is. A single probe
+            // along the normal blacked out any dent with a clear view of the sky.
+            const RAYS: usize = 12;
+            const STEPS: usize = 10;
+            let (reach, start, hit, min_step) = (0.25 * radius, 0.02 * radius, 0.008 * radius, 0.02 * radius);
+            let n_texels = chunk.len();
+            let mut origin: Vec<V3> = Vec::with_capacity(n_texels * RAYS);
+            let mut dir: Vec<V3> = Vec::with_capacity(n_texels * RAYS);
+            for (t, n) in chunk.iter().zip(&normal) {
+                let helper = if n[0].abs() < 0.9 { [1.0, 0.0, 0.0] } else { [0.0, 1.0, 0.0] };
+                let u = unit(cross(helper, *n));
+                let v = cross(*n, u);
+                let turn = (t.index as f32 * 0.618034).fract() * std::f32::consts::TAU;
+                for k in 0..RAYS {
+                    let r2 = (k as f32 + 0.5) / RAYS as f32;
+                    let (r, phi) = (r2.sqrt(), turn + k as f32 * 2.399963);
+                    let (x, y, z) = (r * phi.cos(), r * phi.sin(), (1.0 - r2).sqrt());
+                    dir.push([u[0] * x + v[0] * y + n[0] * z, u[1] * x + v[1] * y + n[1] * z, u[2] * x + v[2] * y + n[2] * z]);
+                }
+            }
+            for (i, q) in p.iter().enumerate() {
+                for _ in 0..RAYS {
+                    origin.push(add(*q, scale(normal[i], start)));
+                }
+            }
+            let mut along = vec![0.0f32; n_texels * RAYS];
+            let mut blocked = vec![0.0f32; n_texels * RAYS];
+            let mut active: Vec<usize> = (0..n_texels * RAYS).collect();
+            for _ in 0..STEPS {
+                if active.is_empty() {
+                    break;
+                }
+                let d = field.distance(&active.iter().map(|&k| add(origin[k], scale(dir[k], along[k]))).collect::<Vec<_>>());
+                let mut next = Vec::new();
+                for (&k, dd) in active.iter().zip(d) {
+                    if dd < hit {
+                        blocked[k] = 1.0 - (along[k] / reach).min(1.0);
+                    } else {
+                        along[k] += dd.max(min_step);
+                        if along[k] < reach {
+                            next.push(k);
+                        }
                     }
-                    (1.0 - 2.0 * occ).clamp(0.0, 1.0)
-                })
-                .collect()
+                }
+                active = next;
+            }
+            blocked.chunks(RAYS).map(|row| 1.0 - row.iter().sum::<f32>() / RAYS as f32).collect()
         } else {
             Vec::new()
         };
@@ -599,6 +634,11 @@ mod tests {
     struct Bumpy(f32);
     impl Bumpy {
         fn f(&self, p: V3) -> f32 {
+            if self.0 < 0.0 {
+                // Bumpy(-1): the sphere with a round pit of radius 0.2 cut into its north pole.
+                let d = (p[0] * p[0] + p[1] * p[1] + (p[2] - 1.05) * (p[2] - 1.05)).sqrt();
+                return ((p[0] * p[0] + p[1] * p[1] + p[2] * p[2]).sqrt() - 1.0).max(0.2 - d);
+            }
             (p[0] * p[0] + p[1] * p[1] + p[2] * p[2]).sqrt() - 1.0 - self.0 * (6.0 * p[0]).sin() * (6.0 * p[1]).sin() * (6.0 * p[2]).sin()
         }
     }
@@ -626,6 +666,16 @@ mod tests {
         let m = crate::mesh::shapes::icosphere(1.0, subdivisions);
         let raw = RawMesh { normals: m.positions.clone(), positions: m.positions, triangles: m.triangles };
         crate::uvgen::generate(&raw, &crate::uvgen::UvParams { resolution: 256, padding: 2, ..Default::default() }).unwrap()
+    }
+
+    #[test]
+    fn a_pit_is_darker_than_the_open_surface_but_not_black() {
+        let mesh = sphere_uv(3);
+        let settings = Settings { size: 128, padding: 4, channels: vec![Channel::Occlusion], custom: Vec::new(), green_up: false, samples: 1 };
+        let ao = &bake(&mesh, &mut Bumpy(-1.0), &mut [], &settings, &|_, _| {}).unwrap()[0];
+        let v: Vec<f32> = ao.data.iter().cloned().filter(|v| *v > 0.0).collect();
+        let (mean, darkest) = (v.iter().sum::<f32>() / v.len() as f32, v.iter().cloned().fold(1.0, f32::min));
+        assert!(mean > 0.9 && darkest < 0.95 && darkest > 0.15, "mean {mean}, darkest {darkest}");
     }
 
     #[test]
