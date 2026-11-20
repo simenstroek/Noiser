@@ -157,11 +157,10 @@ impl Settings {
         if file > 2 * GB {
             w.push(format!("the file will be about {:.1} GB", file as f64 / GB as f64));
         }
-        if let Some((iw, ih)) = self.image_size() {
-            if iw.max(ih) > 16384 {
+        if let Some((iw, ih)) = self.image_size()
+            && iw.max(ih) > 16384 {
                 w.push(format!("{iw}×{ih} px is larger than most viewers and engines accept (16384)"));
             }
-        }
         if self.is_volume() && self.output == Output::Normal {
             w.push("3D volume exports write density only".into());
         }

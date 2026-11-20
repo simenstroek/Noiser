@@ -46,17 +46,17 @@ impl Mesh {
             // `v x y z r g b` lines: colours (zero for objects that have none, so the lists stay parallel).
             if model.mesh.vertex_color.len() == count * 3 {
                 mesh.colors.resize(mesh.positions.len(), [0.0; 3]);
-                mesh.colors.extend(model.mesh.vertex_color.chunks_exact(3).map(|c| [c[0], c[1], c[2]]));
+                mesh.colors.extend(model.mesh.vertex_color.as_chunks::<3>().0.iter().map(|c| [c[0], c[1], c[2]]));
             } else if !mesh.colors.is_empty() {
                 mesh.colors.resize(mesh.positions.len() + count, [0.0; 3]);
             }
-            mesh.positions.extend(model.mesh.positions.chunks_exact(3).map(|p| [p[0], p[1], p[2]]));
+            mesh.positions.extend(model.mesh.positions.as_chunks::<3>().0.iter().map(|p| [p[0], p[1], p[2]]));
             let before = mesh.triangles.len();
-            mesh.triangles.extend(model.mesh.indices.chunks_exact(3).map(|t| [base + t[0], base + t[1], base + t[2]]));
+            mesh.triangles.extend(model.mesh.indices.as_chunks::<3>().0.iter().map(|t| [base + t[0], base + t[1], base + t[2]]));
             // `vt` coordinates, per corner (a vertex on a seam has several). Kept only if every object has them.
             if model.mesh.texcoord_indices.len() == model.mesh.indices.len() && !model.mesh.texcoords.is_empty() && mesh.uvs.len() == before {
                 let uv = |i: u32| [model.mesh.texcoords[2 * i as usize], model.mesh.texcoords[2 * i as usize + 1]];
-                mesh.uvs.extend(model.mesh.texcoord_indices.chunks_exact(3).map(|t| [uv(t[0]), uv(t[1]), uv(t[2])]));
+                mesh.uvs.extend(model.mesh.texcoord_indices.as_chunks::<3>().0.iter().map(|t| [uv(t[0]), uv(t[1]), uv(t[2])]));
             }
         }
         if mesh.triangles.is_empty() {

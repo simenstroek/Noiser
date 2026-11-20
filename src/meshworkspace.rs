@@ -483,11 +483,10 @@ impl MeshWorkspace {
         let text = path.to_string_lossy().into_owned();
         match ext.as_str() {
             "meshgraph" => {
-                if self.may_discard() {
-                    if let Ok(g) = std::fs::read_to_string(&path).map_err(|e| e.to_string()).and_then(|s| Graph::from_json(&s)) {
+                if self.may_discard()
+                    && let Ok(g) = std::fs::read_to_string(&path).map_err(|e| e.to_string()).and_then(|s| Graph::from_json(&s)) {
                         self.set(g, Some(path));
                     }
-                }
             }
             "noisegraph" => {
                 let embedded = std::fs::read_to_string(&path).unwrap_or_default();
@@ -570,11 +569,10 @@ impl MeshWorkspace {
         };
         let base = path.parent().map_or(PathBuf::from("."), |p| p.to_path_buf());
         for n in self.graph.nodes.values_mut() {
-            if let NodeKind::NoiseGraph(p) = &mut n.kind {
-                if let Ok(text) = std::fs::read_to_string(crate::meshgraph::resolve_in(&base, &p.file)) {
+            if let NodeKind::NoiseGraph(p) = &mut n.kind
+                && let Ok(text) = std::fs::read_to_string(crate::meshgraph::resolve_in(&base, &p.file)) {
                     p.embedded = text;
                 }
-            }
         }
         let text = self.graph.to_json();
         crate::keep_previous_version(&path, &text);
@@ -659,12 +657,11 @@ impl crate::App {
             let same = |a: &std::path::Path, b: &std::path::Path| a == b || matches!((std::fs::canonicalize(a), std::fs::canonicalize(b)), (Ok(x), Ok(y)) if x == y);
             let text = self.graph.to_json();
             for n in g.nodes.values_mut() {
-                if let NodeKind::NoiseGraph(p) = &mut n.kind {
-                    if !p.detached && !p.file.is_empty() && same(&crate::meshgraph::resolve_in(&base, &p.file), open) {
+                if let NodeKind::NoiseGraph(p) = &mut n.kind
+                    && !p.detached && !p.file.is_empty() && same(&crate::meshgraph::resolve_in(&base, &p.file), open) {
                         p.embedded = text.clone();
                         p.detached = true;
                     }
-                }
             }
         }
         g
@@ -747,19 +744,16 @@ impl crate::App {
         crate::meshgraph_ui::set_base(base.clone());
         // A noise graph file that was just chosen gets its embedded copy right away.
         for (id, n) in self.mesh_ws.graph.nodes.iter_mut() {
-            if let NodeKind::NoiseGraph(p) = &mut n.kind {
-                if p.embedded.is_empty() && !p.file.is_empty() {
-                    if let Ok(text) = std::fs::read_to_string(crate::meshgraph::resolve_in(&base, &p.file)) {
+            if let NodeKind::NoiseGraph(p) = &mut n.kind
+                && p.embedded.is_empty() && !p.file.is_empty()
+                    && let Ok(text) = std::fs::read_to_string(crate::meshgraph::resolve_in(&base, &p.file)) {
                         // Not a change the user made: the saved copy gets it too, so the graph does not look edited.
-                        if let Some(NodeKind::NoiseGraph(saved)) = self.mesh_ws.saved.nodes.get_mut(id).map(|n| &mut n.kind) {
-                            if saved.file == p.file && saved.embedded.is_empty() {
+                        if let Some(NodeKind::NoiseGraph(saved)) = self.mesh_ws.saved.nodes.get_mut(id).map(|n| &mut n.kind)
+                            && saved.file == p.file && saved.embedded.is_empty() {
                                 saved.embedded = text.clone();
                             }
-                        }
                         p.embedded = text;
                     }
-                }
-            }
         }
         // Auto preview: when what the preview is made from has been still for a moment, make it again.
         if self.mesh_ws.auto_preview && !self.mesh_ws.running() {
@@ -802,11 +796,10 @@ impl crate::App {
                 if ui.button("New").clicked() && self.mesh_ws.may_discard() {
                     self.mesh_ws.set(MeshWorkspace::example(), None);
                 }
-                if ui.button("Open…").clicked() && self.mesh_ws.may_discard() {
-                    if let Err(e) = self.mesh_ws.open() {
+                if ui.button("Open…").clicked() && self.mesh_ws.may_discard()
+                    && let Err(e) = self.mesh_ws.open() {
                         self.status = e;
                     }
-                }
                 if ui.button("Save").on_hover_text("Ctrl+S. Saves the mesh graph, refreshes the embedded copy of every noise graph it uses, and saves the open noise graph too if it is one of them.").clicked() {
                     self.save_mesh_graph(false);
                 }
@@ -830,12 +823,11 @@ impl crate::App {
                     let (d, q, g) = (self.rs.device.clone(), self.rs.queue.clone(), self.graph_for_run());
                     self.mesh_ws.start_preview(g, d, q);
                 }
-                if ui.add_enabled(!running, egui::Button::new("Run on files…")).on_hover_text("Runs the graph once for each mesh file you pick: a Load Mesh node whose path is {batch} reads that file, and {name} in an output name becomes its name.").clicked() {
-                    if let Some(files) = rfd::FileDialog::new().add_filter("Mesh", &["obj", "ply", "stl", "gltf", "glb", "fbx"]).pick_files() {
+                if ui.add_enabled(!running, egui::Button::new("Run on files…")).on_hover_text("Runs the graph once for each mesh file you pick: a Load Mesh node whose path is {batch} reads that file, and {name} in an output name becomes its name.").clicked()
+                    && let Some(files) = rfd::FileDialog::new().add_filter("Mesh", &["obj", "ply", "stl", "gltf", "glb", "fbx"]).pick_files() {
                         let (d, q, g) = (self.rs.device.clone(), self.rs.queue.clone(), self.graph_for_run());
                         self.mesh_ws.start(g, d, q, files.into_iter().map(Some).collect());
                     }
-                }
                 if ui.add_enabled(running, egui::Button::new("Cancel")).on_hover_text("Stops the run before its next node (a node that is already working finishes first).").clicked() {
                     crate::meshgraph::CANCEL.store(true, std::sync::atomic::Ordering::Relaxed);
                 }
@@ -1037,12 +1029,11 @@ impl crate::App {
                         let textured = ws.surface != 1 && !p.maps.is_empty() && !p.uvs.is_empty() && p.triangles.len() <= 150_000;
                         let key = (((ws.yaw * 100.0) as i32), ((ws.pitch * 100.0) as i32), ((ws.zoom * 100.0) as i32), ws.surface, side);
                         if textured {
-                            if ws.surface_key != Some(key) || ws.surface_tex.is_none() {
-                                if let Some(img) = p.render(side, ws.yaw, ws.pitch, ws.zoom, ws.surface) {
+                            if (ws.surface_key != Some(key) || ws.surface_tex.is_none())
+                                && let Some(img) = p.render(side, ws.yaw, ws.pitch, ws.zoom, ws.surface) {
                                     ws.surface_tex = Some(ctx.load_texture("mesh surface", img, egui::TextureOptions::LINEAR));
                                     ws.surface_key = Some(key);
                                 }
-                            }
                             if let Some(tex) = &ws.surface_tex {
                                 let img = egui::Rect::from_center_size(view_rect.center(), egui::vec2(side as f32, side as f32));
                                 painter.image(tex.id(), img, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), egui::Color32::WHITE);
@@ -1095,8 +1086,8 @@ impl crate::App {
             }
         });
         // Double-clicking a Noise Graph node goes to that graph.
-        if let Some(id) = self.mesh_ws.editor.opened.take() {
-            if let Some(NodeKind::NoiseGraph(p)) = self.mesh_ws.graph.nodes.get(&id).map(|n| n.kind.clone()) {
+        if let Some(id) = self.mesh_ws.editor.opened.take()
+            && let Some(NodeKind::NoiseGraph(p)) = self.mesh_ws.graph.nodes.get(&id).map(|n| n.kind.clone()) {
                 if p.file.is_empty() {
                     self.status = "This Noise Graph node has no file chosen yet".into();
                 } else {
@@ -1104,7 +1095,6 @@ impl crate::App {
                     self.request(crate::Pending::Path(crate::meshgraph::resolve_in(&self.mesh_ws.base(), &p.file)));
                 }
             }
-        }
     }
 }
 

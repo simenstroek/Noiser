@@ -156,7 +156,7 @@ fn run(mesh: &RawMesh, base: &[V3], material: Option<&[u32]>, params: &UvParams,
         out.uvs.push([v.uv[0] / sx, v.uv[1] / sy]);
         out.source.push(v.xref);
     }
-    out.triangles = m.index_array.chunks_exact(3).map(|t| [t[0], t[1], t[2]]).collect();
+    out.triangles = m.index_array.as_chunks::<3>().0.iter().map(|t| [t[0], t[1], t[2]]).collect();
     if std::env::var_os("NOISER_REMESH_DEBUG").is_some() {
         let mut kinds = std::collections::BTreeMap::new();
         for c in &m.chart_array {

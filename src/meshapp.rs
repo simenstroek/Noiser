@@ -135,11 +135,10 @@ impl App {
         ui.separator();
         ui.heading("Mesh");
         ui.horizontal(|ui| {
-            if ui.button("Import mesh (OBJ)…").clicked() {
-                if let Some(p) = rfd::FileDialog::new().add_filter("Mesh (OBJ, PLY, STL, glTF, FBX)", &["obj", "ply", "stl", "gltf", "glb", "fbx"]).pick_file() {
+            if ui.button("Import mesh (OBJ)…").clicked()
+                && let Some(p) = rfd::FileDialog::new().add_filter("Mesh (OBJ, PLY, STL, glTF, FBX)", &["obj", "ply", "stl", "gltf", "glb", "fbx"]).pick_file() {
                     self.start_mesh_load(p);
                 }
-            }
             if ui.button("Batch…").on_hover_text("Shape many meshes with this graph").clicked() {
                 self.batch_open = true;
             }
@@ -422,15 +421,14 @@ impl App {
         egui::Window::new("Batch displace meshes").open(&mut open).resizable(false).show(ctx, |ui| {
             ui.label("Shapes every mesh with the same graph and writes a high-resolution mesh for each.");
             ui.horizontal(|ui| {
-                if ui.button("Add meshes (OBJ)…").clicked() {
-                    if let Some(files) = rfd::FileDialog::new().add_filter("Mesh (OBJ, PLY, STL, glTF, FBX)", &["obj", "ply", "stl", "gltf", "glb", "fbx"]).pick_files() {
+                if ui.button("Add meshes (OBJ)…").clicked()
+                    && let Some(files) = rfd::FileDialog::new().add_filter("Mesh (OBJ, PLY, STL, glTF, FBX)", &["obj", "ply", "stl", "gltf", "glb", "fbx"]).pick_files() {
                         for f in files {
                             if !self.batch_files.contains(&f) {
                                 self.batch_files.push(f);
                             }
                         }
                     }
-                }
                 if ui.add_enabled(!self.batch_files.is_empty(), egui::Button::new("Clear")).clicked() {
                     self.batch_files.clear();
                 }
@@ -453,11 +451,10 @@ impl App {
                 }
             });
             ui.horizontal(|ui| {
-                if ui.button("Output folder…").clicked() {
-                    if let Some(dir) = rfd::FileDialog::new().pick_folder() {
+                if ui.button("Output folder…").clicked()
+                    && let Some(dir) = rfd::FileDialog::new().pick_folder() {
                         self.batch_dir = Some(dir);
                     }
-                }
                 match &self.batch_dir {
                     Some(d) => ui.label(d.display().to_string()),
                     None => ui.weak("none chosen"),

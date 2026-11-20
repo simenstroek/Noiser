@@ -79,11 +79,10 @@ pub fn props(ui: &mut egui::Ui, kind: &mut NodeKind) -> bool {
             let full = crate::meshgraph::resolve_in(&base(), &p.file);
             match crate::meshgraph::noise_graph_source(p, &base()) {
                 Ok(_) if !p.detached && !p.file.is_empty() && std::fs::metadata(&full).is_ok() => {
-                    if ui.button("Refresh embedded copy").on_hover_text("Saving the mesh graph does this too.").clicked() {
-                        if let Ok(text) = std::fs::read_to_string(&full) {
+                    if ui.button("Refresh embedded copy").on_hover_text("Saving the mesh graph does this too.").clicked()
+                        && let Ok(text) = std::fs::read_to_string(&full) {
                             p.embedded = text;
                         }
-                    }
                     ui.weak(if p.embedded.is_empty() { "No embedded copy yet." } else { "An embedded copy is stored in the mesh graph." });
                 }
                 Ok(_) => _ = ui.colored_label(crate::editor::ORANGE, "The file is missing: using the embedded copy."),

@@ -923,32 +923,4 @@ mod tests {
             assert_eq!(crossing, 0, "{crossing} triangles cross another at {target} triangles");
         }
     }
-
-    #[test]
-    #[ignore = "experiment: a surface rougher than the triangles"]
-    fn rough_sphere_experiment() {
-        let rough = |pts: &[V3], _radii: &[f32]| -> Vec<[f32; 4]> {
-            let f = |p: V3| {
-                let b = |k: f32| (k * p[0]).sin() * (k * p[1] + 1.0).sin() * (k * p[2] + 2.0).sin();
-                len(p) - 1.0 - 0.14 * b(12.0) - 0.07 * b(24.0) - 0.035 * b(48.0)
-            };
-            let e = 1e-3;
-            pts.iter()
-                .map(|p| {
-                    let g = [0, 1, 2].map(|a| {
-                        let (mut hi, mut lo) = (*p, *p);
-                        hi[a] += e;
-                        lo[a] -= e;
-                        (f(hi) - f(lo)) / (2.0 * e)
-                    });
-                    [f(*p), g[0], g[1], g[2]]
-                })
-                .collect()
-        };
-        for target in [800usize, 5000, 30000] {
-            let out = remesh(icosphere(1.0, 4), &mut { rough }, &Params::new(target, 3.5), &|_, _| {});
-            eprintln!("target {target}:
-{}", meshquality::report(&out));
-        }
-    }
 }

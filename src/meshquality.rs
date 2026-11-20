@@ -288,12 +288,11 @@ pub fn bad_faces(mesh: &RawMesh) -> Vec<bool> {
         }
     }
     for tris in edges.values() {
-        if let [a, b] = tris[..] {
-            if dot(normal[a as usize], normal[b as usize]) < -0.57 {
+        if let [a, b] = tris[..]
+            && dot(normal[a as usize], normal[b as usize]) < -0.57 {
                 bad[a as usize] = true;
                 bad[b as usize] = true;
             }
-        }
     }
     bad
 }

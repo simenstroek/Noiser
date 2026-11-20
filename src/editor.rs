@@ -501,13 +501,12 @@ impl Editor {
         if bg.clicked() {
             self.selected.clear();
         }
-        if bg.secondary_clicked() {
-            if let Some(p) = bg.interact_pointer_pos() {
+        if bg.secondary_clicked()
+            && let Some(p) = bg.interact_pointer_pos() {
                 self.menu_at = self.to_graph(origin, p);
                 self.menu_search.clear();
                 self.menu_fresh = true;
             }
-        }
         bg.context_menu(|ui| {
             ui.label("Add node");
             let search = ui.add(egui::TextEdit::singleline(&mut self.menu_search).hint_text("Search…"));
@@ -768,11 +767,10 @@ impl Editor {
             }
             graph.prune_edges(); // smooth min/max have a third input the others don't
         }
-        if let Some((id, port, v)) = set_value {
-            if let Some(n) = graph.nodes.get_mut(&id) {
+        if let Some((id, port, v)) = set_value
+            && let Some(n) = graph.nodes.get_mut(&id) {
                 n.kind.set_const_input(port, v);
             }
-        }
         if let Some((to, port)) = detach {
             graph.disconnect(to, port);
         }
@@ -797,9 +795,9 @@ impl Editor {
         // Wire being dragged: connect on release over a matching port, or offer new nodes on empty space.
         let released = ui.input(|i| i.pointer.primary_released());
         // A lone, unconnected node dropped on a wire is spliced into it.
-        if released && self.node_dragged {
-            if let [id] = self.selected.iter().copied().collect::<Vec<_>>()[..] {
-                if let Some(rect) = layouts.get(&id).map(|l| l.rect) {
+        if released && self.node_dragged
+            && let [id] = self.selected.iter().copied().collect::<Vec<_>>()[..]
+                && let Some(rect) = layouts.get(&id).map(|l| l.rect) {
                     let n_in = graph.nodes.get(&id).map_or(0, |n| n.kind.input_count());
                     let free = !graph.edges.iter().any(|e| e.from == id || e.to == id);
                     let target = graph.edges.iter().find(|e| {
@@ -811,8 +809,6 @@ impl Editor {
                         graph.connect(id, edge.to, edge.port);
                     }
                 }
-            }
-        }
         if released {
             self.node_dragged = false;
         }
@@ -889,11 +885,10 @@ impl Editor {
                     graph.remove(id);
                 }
             }
-            if ui.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Copy))) {
-                if let Some(t) = clipboard_text(graph, &self.selected) {
+            if ui.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Copy)))
+                && let Some(t) = clipboard_text(graph, &self.selected) {
                     ui.ctx().copy_text(t);
                 }
-            }
             let pasted = ui.input(|i| i.events.iter().find_map(|e| if let egui::Event::Paste(t) = e { Some(t.clone()) } else { None }));
             if let (Some(t), Some(p)) = (pasted, pointer) {
                 let at = self.to_graph(origin, p);
@@ -927,12 +922,11 @@ impl Editor {
             if ui.input(|i| i.key_pressed(egui::Key::Home)) {
                 self.frame(canvas.size(), graph, &BTreeSet::new());
             }
-            if ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::D)) {
-                if let Some(p) = pointer {
+            if ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::D))
+                && let Some(p) = pointer {
                     let at = self.to_graph(origin, p);
                     self.selected = duplicate(graph, &self.selected, [at.x, at.y]);
                 }
-            }
         }
     }
 

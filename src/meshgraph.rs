@@ -287,13 +287,12 @@ impl Runner<'_> {
         // How far noise graphs can move the surface: their amplitudes times the largest value of their density, plus a margin.
         let mut reach = 0.05 * radius;
         for n in original.nodes.values() {
-            if let NodeKind::NoiseGraph(p) = &n.kind {
-                if let Ok(sub) = noise_graph_source(p, &self.base) {
+            if let NodeKind::NoiseGraph(p) = &n.kind
+                && let Ok(sub) = noise_graph_source(p, &self.base) {
                     let (a, b) = sub.density_range();
                     let size = if a.is_finite() && b.is_finite() { a.abs().max(b.abs()) } else { 1.0 };
                     reach += p.amplitude.abs() * size;
                 }
-            }
         }
         Ok(FieldSource { ev, lo, hi, reach: reach.min(2.0 * radius), _loaded: loaded })
     }
