@@ -114,6 +114,9 @@ impl RayWorker {
 
 struct RunJob {
     progress: crate::meshexport::Progress,
+    /// How many of the `total` files are finished (a batch run has more than one).
+    finished: Arc<std::sync::atomic::AtomicUsize>,
+    total: usize,
     log: Arc<Mutex<Vec<String>>>,
     done: mpsc::Receiver<Result<Vec<PathBuf>, String>>,
 }
@@ -612,7 +615,7 @@ impl MeshWorkspace {
         self.thumbnails.clear();
         self.map_files.clear();
         self.map_tex = None;
-        self.job = Some(RunJob { progress, log, done: rx });
+        self.job = Some(RunJob { progress, finished: Default::default(), total: 1, log, done: rx });
     }
 
     fn start(&mut self, graph: Graph, device: eframe::wgpu::Device, queue: eframe::wgpu::Queue, files: Vec<Option<PathBuf>>) {
@@ -621,10 +624,12 @@ impl MeshWorkspace {
         let (tx, rx) = mpsc::channel();
         let (cache, seed, p, l) = (self.cache.clone(), self.seed, progress.clone(), log.clone());
         let base = self.base();
+        let total = files.len();
+        let finished = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let fin = finished.clone();
         std::thread::spawn(move || {
             let mut cache = cache.lock().unwrap();
             let (mut written, mut failures) = (Vec::new(), Vec::new());
-            let total = files.len();
             let t0 = std::time::Instant::now();
             for (i, file) in files.into_iter().enumerate() {
                 let label = file.as_ref().map_or(String::new(), |f| format!("[{}/{total}] {}: ", i + 1, f.file_name().map_or(String::new(), |n| n.to_string_lossy().into_owned())));
@@ -637,13 +642,14 @@ impl MeshWorkspace {
                         failures.push(e);
                     }
                 }
+                fin.store(i + 1, std::sync::atomic::Ordering::Relaxed);
             }
             let _ = tx.send(if failures.is_empty() { Ok(written) } else { Err(format!("{} of {total} run(s) failed: {}", failures.len(), failures[0])) });
         });
         crate::meshgraph::CANCEL.store(false, std::sync::atomic::Ordering::Relaxed);
         self.log.clear();
         self.written.clear();
-        self.job = Some(RunJob { progress, log, done: rx });
+        self.job = Some(RunJob { progress, finished, total, log, done: rx });
     }
 }
 
@@ -838,6 +844,12 @@ impl crate::App {
             if let Some(job) = &self.mesh_ws.job {
                 let p = job.progress.load(std::sync::atomic::Ordering::Relaxed) as f32 / 1000.0;
                 ui.add(egui::ProgressBar::new(p).show_percentage());
+                // A batch: the files done plus the share of the current one, as a fraction of all of them (an estimate: files differ in size).
+                if job.total > 1 {
+                    let done = job.finished.load(std::sync::atomic::Ordering::Relaxed);
+                    let all = ((done as f32 + p) / job.total as f32).min(1.0);
+                    ui.add(egui::ProgressBar::new(all).fill(egui::Color32::from_rgb(220, 175, 40)).text(format!("batch: file {} of {}  ({:.0}%)", (done + 1).min(job.total), job.total, all * 100.0)));
+                }
             }
             egui::CollapsingHeader::new("Log").default_open(true).show(ui, |ui| {
                 egui::ScrollArea::vertical().max_height(140.0).stick_to_bottom(true).show(ui, |ui| {
