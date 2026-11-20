@@ -844,8 +844,23 @@ impl Graph {
             },
         };
         stack.pop();
-        // A wired parameter (a frequency, a count) may change from point to point.
-        let t = if !matches!(t, Broken(_)) && self.pin_wired(id, None) { Broken("a wired parameter may not tile".into()) } else { t };
+        // A wired parameter keeps the tiling only as a uniform value, and where the field must be a whole number
+        // (a frequency, a count) only as a Value node holding one.
+        // shortcut: only a Value node's number is known here (not Math of values, not a Random node); upgrade by evaluating constants.
+        let ports: Vec<(usize, &str)> = self.nodes[&id].exposed().map(|(port, p)| (port, p.name)).collect();
+        let mut bad = None;
+        for (port, name) in ports {
+            let Some(src) = self.input(id, port) else { continue };
+            if self.tiling_of(src, memo, stack) != Const {
+                bad = Some("a wired parameter that varies with position".to_string());
+            } else if ["scale", "lacunarity", "steps", "count_x", "count_y", "count_z"].contains(&name) && !matches!(&self.nodes[&src].kind, NodeKind::Float(v) if is_whole(*v)) {
+                bad = Some(format!("the wired {name} is not a known whole number"));
+            }
+        }
+        let t = match bad {
+            Some(why) if !matches!(t, Broken(_)) => Broken(why),
+            _ => t,
+        };
         memo.insert(id, t.clone());
         t
     }

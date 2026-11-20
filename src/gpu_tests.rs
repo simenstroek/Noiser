@@ -2763,7 +2763,19 @@ fn wired_parameter_pins_and_random_nodes() {
     let at = [[0.0625, 0.125, 0.125]];
     near(eval(&gpu, &g, &at)[0], -1.0, "x count 8 puts the centre at 0.0625");
     g.prune_edges();
-    assert!(g.pin_wired(grid, Some("count_x")) && matches!(g.tiling()[&grid], crate::graph::Tiling::Broken(_)), "a wired pin is kept and breaks tiling");
+    assert!(g.pin_wired(grid, Some("count_x")) && !matches!(g.tiling()[&grid], crate::graph::Tiling::Broken(_)), "a uniform wired pin keeps the tiling");
+    let pos = g.add(NodeKind::Position, [0.0; 2]);
+    g.connect(pos, grid, 2);
+    g.nodes.get_mut(&grid).unwrap().pins.push("count_y".into());
+    assert!(matches!(g.tiling()[&grid], crate::graph::Tiling::Broken(_)), "a pin wired to a position breaks it");
+    g.disconnect(grid, 2);
+    // A uniform value must also be a whole number where the field has to be, and a Random node's is not known to be.
+    g.nodes.get_mut(&count).unwrap().kind = NodeKind::Float(7.5);
+    assert!(matches!(g.tiling()[&grid], crate::graph::Tiling::Broken(_)), "a fractional uniform count breaks it");
+    g.nodes.get_mut(&count).unwrap().kind = NodeKind::Random { vals: [4.0, 8.0], seed: None };
+    assert!(matches!(g.tiling()[&grid], crate::graph::Tiling::Broken(_)), "a Random count is not known to be whole");
+    g.nodes.get_mut(&count).unwrap().kind = NodeKind::Float(8.0);
+    g.nodes.get_mut(&grid).unwrap().pins.pop();
     // The amplitude pin: wired, it multiplies the output.
     let amp = g.add(NodeKind::Float(0.5), [0.0; 2]);
     g.connect(amp, grid, 4);

@@ -22,6 +22,15 @@ fn type_color(t: PortType) -> Color32 {
     }
 }
 
+/// Values that are the same everywhere (a Value or Random node and what is computed only from them).
+const UNIFORM: Color32 = Color32::from_rgb(80, 215, 215);
+
+/// The colour of an output pin and its wires: uniform values get their own, the rest follow the type.
+fn output_color(graph: &Graph, tiling: &BTreeMap<NodeId, Tiling>, id: NodeId, port: usize) -> Color32 {
+    let t = graph.output_type_at(id, port);
+    if matches!(t, PortType::Float | PortType::Vector) && tiling.get(&id) == Some(&Tiling::Const) { UNIFORM } else { type_color(t) }
+}
+
 /// Cache on, and nodes a cache spares the preview from evaluating.
 const CACHED: Color32 = Color32::from_rgb(120, 220, 160);
 
@@ -565,7 +574,7 @@ impl Editor {
         // Wires under nodes.
         for e in &graph.edges {
             if let (Some(a), Some(b)) = (layouts[&e.from].outputs.get(e.from_port).copied().or(layouts[&e.from].output), layouts[&e.to].inputs.get(e.port)) {
-                painter.add(bezier(a, *b, Stroke::new(2.0 * self.zoom, type_color(graph.output_type_at(e.from, e.from_port)))));
+                painter.add(bezier(a, *b, Stroke::new(2.0 * self.zoom, output_color(graph, tiling, e.from, e.from_port))));
             }
         }
 
@@ -747,7 +756,7 @@ impl Editor {
             let split = node.kind.output_count() > 1;
             for (k, p) in l.outputs.iter().copied().enumerate() {
                 // Each output of a Separate node is a float, of a Bake node an image; every other node has one output of its own type.
-                let color = if matches!(node.kind, NodeKind::Separate) { type_color(PortType::Float) } else { type_color(graph.output_type_at(id, k)) };
+                let color = if matches!(node.kind, NodeKind::Separate) && tiling.get(&id) != Some(&Tiling::Const) { type_color(PortType::Float) } else { output_color(graph, tiling, id, k) };
                 painter.circle(p, PORT_R * z, color, Stroke::new(1.0, Color32::from_gray(220)));
                 if split {
                     let name = match &node.kind {
