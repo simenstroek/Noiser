@@ -27,7 +27,8 @@ pub(crate) fn row<T: PartialEq>(ui: &mut egui::Ui, value: &mut T, default: T, wi
 pub(crate) fn pin_toggle(ui: &mut egui::Ui, pins: &mut Vec<String>, name: &str) -> bool {
     let on = pins.iter().any(|n| n == name);
     let tip = if on { "Exposed as an input pin: the field is the value while nothing is connected. Click to hide the pin." } else { "Show as an input pin" };
-    if ui.selectable_label(on, "→").on_hover_text(tip).clicked() {
+    let icon = egui::Image::new(egui::include_image!("../assets/icons/input.svg")).fit_to_exact_size(egui::vec2(14.0, 14.0)).tint(ui.visuals().text_color());
+    if ui.add(egui::Button::image(icon).selected(on)).on_hover_text(tip).clicked() {
         if on { pins.retain(|n| n != name) } else { pins.push(name.to_string()) }
     }
     pins.iter().any(|n| n == name)

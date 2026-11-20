@@ -35,6 +35,11 @@ fn output_color(graph: &Graph, tiling: &BTreeMap<NodeId, Tiling>, id: NodeId, po
 const CACHED: Color32 = Color32::from_rgb(120, 220, 160);
 
 const NODE_W: f32 = 140.0;
+
+/// A node's width: wider with a second output, so its label does not run into the input labels on the same row.
+fn node_w(kind: &NodeKind) -> f32 {
+    if kind.output_count() > 1 { 190.0 } else { NODE_W }
+}
 const HEADER_H: f32 = 22.0;
 const ROW_H: f32 = 20.0;
 const PORT_R: f32 = 5.0;
@@ -425,7 +430,7 @@ impl Editor {
             if only.is_empty() || only.contains(id) {
                 let h = HEADER_H + ROW_H * n.kind.input_count().max(2) as f32 + 60.0; // a generous guess at the body
                 lo = [lo[0].min(n.pos[0]), lo[1].min(n.pos[1])];
-                hi = [hi[0].max(n.pos[0] + NODE_W), hi[1].max(n.pos[1] + h)];
+                hi = [hi[0].max(n.pos[0] + node_w(&n.kind)), hi[1].max(n.pos[1] + h)];
             }
         }
         if lo[0] > hi[0] {
@@ -455,7 +460,7 @@ impl Editor {
         let top = body_top(kind);
         let n_out = kind.output_count().max(1);
         let h = (top + ROW_H * n_in.max(n_out) as f32 + 6.0) * z;
-        let rect = Rect::from_min_size(top_left, Vec2::new(NODE_W * z, h));
+        let rect = Rect::from_min_size(top_left, Vec2::new(node_w(kind) * z, h));
         let inputs = rows.iter().map(|&i| Pos2::new(rect.left(), rect.top() + (top + ROW_H * (i as f32 + 0.5)) * z)).collect();
         let outputs: Vec<Pos2> = if kind.output_count() > 1 {
             (0..kind.output_count()).map(|k| Pos2::new(rect.right(), rect.top() + (top + ROW_H * (k as f32 + 0.5)) * z)).collect()
