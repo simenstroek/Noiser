@@ -226,7 +226,7 @@ pub struct Runner<'a> {
     pub batch_file: Option<PathBuf>,
     /// Quick previews: Remesh nodes make at most this many triangles.
     pub max_triangles: Option<u32>,
-    /// The number the files of this run share when a name was taken (`rock_3.obj`, `rock_normalBase_3.png`): the highest used so far.
+    /// The number the files of this run share when a name was taken (`rock_3.obj`, `rock_normal_base_3.png`): the highest used so far.
     pub numbering: std::cell::Cell<u32>,
 }
 

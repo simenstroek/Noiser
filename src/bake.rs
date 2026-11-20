@@ -46,16 +46,16 @@ impl Channel {
         }
     }
 
-    /// The name in file names: Substance Painter's mesh map usage names (`End_Ring_normalBase.png`).
+    /// The name in file names: Substance Painter's mesh map identifiers (`End_Ring_normal_base.png`).
     pub fn suffix(self) -> &'static str {
         match self {
-            Channel::Normal => "normalBase",
-            Channel::Occlusion => "ambientOcclusionBase",
+            Channel::Normal => "normal_base",
+            Channel::Occlusion => "ambient_occlusion",
             Channel::Curvature => "curvature",
-            Channel::Depth => "heightBase",
+            Channel::Depth => "height_base",
             Channel::Thickness => "thickness",
             Channel::Position => "position",
-            Channel::NormalWs => "normalWS",
+            Channel::NormalWs => "world_space_normals",
         }
     }
 
@@ -118,7 +118,7 @@ pub struct Image {
     /// The standard map this is, if it is one (custom maps and processed images are not).
     #[cfg_attr(not(test), allow(dead_code))]
     pub channel: Option<Channel>,
-    /// The name its file gets (`normalBase`, `normalBase_R`...).
+    /// The name its file gets (`normal_base`, `normal_base_R`...).
     pub label: String,
     pub size: u32,
     pub components: usize,
