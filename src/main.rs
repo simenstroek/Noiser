@@ -22,6 +22,7 @@ mod bake;
 mod meshgraph;
 mod meshgraph_ui;
 mod meshworkspace;
+mod udim;
 mod uvtransfer;
 mod meshformats;
 mod meshsdf;

@@ -39,10 +39,15 @@ impl UvMesh {
 
     /// Wavefront OBJ with vertex normals and texture coordinates (one UV per vertex, so `f v/v/v`).
     pub fn write_obj(&self, path: &std::path::Path) -> std::io::Result<()> {
+        self.write_obj_as(path, &crate::surface::material_name(path))
+    }
+
+    /// `write_obj` with the material named `material` instead of after the file.
+    pub fn write_obj_as(&self, path: &std::path::Path, material: &str) -> std::io::Result<()> {
         use std::io::Write;
         let mut w = std::io::BufWriter::with_capacity(1 << 20, std::fs::File::create(path)?);
         writeln!(w, "# Noiser")?;
-        writeln!(w, "usemtl {}", crate::surface::material_name(path))?;
+        writeln!(w, "usemtl {material}")?;
         for p in &self.positions {
             writeln!(w, "v {} {} {}", p[0], p[1], p[2])?;
         }

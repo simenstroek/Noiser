@@ -132,6 +132,7 @@ pub struct MeshWorkspace {
     log: Vec<String>,
     written: Vec<PathBuf>,
     pub seed: u32,
+    pub udim: crate::udim::Tool,
     /// Start a run on the first frame (for `--run-mesh-graph`).
     pub autorun: bool,
     /// The first mesh the last run wrote, for the view above the graph.
@@ -436,7 +437,7 @@ impl Default for MeshWorkspace {
         let mut editor = crate::editor::Editor::default();
         editor.mesh_mode = true;
         editor.frame_next = true;
-        MeshWorkspace { saved: graph.clone(), graph, editor, path: None, cache: Arc::new(Mutex::new(MeshCache::default())), job: None, log: Vec::new(), written: Vec::new(), seed: 0, autorun: false, preview: None, show_uv: false, thumbnails: Vec::new(), map_files: Vec::new(), show_map: false, map_index: 0, map_tex: None, map_zoom: 1.0, map_pan: egui::Vec2::ZERO, field_view: true, surface: 0, surface_tex: None, surface_key: None, ray: None, ray_tex: None, ray_error: None, ray_sent: None, ray_key: (0, None), auto_preview: false, preview_key: 0, changed_since: None, history: crate::history::History::new(&Graph::default()), yaw: 0.6, pitch: 0.35, zoom: 1.0 }
+        MeshWorkspace { saved: graph.clone(), graph, editor, path: None, cache: Arc::new(Mutex::new(MeshCache::default())), job: None, log: Vec::new(), written: Vec::new(), seed: 0, udim: Default::default(), autorun: false, preview: None, show_uv: false, thumbnails: Vec::new(), map_files: Vec::new(), show_map: false, map_index: 0, map_tex: None, map_zoom: 1.0, map_pan: egui::Vec2::ZERO, field_view: true, surface: 0, surface_tex: None, surface_key: None, ray: None, ray_tex: None, ray_error: None, ray_sent: None, ray_key: (0, None), auto_preview: false, preview_key: 0, changed_since: None, history: crate::history::History::new(&Graph::default()), yaw: 0.6, pitch: 0.35, zoom: 1.0 }
     }
 }
 
@@ -834,11 +835,15 @@ impl crate::App {
                         let (d, q, g) = (self.rs.device.clone(), self.rs.queue.clone(), self.graph_for_run());
                         self.mesh_ws.start(g, d, q, files.into_iter().map(Some).collect());
                     }
+                if ui.button("UDIM pack…").on_hover_text("After a batch: packs many meshes and their maps into one UDIM tileset with one combined mesh.").clicked() {
+                    self.mesh_ws.udim.open = true;
+                }
                 if ui.add_enabled(running, egui::Button::new("Cancel")).on_hover_text("Stops the run before its next node (a node that is already working finishes first).").clicked() {
                     crate::meshgraph::CANCEL.store(true, std::sync::atomic::Ordering::Relaxed);
                 }
                 ui.add(egui::DragValue::new(&mut self.mesh_ws.seed).prefix("seed "));
             });
+            self.mesh_ws.udim.window(ui.ctx());
             ui.checkbox(&mut self.mesh_ws.field_view, "Field view (ray marched, beside the mesh)").on_hover_text("Draws the field of the first Remesh directly on the GPU, without making a mesh: it follows the graph as you edit it and turns with the mesh view.");
             ui.checkbox(&mut self.mesh_ws.auto_preview, "Preview again after changes").on_hover_text("A second after the graph, or the noise graph open in the Noise tab, stops changing, the quick preview runs again.");
             if let Some(job) = &self.mesh_ws.job {
