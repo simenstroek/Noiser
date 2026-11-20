@@ -132,6 +132,8 @@ pub struct MeshWorkspace {
     log: Vec<String>,
     written: Vec<PathBuf>,
     pub seed: u32,
+    /// How a batch ('Run on files') picks the seed of each mesh from `seed`.
+    pub seed_mode: crate::meshexport::SeedMode,
     pub udim: crate::udim::Tool,
     /// Start a run on the first frame (for `--run-mesh-graph`).
     pub autorun: bool,
@@ -437,7 +439,7 @@ impl Default for MeshWorkspace {
         let mut editor = crate::editor::Editor::default();
         editor.mesh_mode = true;
         editor.frame_next = true;
-        MeshWorkspace { saved: graph.clone(), graph, editor, path: None, cache: Arc::new(Mutex::new(MeshCache::default())), job: None, log: Vec::new(), written: Vec::new(), seed: 0, udim: Default::default(), autorun: false, preview: None, show_uv: false, thumbnails: Vec::new(), map_files: Vec::new(), show_map: false, map_index: 0, map_tex: None, map_zoom: 1.0, map_pan: egui::Vec2::ZERO, field_view: true, surface: 0, surface_tex: None, surface_key: None, ray: None, ray_tex: None, ray_error: None, ray_sent: None, ray_key: (0, None), auto_preview: false, preview_key: 0, changed_since: None, history: crate::history::History::new(&Graph::default()), yaw: 0.6, pitch: 0.35, zoom: 1.0 }
+        MeshWorkspace { saved: graph.clone(), graph, editor, path: None, cache: Arc::new(Mutex::new(MeshCache::default())), job: None, log: Vec::new(), written: Vec::new(), seed: 0, seed_mode: Default::default(), udim: Default::default(), autorun: false, preview: None, show_uv: false, thumbnails: Vec::new(), map_files: Vec::new(), show_map: false, map_index: 0, map_tex: None, map_zoom: 1.0, map_pan: egui::Vec2::ZERO, field_view: true, surface: 0, surface_tex: None, surface_key: None, ray: None, ray_tex: None, ray_error: None, ray_sent: None, ray_key: (0, None), auto_preview: false, preview_key: 0, changed_since: None, history: crate::history::History::new(&Graph::default()), yaw: 0.6, pitch: 0.35, zoom: 1.0 }
     }
 }
 
@@ -623,7 +625,7 @@ impl MeshWorkspace {
         let progress = crate::meshexport::Progress::default();
         let log = Arc::new(Mutex::new(Vec::new()));
         let (tx, rx) = mpsc::channel();
-        let (cache, seed, p, l) = (self.cache.clone(), self.seed, progress.clone(), log.clone());
+        let (cache, seed, mode, p, l) = (self.cache.clone(), self.seed, self.seed_mode, progress.clone(), log.clone());
         let base = self.base();
         let total = files.len();
         let finished = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -635,7 +637,10 @@ impl MeshWorkspace {
             for (i, file) in files.into_iter().enumerate() {
                 let label = file.as_ref().map_or(String::new(), |f| format!("[{}/{total}] {}: ", i + 1, f.file_name().map_or(String::new(), |n| n.to_string_lossy().into_owned())));
                 let mut note = |s: &str| l.lock().unwrap().push(format!("{:>6.1} s  {label}{s}", t0.elapsed().as_secs_f32()));
-                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| Runner { device: &device, queue: &queue, cache: &mut cache, base: base.clone(), seed, progress: p.clone(), log: &mut note, batch_file: file, max_triangles: None }.run(&graph)));
+                if mode != crate::meshexport::SeedMode::Same {
+                    note(&format!("seed {}", mode.seed_for(seed, i)));
+                }
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| Runner { device: &device, queue: &queue, cache: &mut cache, base: base.clone(), seed: mode.seed_for(seed, i), progress: p.clone(), log: &mut note, batch_file: file, max_triangles: None }.run(&graph)));
                 match result.unwrap_or_else(|_| Err("the run crashed".into())) {
                     Ok(f) => written.extend(f),
                     Err(e) => {
@@ -842,6 +847,16 @@ impl crate::App {
                     crate::meshgraph::CANCEL.store(true, std::sync::atomic::Ordering::Relaxed);
                 }
                 ui.add(egui::DragValue::new(&mut self.mesh_ws.seed).prefix("seed "));
+                egui::ComboBox::from_id_salt("batch seed mode").selected_text(match self.mesh_ws.seed_mode {
+                    crate::meshexport::SeedMode::Same => "same seed",
+                    crate::meshexport::SeedMode::Increment => "seed + 1 each",
+                    crate::meshexport::SeedMode::Random => "random each",
+                }).show_ui(ui, |ui| {
+                    use crate::meshexport::SeedMode::*;
+                    ui.selectable_value(&mut self.mesh_ws.seed_mode, Same, "Same seed");
+                    ui.selectable_value(&mut self.mesh_ws.seed_mode, Increment, "Seed + 1 each").on_hover_text("Run on files: the first mesh uses the seed, the next one seed + 1, and so on.");
+                    ui.selectable_value(&mut self.mesh_ws.seed_mode, Random, "Random each").on_hover_text("Run on files: a different seed per mesh, repeatable from the seed.");
+                });
             });
             self.mesh_ws.udim.window(ui.ctx());
             ui.checkbox(&mut self.mesh_ws.field_view, "Field view (ray marched, beside the mesh)").on_hover_text("Draws the field of the first Remesh directly on the GPU, without making a mesh: it follows the graph as you edit it and turns with the mesh view.");
