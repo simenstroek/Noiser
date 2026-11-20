@@ -27,10 +27,12 @@ pub enum Channel {
     Thickness,
     /// The point on the surface, as a fraction of the mesh's bounding box, in RGB.
     Position,
+    /// The normal as a direction in the mesh's own axes (not tangent space), 0.5 + 0.5 * n in RGB.
+    NormalWs,
 }
 
 impl Channel {
-    pub const ALL: [Channel; 6] = [Channel::Normal, Channel::Occlusion, Channel::Curvature, Channel::Depth, Channel::Thickness, Channel::Position];
+    pub const ALL: [Channel; 7] = [Channel::Normal, Channel::Occlusion, Channel::Curvature, Channel::Depth, Channel::Thickness, Channel::Position, Channel::NormalWs];
 
     pub fn name(self) -> &'static str {
         match self {
@@ -40,12 +42,26 @@ impl Channel {
             Channel::Depth => "Depth",
             Channel::Thickness => "Thickness",
             Channel::Position => "Position",
+            Channel::NormalWs => "World space normal",
+        }
+    }
+
+    /// The name in file names: Substance Painter's mesh map usage names (`End_Ring_normalBase.png`).
+    pub fn suffix(self) -> &'static str {
+        match self {
+            Channel::Normal => "normalBase",
+            Channel::Occlusion => "ambientOcclusionBase",
+            Channel::Curvature => "curvature",
+            Channel::Depth => "heightBase",
+            Channel::Thickness => "thickness",
+            Channel::Position => "position",
+            Channel::NormalWs => "normalWS",
         }
     }
 
     /// Colour channels in the image: 3 for the normal and position maps, 1 for the rest.
     pub fn components(self) -> usize {
-        if matches!(self, Channel::Normal | Channel::Position) { 3 } else { 1 }
+        if matches!(self, Channel::Normal | Channel::Position | Channel::NormalWs) { 3 } else { 1 }
     }
 }
 
@@ -102,7 +118,7 @@ pub struct Image {
     /// The standard map this is, if it is one (custom maps and processed images are not).
     #[cfg_attr(not(test), allow(dead_code))]
     pub channel: Option<Channel>,
-    /// The name its file gets (`Normal`, `Normal_R`...).
+    /// The name its file gets (`normalBase`, `normalBase_R`...).
     pub label: String,
     pub size: u32,
     pub components: usize,
@@ -298,7 +314,7 @@ fn downsample(im: Image, k: usize, valid: &[bool]) -> Image {
     let n = big / k;
     let c = im.components;
     let mut data = vec![0.0f32; n * n * c];
-    let normal = im.channel == Some(Channel::Normal);
+    let normal = matches!(im.channel, Some(Channel::Normal | Channel::NormalWs));
     for y in 0..n {
         for x in 0..n {
             let (mut sum, mut count) = ([0.0f32; 3], 0.0f32);
@@ -479,6 +495,11 @@ fn bake_raw(mesh: &UvMesh, field: &mut dyn Field, customs: &mut [&mut dyn Field]
                         out[at + 1] = 0.5 + 0.5 * g;
                         out[at + 2] = 0.5 + 0.5 * dot(n, n_low);
                     }
+                    Channel::NormalWs => {
+                        for a in 0..3 {
+                            out[at + a] = 0.5 + 0.5 * normal[i][a];
+                        }
+                    }
                     Channel::Occlusion => out[at] = occlusion[i],
                     Channel::Curvature => {
                         out[at] = curvature[i];
@@ -518,7 +539,7 @@ fn bake_raw(mesh: &UvMesh, field: &mut dyn Field, customs: &mut [&mut dyn Field]
     progress(texels.len(), texels.len());
     let mut out = Vec::new();
     for (k, &c) in channels.iter().enumerate() {
-        out.push(Image { channel: Some(c), label: c.name().to_string(), size: size as u32, components: c.components(), data: std::mem::take(&mut images[k]) });
+        out.push(Image { channel: Some(c), label: c.suffix().to_string(), size: size as u32, components: c.components(), data: std::mem::take(&mut images[k]) });
     }
     for (k, data) in custom_images.into_iter().enumerate() {
         out.push(Image { channel: None, label: settings.custom.get(k).cloned().unwrap_or_else(|| format!("Custom{}", k + 1)), size: size as u32, components: 1, data });
@@ -610,7 +631,7 @@ mod tests {
     #[test]
     fn a_smooth_sphere_bakes_a_flat_normal_map_and_open_occlusion() {
         let mesh = sphere_uv(3);
-        let settings = Settings { size: 128, padding: 4, channels: vec![Channel::Normal, Channel::Occlusion, Channel::Position, Channel::Thickness, Channel::Curvature], custom: Vec::new(), green_up: false, samples: 1 };
+        let settings = Settings { size: 128, padding: 4, channels: vec![Channel::Normal, Channel::Occlusion, Channel::Position, Channel::Thickness, Channel::Curvature, Channel::NormalWs], custom: Vec::new(), green_up: false, samples: 1 };
         let images = bake(&mesh, &mut Bumpy(0.0), &mut [], &settings, &|_, _| {}).unwrap();
         let get = |c: Channel| images.iter().find(|i| i.channel == Some(c)).unwrap();
         // Normal map: tangent-space z (blue) near 1 on a sphere sampled by a fine low-poly one.
@@ -625,6 +646,10 @@ mod tests {
             }
         }
         assert!(sum / count as f32 > 0.97, "blue averages {}", sum / count as f32);
+        // World space normal: on the unit sphere it is the position itself, as 0.5 + 0.5 * n.
+        let (ws, pos) = (get(Channel::NormalWs), get(Channel::Position));
+        let near = ws.data.chunks(3).zip(pos.data.chunks(3)).filter(|(w, _)| w[2] > 0.0).filter(|(w, p)| (0..3).all(|a| (w[a] - p[a]).abs() < 0.1)).count();
+        assert!(near > 128 * 128 / 3, "{near} world normal texels");
         // Occlusion: a convex sphere is open everywhere.
         let ao = get(Channel::Occlusion);
         let covered: Vec<f32> = ao.data.iter().cloned().filter(|v| *v > 0.0).collect();

@@ -1808,7 +1808,7 @@ fn a_mesh_graph_runs_from_a_mesh_file_to_files() {
     // The surface is the unit sphere moved by up to the two amplitudes (the noise is in about -1..1).
     let (lo, hi) = (radii.iter().cloned().fold(9.0, f32::min), radii.iter().cloned().fold(0.0, f32::max));
     assert!(lo > 0.8 && hi < 1.2 && hi - lo > 0.03, "radii {lo}..{hi}");
-    assert!(dir.join("out").join("ball_Normal.png").exists());
+    assert!(dir.join("out").join("ball_normalBase.png").exists());
     assert!(std::fs::metadata(dir.join("out").join("packedexr_Combined.exr")).unwrap().len() > 1000);
     let ply = std::fs::read(dir.join("out").join("ballply.ply")).unwrap();
     assert!(ply.starts_with(b"ply
