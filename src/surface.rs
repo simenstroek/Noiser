@@ -215,6 +215,13 @@ fn find(parent: &mut [u32], mut x: u32) -> u32 {
     x
 }
 
+/// The material name an exported mesh carries: its file name without the extension, with anything but letters, digits,
+/// `_` and `-` turned into `_` (Substance Painter matches baked maps named `<material>_Normal` and so on).
+pub fn material_name(path: &std::path::Path) -> String {
+    let stem: String = path.file_stem().map(|s| s.to_string_lossy().chars().map(|c| if c.is_alphanumeric() || c == '_' || c == '-' { c } else { '_' }).collect()).unwrap_or_default();
+    if stem.is_empty() { "Material".into() } else { stem }
+}
+
 impl RawMesh {
     /// Replaces the vertex normals with the angle-weighted mean of the faces around each vertex: the normals a game
     /// engine or Blender computes by itself. A low-poly mesh needs these rather than the field's gradient, which on a
@@ -300,10 +307,11 @@ impl RawMesh {
             .sum()
     }
 
-    /// Wavefront OBJ with vertex normals.
+    /// Wavefront OBJ with vertex normals; the material is named after the file.
     pub fn write_obj(&self, path: &std::path::Path) -> std::io::Result<()> {
         let mut w = std::io::BufWriter::with_capacity(1 << 20, std::fs::File::create(path)?);
         writeln!(w, "# Noiser")?;
+        writeln!(w, "usemtl {}", material_name(path))?;
         for p in &self.positions {
             writeln!(w, "v {} {} {}", p[0], p[1], p[2])?;
         }
@@ -358,6 +366,20 @@ mod tests {
             *p = [-extent + p[0] * h, -extent + p[1] * h, -extent + p[2] * h];
         }
         (m, h)
+    }
+
+    #[test]
+    fn exported_meshes_name_their_material_after_the_file() {
+        assert_eq!(material_name(std::path::Path::new("H:/a b/Canyon Ledge.obj")), "Canyon_Ledge");
+        let (m, _) = sphere(6, 0.8, [0.0; 3], 1.25);
+        let path = std::env::temp_dir().join("noiser_material_test.obj");
+        m.write_obj(&path).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.lines().any(|l| l == "usemtl noiser_material_test"), "{}", &text[..80]);
+        let glb = std::env::temp_dir().join("noiser_material_test.glb");
+        crate::meshformats::write_glb(&glb, &m.positions, &m.normals, None, &m.triangles).unwrap();
+        let bytes = std::fs::read(&glb).unwrap();
+        assert!(String::from_utf8_lossy(&bytes).contains("\"materials\":[{\"name\":\"noiser_material_test\"}]"));
     }
 
     fn edge_counts(m: &RawMesh) -> HashMap<(u32, u32), (u32, u32)> {

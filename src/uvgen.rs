@@ -42,6 +42,7 @@ impl UvMesh {
         use std::io::Write;
         let mut w = std::io::BufWriter::with_capacity(1 << 20, std::fs::File::create(path)?);
         writeln!(w, "# Noiser")?;
+        writeln!(w, "usemtl {}", crate::surface::material_name(path))?;
         for p in &self.positions {
             writeln!(w, "v {} {} {}", p[0], p[1], p[2])?;
         }
