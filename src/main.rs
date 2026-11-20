@@ -1347,6 +1347,12 @@ value {v:.4} at ({tx:.3}, {ty:.3})");
 
 /// Writes panics to `crash.log` in Noiser's data folder (the release build has no console, so they would
 /// otherwise vanish), then lets the normal handling run.
+/// The window icon (the same image is the exe's icon, see build.rs).
+fn app_icon() -> egui::IconData {
+    let img = image::load_from_memory(include_bytes!("../assets/icon.png")).expect("assets/icon.png").to_rgba8();
+    egui::IconData { width: img.width(), height: img.height(), rgba: img.into_raw() }
+}
+
 fn install_crash_log() {
     let Some(dir) = eframe::storage_dir("Noiser") else { return };
     let previous = std::panic::take_hook();
@@ -1374,7 +1380,7 @@ fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         renderer: eframe::Renderer::Wgpu,
         wgpu_options: view::request_timestamps(Default::default()),
-        viewport: egui::ViewportBuilder::default().with_inner_size(window).with_title("Noiser"),
+        viewport: egui::ViewportBuilder::default().with_inner_size(window).with_title("Noiser").with_icon(app_icon()),
         ..Default::default()
     };
     eframe::run_native("Noiser", options, Box::new(|cc| Ok(Box::new(App::new(cc)))))
@@ -1473,5 +1479,63 @@ mod curve_ui_tests {
     /// The vertical gap egui puts between widgets by default.
     fn ui_spacing() -> f32 {
         egui::Style::default().spacing.item_spacing.y
+    }
+}
+
+#[cfg(test)]
+mod icon_tests {
+    /// Regenerates assets/icon.png and assets/icon.ico (the exe's icon) from assets/icons/landslide.svg: a white glyph on a dark rounded square.
+    #[test]
+    #[ignore = "writes assets/icon.png and assets/icon.ico"]
+    fn write_app_icon() {
+        let svg = String::from_utf8_lossy(include_bytes!("../assets/icons/landslide.svg")).replace("currentColor", "#ffffff");
+        let side = 512usize;
+        let glyph_side = 360usize;
+        let glyph = egui_extras::image::load_svg_bytes_with_size(svg.as_bytes(), eframe::egui::load::SizeHint::Size { width: glyph_side as u32, height: glyph_side as u32, maintain_aspect_ratio: true }, &Default::default()).unwrap();
+        let mut img = image::RgbaImage::new(side as u32, side as u32);
+        let (radius, bg) = (96.0f32, [36u8, 40, 46, 255]);
+        for (x, y, px) in img.enumerate_pixels_mut() {
+            // A rounded square covering the whole image.
+            let (dx, dy) = ((x as f32 + 0.5 - 256.0).abs() - (256.0 - radius), (y as f32 + 0.5 - 256.0).abs() - (256.0 - radius));
+            let outside = (dx.max(0.0).powi(2) + dy.max(0.0).powi(2)).sqrt() - radius;
+            if outside < 0.5 {
+                *px = image::Rgba(bg);
+            }
+        }
+        let (ox, oy) = ((side - glyph.size[0]) / 2, (side - glyph.size[1]) / 2);
+        for y in 0..glyph.size[1] {
+            for x in 0..glyph.size[0] {
+                let g = glyph.pixels[y * glyph.size[0] + x];
+                let a = g.a() as f32 / 255.0;
+                let px = img.get_pixel_mut((ox + x) as u32, (oy + y) as u32);
+                for c in 0..3 {
+                    px.0[c] = (px.0[c] as f32 * (1.0 - a) + 255.0 * a) as u8;
+                }
+            }
+        }
+        img.save("assets/icon.png").unwrap();
+        // An .ico holding PNG images at several sizes.
+        let sizes = [256u32, 64, 48, 32, 16];
+        let pngs: Vec<Vec<u8>> = sizes
+            .iter()
+            .map(|&s| {
+                let mut out = Vec::new();
+                image::DynamicImage::ImageRgba8(image::imageops::resize(&img, s, s, image::imageops::FilterType::Lanczos3)).write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png).unwrap();
+                out
+            })
+            .collect();
+        let mut ico = vec![0u8, 0, 1, 0];
+        ico.extend((sizes.len() as u16).to_le_bytes());
+        let mut offset = 6 + 16 * sizes.len();
+        for (s, png) in sizes.iter().zip(&pngs) {
+            ico.extend([if *s >= 256 { 0 } else { *s as u8 }, if *s >= 256 { 0 } else { *s as u8 }, 0, 0, 1, 0, 32, 0]);
+            ico.extend((png.len() as u32).to_le_bytes());
+            ico.extend((offset as u32).to_le_bytes());
+            offset += png.len();
+        }
+        for png in pngs {
+            ico.extend(png);
+        }
+        std::fs::write("assets/icon.ico", ico).unwrap();
     }
 }
