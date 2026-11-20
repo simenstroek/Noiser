@@ -216,7 +216,7 @@ fn find(parent: &mut [u32], mut x: u32) -> u32 {
 }
 
 /// The material name an exported mesh carries: its file name without the extension, with anything but letters, digits,
-/// `_` and `-` turned into `_` (Substance Painter matches baked maps named `<material>_normal_base` and so on).
+/// `_` and `-` turned into `_` (Substance Painter matches baked maps named `<material>_normalBase` and so on).
 pub fn material_name(path: &std::path::Path) -> String {
     let stem: String = path.file_stem().map(|s| s.to_string_lossy().chars().map(|c| if c.is_alphanumeric() || c == '_' || c == '-' { c } else { '_' }).collect()).unwrap_or_default();
     if stem.is_empty() { "Material".into() } else { stem }

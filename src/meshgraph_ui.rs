@@ -194,7 +194,7 @@ pub fn props(ui: &mut egui::Ui, kind: &mut NodeKind) -> bool {
                 ui.label("name");
                 ui.add(egui::TextEdit::singleline(&mut o.name).desired_width(140.0));
             });
-            ui.weak(if image { "A map's name is added to the file name: name_normal_base.png. {name} in the name is the mesh file's name in a batch." } else { "Existing files are not overwritten: a number is added. {name} in the name is the mesh file's name in a batch." });
+            ui.weak(if image { "A map's name is added to the file name: name_normalBase.png. {name} in the name is the mesh file's name in a batch." } else { "Existing files are not overwritten: a number is added. {name} in the name is the mesh file's name in a batch." });
             true
         }
         _ => false,
