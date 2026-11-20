@@ -160,7 +160,7 @@ mod tests {
         // Unchanged graph: no new backup and nothing pending.
         assert!(!s.backup(&g, None));
         // A change inside the interval is held back and reported as pending.
-        g.add(NodeKind::Position, [0.0; 2]);
+        g.add(NodeKind::position(), [0.0; 2]);
         assert!(s.backup(&g, None));
         s.end();
         assert!(std::fs::read_dir(&root).unwrap().next().is_none());

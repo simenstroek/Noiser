@@ -126,6 +126,7 @@ fn compile_inner(g: &Graph, caches: &BTreeMap<NodeId, u32>, eps: f32, preview: b
                 }
             }
             NodeKind::Combine { vals } => params.extend(vals),
+            NodeKind::Position { scale } => params.extend(scale),
             NodeKind::Random { vals, seed } => params.extend([vals[0], vals[1], seed.map_or(-1.0, |s| s as f32)]),
             NodeKind::Radial(r) => {
                 params.push(if r.mode == crate::graph::RadialMode::Spherical { 1.0 } else { 0.0 });
@@ -369,7 +370,10 @@ impl Gen<'_> {
         let (ty, expr) = match &self.g.nodes[&id].kind {
             NodeKind::Float(_) => (Ty::F, format!("P[{s}]")),
             NodeKind::Vec3(_) => (Ty::V, format!("vec3f(P[{s}], P[{}], P[{}])", s + 1, s + 2)),
-            NodeKind::Position => (Ty::V, "p".into()),
+            NodeKind::Position { .. } => {
+                let x: Vec<String> = (0..3).map(|p| self.operand(id, p, Ty::F, &format!("P[{}]", s + p))).collect();
+                (Ty::V, format!("p * vec3f({}, {}, {})", x[0], x[1], x[2]))
+            }
             NodeKind::Radial(_) => {
                 let q = self.operand(id, 0, Ty::V, "p");
                 (Ty::V, format!("radial_coords({q}, vec3f(P[{}], P[{}], P[{}]), vec3f(P[{}], P[{}], P[{}]), P[{s}] > 0.5)", s + 1, s + 2, s + 3, s + 4, s + 5, s + 6))
@@ -502,7 +506,7 @@ pub(crate) fn random_graph(rnd: &mut impl FnMut(usize) -> usize) -> Graph {
         let kind = match rnd(16) {
             0 => K::Float(rnd(5) as f32 - 2.0),
             1 => K::Vec3([rnd(3) as f32, 0.5, -1.0]),
-            2 => K::Position,
+            2 => K::position(),
             3 => K::Math { op: MathOp::ALL[rnd(MathOp::ALL.len())], a: 0.5, b: 2.0, c: 0.3 },
             4 => K::Remap { vals: [0.0, 0.0, 1.0, -1.0, 2.0], clamp: rnd(2) == 0 },
             5 => K::Mix { vals: [0.5, 0.0, 1.0], clamp: rnd(2) == 0 },
@@ -537,6 +541,9 @@ pub(crate) fn random_graph(rnd: &mut impl FnMut(usize) -> usize) -> Graph {
     }
     // Links only from earlier to later nodes, so there are no cycles.
     for to in 1..count as u32 {
+        if matches!(g.nodes[&to].kind, K::Position { .. }) {
+            continue; // a scaled Position has no .noiser form, and the export test reads these graphs
+        }
         for port in 0..g.nodes[&to].kind.input_count() {
             if rnd(10) < 6 {
                 let from = rnd(to as usize) as u32;
@@ -627,7 +634,7 @@ mod tests {
     #[test]
     fn vector_preview_defines_a_colour_only_for_previews() {
         let mut g = Graph::default();
-        let position = g.add(NodeKind::Position, [0.0; 2]);
+        let position = g.add(NodeKind::position(), [0.0; 2]);
         let out = g.add(NodeKind::OutDensity, [0.0; 2]);
         g.connect(position, out, 0);
         assert!(!compile(&g).unwrap().wgsl.contains("fn graph_color("));
@@ -669,7 +676,7 @@ mod tests {
     #[test]
     fn every_node_kind_compiles() {
         let mut g = Graph::default();
-        let p = g.add(NodeKind::Position, [0.0; 2]);
+        let p = g.add(NodeKind::position(), [0.0; 2]);
         let radial = g.add(NodeKind::Radial(Default::default()), [0.0; 2]);
         g.connect(p, radial, 0);
         let v = g.add(NodeKind::Vec3([0.5, 1.0, 2.0]), [0.0; 2]);

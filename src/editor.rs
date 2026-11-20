@@ -141,7 +141,7 @@ pub fn title(kind: &NodeKind) -> String {
         NodeKind::Curve { .. } => "Curve".into(),
         NodeKind::Grid { .. } => "Grid".into(),
         NodeKind::Pattern(p) => p.kind.name().into(),
-        NodeKind::Position => "Position".into(),
+        NodeKind::Position { .. } => "Position".into(),
         NodeKind::Radial(r) => match r.mode {
             crate::graph::RadialMode::Cylindrical => "Cylindrical position".into(),
             crate::graph::RadialMode::Spherical => "Spherical position".into(),
@@ -177,6 +177,9 @@ fn input_label(kind: &NodeKind, port: usize) -> &'static str {
         (NodeKind::Reroute | NodeKind::NamedReroute { .. }, _) => "In",
         (NodeKind::Curve { .. }, _) => "Value",
         (NodeKind::Separate, _) => "Vector",
+        (NodeKind::Position { .. }, 0) => "X",
+        (NodeKind::Position { .. }, 1) => "Y",
+        (NodeKind::Position { .. }, _) => "Z",
         (NodeKind::Random { .. }, 0) => "Min",
         (NodeKind::Random { .. }, 1) => "Max",
         (NodeKind::Combine { .. }, 0) => "X",
@@ -244,7 +247,7 @@ fn summary(kind: &NodeKind) -> String {
     match kind {
         NodeKind::Float(v) => format!("{v:.3}"),
         NodeKind::Vec3(v) => format!("{:.2}, {:.2}, {:.2}", v[0], v[1], v[2]),
-        NodeKind::Position => "world position".into(),
+        NodeKind::Position { .. } => "world position".into(),
         NodeKind::Reroute => "passes its input on".into(),
         NodeKind::NamedReroute { .. } => "named: usable anywhere".into(),
         NodeKind::NamedRerouteUse { .. } => "reads a named reroute".into(),
@@ -300,7 +303,7 @@ fn noise_palette() -> Vec<(&'static str, NodeKind)> {
             ("Fractal", NodeKind::Pattern(crate::graph::PatternParams::for_kind(crate::graph::PatternKind::Fractal))),
             ("Truchet", NodeKind::Pattern(crate::graph::PatternParams::for_kind(crate::graph::PatternKind::Truchet))),
             ("Honeycomb", NodeKind::Pattern(crate::graph::PatternParams::for_kind(crate::graph::PatternKind::Honeycomb))),
-            ("Position", NodeKind::Position),
+            ("Position", NodeKind::position()),
             ("Radial position", NodeKind::Radial(Default::default())),
             ("Normal", NodeKind::Normal { flip: false }),
             ("Density Output", NodeKind::OutDensity),
@@ -1360,7 +1363,7 @@ mod tests {
     #[test]
     fn dragging_from_a_separate_output_pin_remembers_which_one() {
         let mut g = Graph::default();
-        let pos = g.add(NodeKind::Position, [20.0, 20.0]);
+        let pos = g.add(NodeKind::position(), [20.0, 20.0]);
         let sep = g.add(NodeKind::Separate, [200.0, 20.0]);
         let comb = g.add(NodeKind::Combine { vals: [0.0; 3] }, [500.0, 20.0]);
         g.connect(pos, sep, 0);

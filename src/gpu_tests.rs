@@ -287,7 +287,7 @@ fn bench_preview() {
 /// Density = mean(x, y, z), so every exported voxel has a known value.
 fn position_graph() -> Graph {
     let mut g = Graph::default();
-    let p = g.add(NodeKind::Position, [0.0; 2]);
+    let p = g.add(NodeKind::position(), [0.0; 2]);
     let o = g.add(NodeKind::OutDensity, [0.0; 2]);
     g.connect(p, o, 0);
     g
@@ -1044,7 +1044,7 @@ fn separate_and_combine_move_components_around() {
     let at = [[0.3, 0.6, 0.9]];
     // Position -> Separate, output Y is the y coordinate.
     let mut g = Graph::default();
-    let p = g.add(NodeKind::Position, [0.0; 2]);
+    let p = g.add(NodeKind::position(), [0.0; 2]);
     let s = g.add(NodeKind::Separate, [0.0; 2]);
     let o = g.add(NodeKind::OutDensity, [0.0; 2]);
     g.connect(p, s, 0);
@@ -1052,7 +1052,7 @@ fn separate_and_combine_move_components_around() {
     near(eval(&gpu, &g, &at)[0], 0.6, "the y coordinate");
     // One Separate node feeds both X and Z into a Combine; Separate Y of the result is the Combine's own Y.
     let mut g = Graph::default();
-    let p = g.add(NodeKind::Position, [0.0; 2]);
+    let p = g.add(NodeKind::position(), [0.0; 2]);
     let sep = g.add(NodeKind::Separate, [0.0; 2]);
     let c = g.add(NodeKind::Combine { vals: [0.0, 2.0, 0.0] }, [0.0; 2]);
     let back = g.add(NodeKind::Separate, [0.0; 2]);
@@ -2547,7 +2547,7 @@ fn write_showcase_graphs() {
 
     // 1. Eroded rock: warped cells, ridged detail, baked warp, a named reroute.
     let mut g = Graph::default();
-    let pos = g.add(NodeKind::Position, [0.0, 120.0]);
+    let pos = g.add(NodeKind::position(), [0.0, 120.0]);
     let warp_n: Vec<NodeId> = (0..3u32).map(|i| g.add(noise(NoiseKind::Perlin, 2.0, 3, 10 + i), [220.0, i as f32 * 150.0])).collect();
     let comb = g.add(NodeKind::Combine { vals: [0.0; 3] }, [440.0, 150.0]);
     for (p, n) in warp_n.iter().enumerate() {
@@ -2635,7 +2635,7 @@ fn write_showcase_graphs() {
 
     // 4. Clouds (viewport in cloud mode).
     let mut g = Graph::default();
-    let pos = g.add(NodeKind::Position, [0.0, 100.0]);
+    let pos = g.add(NodeKind::position(), [0.0, 100.0]);
     let w = g.add(noise(NoiseKind::Simplex, 2.0, 2, 5), [200.0, 300.0]);
     let wc = g.add(NodeKind::Combine { vals: [0.0; 3] }, [400.0, 300.0]);
     g.connect(w, wc, 0);
@@ -2764,7 +2764,7 @@ fn wired_parameter_pins_and_random_nodes() {
     near(eval(&gpu, &g, &at)[0], -1.0, "x count 8 puts the centre at 0.0625");
     g.prune_edges();
     assert!(g.pin_wired(grid, Some("count_x")) && !matches!(g.tiling()[&grid], crate::graph::Tiling::Broken(_)), "a uniform wired pin keeps the tiling");
-    let pos = g.add(NodeKind::Position, [0.0; 2]);
+    let pos = g.add(NodeKind::position(), [0.0; 2]);
     g.connect(pos, grid, 2);
     g.nodes.get_mut(&grid).unwrap().pins.push("count_y".into());
     assert!(matches!(g.tiling()[&grid], crate::graph::Tiling::Broken(_)), "a pin wired to a position breaks it");
@@ -2809,4 +2809,26 @@ fn wired_parameter_pins_and_random_nodes() {
     assert!(a.iter().all(|v| (2.0..=4.0).contains(v) && (*v - a[0]).abs() < 1e-6), "{a:?}");
     let (s1, s2) = (at_points(&random(Some(1)))[0], at_points(&random(Some(2)))[0]);
     assert!((s1 - s2).abs() > 1e-3 && (2.0..=4.0).contains(&s1) && (2.0..=4.0).contains(&s2), "{s1} {s2}");
+}
+
+#[test]
+fn a_position_node_scales_its_axes() {
+    let Some(gpu) = gpu() else { return eprintln!("no GPU adapter; skipping") };
+    let mut g = Graph::default();
+    let p = g.add(NodeKind::Position { scale: [2.0, 1.0, 0.5] }, [0.0; 2]);
+    let sep = g.add(NodeKind::Separate, [0.0; 2]);
+    let out = g.add(NodeKind::OutDensity, [0.0; 2]);
+    g.connect(p, sep, 0);
+    g.connect_from(sep, 0, out, 0);
+    near(eval(&gpu, &g, &[[0.25, 0.5, 0.5]])[0], 0.5, "x doubled");
+    assert!(matches!(g.tiling()[&p], crate::graph::Tiling::Broken(_)), "a 0.5 scale is not whole");
+    g.nodes.get_mut(&p).unwrap().kind = NodeKind::Position { scale: [3.0, 1.0, 1.0] };
+    assert_eq!(g.tiling()[&p], crate::graph::Tiling::Coord);
+    // A wired axis replaces its default.
+    let v = g.add(NodeKind::Float(4.0), [0.0; 2]);
+    g.connect(v, p, 0);
+    near(eval(&gpu, &g, &[[0.25, 0.5, 0.5]])[0], 1.0, "x from the wire");
+    // Old files with a bare "Position" still load.
+    let old = r#"{"nodes": {"0": {"kind": "Position", "pos": [0,0]}}, "edges": []}"#;
+    assert!(matches!(Graph::from_json(old).unwrap().nodes[&0].kind, NodeKind::Position { scale } if scale == [1.0; 3]));
 }

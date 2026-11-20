@@ -42,6 +42,9 @@ pub fn ops(g: &Graph, seed: u32) -> Result<Value, String> {
     if order.iter().any(|id| matches!(g.nodes[id].kind, NodeKind::Random { .. })) {
         return Err("a Random node has no .noiser form".into());
     }
+    if order.iter().any(|id| matches!(g.nodes[id].kind, NodeKind::Position { scale } if scale != [1.0; 3]) || (matches!(g.nodes[id].kind, NodeKind::Position { .. }) && (0..3).any(|p| g.input(*id, p).is_some()))) {
+        return Err("a scaled Position node has no .noiser form".into());
+    }
     if order.iter().any(|id| g.pin_wired(*id, None)) {
         return Err("a wired parameter pin (frequency, count, ...) has no .noiser form".into());
     }
@@ -65,7 +68,7 @@ pub fn ops(g: &Graph, seed: u32) -> Result<Value, String> {
             }
             let ty = if g.yields_vector(id) { "vector" } else { "float" };
             let mut op = match &g.nodes[&id].kind {
-                NodeKind::Position => json!({"op": "position"}),
+                NodeKind::Position { .. } => json!({"op": "position"}), // a scaled one is refused above
                 NodeKind::Radial(_) | NodeKind::Random { .. } => unreachable!("refused above"),
                 NodeKind::LoadMesh(_) | NodeKind::NoiseGraph(_) | NodeKind::Remesh { .. } | NodeKind::AutoUv(_) | NodeKind::Bake(_) | NodeKind::OutMesh(_) | NodeKind::OutImage(_) | NodeKind::ImageSplit | NodeKind::ImageCombine | NodeKind::ImageLevels { .. } | NodeKind::TransferUv => json!({"op": "value", "value": 0.0}), // mesh graph nodes have no .noiser form
                 // A passthrough, written as adding zero.

@@ -63,7 +63,7 @@ mod tests {
         let mut g = Graph::default();
         let mut h = History::new(&g);
         let a = g.clone();
-        g.add(NodeKind::Position, [0.0; 2]);
+        g.add(NodeKind::position(), [0.0; 2]);
         h.commit(&g, false); // mid-drag: nothing recorded
         assert!(!h.can_undo());
         h.commit(&g, true);
@@ -79,14 +79,14 @@ mod tests {
         g = h.redo(&g).unwrap();
         assert_eq!(g, b);
         // An uncommitted edit is kept by undo (it commits first) and a new edit drops the redo branch.
-        g.add(NodeKind::Position, [1.0; 2]);
+        g.add(NodeKind::position(), [1.0; 2]);
         let d = g.clone();
         g = h.undo(&g).unwrap();
         assert_eq!(g, b);
         g = h.redo(&g).unwrap();
         assert_eq!(g, d);
         assert_ne!(g, c);
-        g.add(NodeKind::Position, [2.0; 2]);
+        g.add(NodeKind::position(), [2.0; 2]);
         h.commit(&g, true);
         assert!(!h.can_redo());
     }

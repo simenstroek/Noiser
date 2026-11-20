@@ -55,7 +55,8 @@ pub enum NodeKind {
     },
     /// A regular pattern (see `PatternParams`). Input: position (defaults to world position).
     Pattern(PatternParams),
-    Position,
+    /// The world position, each axis multiplied by the matching input (X, Y, Z; `scale` holds their defaults, 1).
+    Position { scale: [f32; 3] },
     /// Position in cylindrical or spherical coordinates around a centre and an axis (see `RadialParams`). Input: position (defaults to world position).
     Radial(RadialParams),
     /// A waypoint on a wire: passes its input through (every reader skips it, like a muted node).
@@ -115,6 +116,11 @@ impl NodeKind {
     }
 
     /// The numeric parameters the node can take from an input pin (ports 1 and up, in this order).
+    /// The world position with every axis scale at 1.
+    pub fn position() -> NodeKind {
+        NodeKind::Position { scale: [1.0; 3] }
+    }
+
     pub fn param_pins(&self) -> &'static [ParamPin] {
         match self {
             NodeKind::Noise(_) => &NOISE_PINS,
@@ -126,7 +132,8 @@ impl NodeKind {
 
     pub fn input_count(&self) -> usize {
         match self {
-            NodeKind::Float(_) | NodeKind::Vec3(_) | NodeKind::Position => 0,
+            NodeKind::Float(_) | NodeKind::Vec3(_) => 0,
+            NodeKind::Position { .. } => 3,
             NodeKind::Reroute | NodeKind::NamedReroute { .. } => 1,
             NodeKind::NamedRerouteUse { .. } => 0,
             NodeKind::Math { op, .. } => if op.is_ternary() { 3 } else if op.is_unary() { 1 } else { 2 },
@@ -151,6 +158,7 @@ impl NodeKind {
             NodeKind::Remap { vals, .. } => vals.get(port).copied(),
             NodeKind::Mix { vals, .. } => vals.get(port).copied(),
             NodeKind::Combine { vals } => vals.get(port).copied(),
+            NodeKind::Position { scale } => scale.get(port).copied(),
             NodeKind::Random { vals, .. } => vals.get(port).copied(),
             _ => None,
         }
@@ -180,6 +188,11 @@ impl NodeKind {
             }
             NodeKind::Random { vals, .. } => {
                 if let Some(x) = vals.get_mut(port) {
+                    *x = v;
+                }
+            }
+            NodeKind::Position { scale } => {
+                if let Some(x) = scale.get_mut(port) {
                     *x = v;
                 }
             }
@@ -550,7 +563,7 @@ impl Graph {
 
     pub fn yields_vector(&self, id: NodeId) -> bool {
         match &self.nodes[&id].kind {
-            NodeKind::Vec3(_) | NodeKind::Position | NodeKind::Radial(_) | NodeKind::Normal { .. } | NodeKind::Combine { .. } => true,
+            NodeKind::Vec3(_) | NodeKind::Position { .. } | NodeKind::Radial(_) | NodeKind::Normal { .. } | NodeKind::Combine { .. } => true,
             NodeKind::Reroute | NodeKind::NamedReroute { .. } => self.input_is_vector(id, 0),
             NodeKind::NamedRerouteUse { name } => self.named_declaration(name).is_some_and(|d| self.input_is_vector(d, 0)),
             NodeKind::Math { op, .. } => *op != MathOp::Dot && (0..2).any(|p| self.input_is_vector(id, p)),
@@ -615,7 +628,7 @@ impl Graph {
             "Gyroid foam" => g.add(NodeKind::Pattern(PatternParams::for_kind(PatternKind::Gyroid)), [200.0, 0.0]),
             "Warped cells" => {
                 // Domain warping: the position is pushed around by three noises before it feeds the cells.
-                let pos = g.add(NodeKind::Position, [0.0, 0.0]);
+                let pos = g.add(NodeKind::position(), [0.0, 0.0]);
                 let warp: Vec<NodeId> = (0..3u32)
                     .map(|i| g.add(NodeKind::Noise(NoiseParams { kind: NoiseKind::Perlin, scale: 2.0, octaves: 2, seed: Some(10 + i), ..NoiseParams::default() }), [200.0, i as f32 * 160.0]))
                     .collect();
@@ -644,7 +657,7 @@ impl Graph {
 
     pub fn default_graph() -> Self {
         let mut g = Graph::default();
-        let pos = g.add(NodeKind::Position, [0.0, 0.0]);
+        let pos = g.add(NodeKind::position(), [0.0, 0.0]);
         let noise = g.add(NodeKind::Noise(NoiseParams::default()), [200.0, 0.0]);
         let out = g.add(NodeKind::OutDensity, [400.0, 0.0]);
         g.add(NodeKind::OutNormal, [400.0, 120.0]);
@@ -699,7 +712,15 @@ impl Graph {
             NodeKind::Float(_) | NodeKind::Vec3(_) => Const,
             NodeKind::LoadMesh(_) => Broken("a loaded mesh does not tile".into()),
             NodeKind::NoiseGraph(_) | NodeKind::Remesh { .. } | NodeKind::AutoUv(_) | NodeKind::Bake(_) | NodeKind::OutMesh(_) | NodeKind::OutImage(_) | NodeKind::ImageSplit | NodeKind::ImageCombine | NodeKind::ImageLevels { .. } | NodeKind::TransferUv => Const,
-            NodeKind::Position => Coord,
+            // Each axis times a whole number (a default, or a Value node's) is still a coordinate.
+            NodeKind::Position { scale } => {
+                let whole = (0..3).all(|p| match self.input(id, p).map(|s| &self.nodes[&s].kind) {
+                    None => is_whole(scale[p]),
+                    Some(NodeKind::Float(v)) => is_whole(*v),
+                    Some(_) => false,
+                });
+                if whole { Coord } else { Broken("a position scaled by a value that is not a known whole number".into()) }
+            }
             NodeKind::Radial(_) => Broken("a radial position does not tile".into()),
             NodeKind::Reroute | NodeKind::NamedReroute { .. } => input(0, memo, stack).unwrap_or(Const),
             NodeKind::NamedRerouteUse { name } => match self.named_declaration(name).and_then(|d| self.input(d, 0)) {
@@ -978,7 +999,7 @@ impl Graph {
         let r = match &self.nodes[&id].kind {
             NodeKind::Float(v) => (*v, *v),
             NodeKind::Vec3(v) => (v.iter().cloned().fold(f32::MAX, f32::min), v.iter().cloned().fold(f32::MIN, f32::max)),
-            NodeKind::Position | NodeKind::Radial(_) | NodeKind::LoadMesh(_) | NodeKind::NoiseGraph(_) | NodeKind::Remesh { .. } | NodeKind::AutoUv(_) | NodeKind::Bake(_) | NodeKind::OutMesh(_) | NodeKind::OutImage(_) | NodeKind::ImageSplit | NodeKind::ImageCombine | NodeKind::ImageLevels { .. } | NodeKind::TransferUv => UNBOUNDED,
+            NodeKind::Position { .. } | NodeKind::Radial(_) | NodeKind::LoadMesh(_) | NodeKind::NoiseGraph(_) | NodeKind::Remesh { .. } | NodeKind::AutoUv(_) | NodeKind::Bake(_) | NodeKind::OutMesh(_) | NodeKind::OutImage(_) | NodeKind::ImageSplit | NodeKind::ImageCombine | NodeKind::ImageLevels { .. } | NodeKind::TransferUv => UNBOUNDED,
             NodeKind::Separate => match self.input(id, 0) {
                 Some(src) => self.range_of(src, stack),
                 None => (0.0, 0.0),
@@ -1145,7 +1166,7 @@ mod tests {
         g.connect(add, out, 0);
         assert_eq!(g.density_range(), (-2.5, 3.5));
         // Position reaching the output makes it unbounded.
-        let pos = g.find(|k| *k == NodeKind::Position).unwrap();
+        let pos = g.find(|k| matches!(k, NodeKind::Position { .. })).unwrap();
         g.connect(pos, add, 1);
         assert_eq!(g.density_range(), UNBOUNDED);
         // Dividing by a range that spans zero is unbounded too.
@@ -1193,7 +1214,7 @@ mod tests {
     #[test]
     fn position_math_rules() {
         let mut g = Graph::default();
-        let p = g.add(NodeKind::Position, [0.0; 2]);
+        let p = g.add(NodeKind::position(), [0.0; 2]);
         let times2 = g.add(NodeKind::Math { op: MathOp::Multiply, a: 0.0, b: 2.0, c: 0.5 }, [0.0; 2]);
         let times_half = g.add(NodeKind::Math { op: MathOp::Multiply, a: 0.0, b: 0.5, c: 0.5 }, [0.0; 2]);
         let n1 = g.add(NodeKind::Noise(NoiseParams::default()), [0.0; 2]);
@@ -1462,7 +1483,7 @@ mod tests {
         assert_eq!(g.input(2, 0), Some(1));
         // Without a Density output one is added.
         let mut bare = Graph::default();
-        let pos = bare.add(NodeKind::Position, [0.0; 2]);
+        let pos = bare.add(NodeKind::position(), [0.0; 2]);
         let pv = bare.previewing(pos);
         let out = pv.find(|k| *k == NodeKind::OutDensity).unwrap();
         assert_eq!(pv.input(out, 0), Some(pos));

@@ -97,7 +97,7 @@ pub fn lowered_mesh(g: &Graph, base: &Path) -> Result<Graph, String> {
         let sub = noise_graph_source(&p, base).map_err(|e| format!("Noise Graph node {id}: {e}"))?;
         let Some(out_id) = sub.nodes.iter().find(|(_, n)| matches!(n.kind, NodeKind::OutDensity)).map(|(i, _)| *i) else { return Err("the noise graph has no Density Output".into()) };
         // The position the sub graph sees: the node's input (or the world position) times the frequency.
-        let world = out.add(NodeKind::Position, [0.0; 2]);
+        let world = out.add(NodeKind::position(), [0.0; 2]);
         let pos_in = out.edges.iter().find(|e| e.to == id && e.port == 0).map(|e| (e.from, e.from_port));
         let scaled = out.add(NodeKind::Math { op: MathOp::Multiply, a: 0.0, b: p.frequency * freq_k, c: 0.5 }, [0.0; 2]);
         match pos_in {
@@ -127,10 +127,22 @@ pub fn lowered_mesh(g: &Graph, base: &Path) -> Result<Graph, String> {
             }
         }
         // Position nodes become the scaled position.
-        let positions: Vec<_> = map.iter().filter(|(sid, _)| matches!(sub.nodes[*sid].kind, NodeKind::Position)).map(|(_, n)| *n).collect();
+        let positions: Vec<_> = map.iter().filter(|(sid, _)| matches!(sub.nodes[*sid].kind, NodeKind::Position { .. })).map(|(_, n)| *n).collect();
         for n in positions {
-            out.nodes.get_mut(&n).unwrap().kind = NodeKind::Reroute;
-            out.connect(scaled, n, 0);
+            // A Position with its own scale becomes `scaled position * Combine(scale)`; a plain one just the scaled position.
+            let NodeKind::Position { scale } = out.nodes[&n].kind else { continue };
+            if scale == [1.0; 3] && !out.edges.iter().any(|e| e.to == n) {
+                out.nodes.get_mut(&n).unwrap().kind = NodeKind::Reroute;
+                out.connect(scaled, n, 0);
+            } else {
+                let by = out.add(NodeKind::Combine { vals: scale }, [0.0; 2]);
+                for e in out.edges.iter_mut().filter(|e| e.to == n) {
+                    e.to = by;
+                }
+                out.nodes.get_mut(&n).unwrap().kind = NodeKind::Math { op: MathOp::Multiply, a: 0.0, b: 0.0, c: 0.5 };
+                out.connect(scaled, n, 0);
+                out.connect(by, n, 1);
+            }
         }
         // Generators with no position wire read the world position: they read the scaled one instead.
         for &n in map.values() {

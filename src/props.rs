@@ -363,7 +363,7 @@ pub(crate) fn node_props(ui: &mut egui::Ui, kind: &mut NodeKind, pins: &mut Vec<
             });
             amount_row(ui, pins, &mut n.amount);
         }
-        NodeKind::Position => _ = ui.label("World position. Feeds noise inputs by default."),
+        NodeKind::Position { .. } => _ = ui.label("World position, each axis multiplied by the X, Y and Z values (1 by default). Feeds noise inputs by default."),
         NodeKind::Radial(r) => {
             let d = graph::RadialParams::default();
             row(ui, &mut r.mode, d.mode, |ui, v| {

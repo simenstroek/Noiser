@@ -537,6 +537,11 @@ pub(crate) fn migrate_noise_kinds(v: &mut serde_json::Value) {
     }
     let Some(nodes) = v.get_mut("nodes").and_then(|n| n.as_object_mut()) else { return };
     for node in nodes.values_mut() {
+        // Position used to be a bare name; it now holds its X, Y and Z scale.
+        if node.get("kind").and_then(|k| k.as_str()) == Some("Position") {
+            node["kind"] = serde_json::json!({"Position": {"scale": [1.0, 1.0, 1.0]}});
+            continue;
+        }
         let Some(p) = node.pointer_mut("/kind/Noise").and_then(|p| p.as_object_mut()) else { continue };
         let kind = p.get("kind").and_then(|k| k.as_str()).unwrap_or_default().to_owned();
         let octaves = p.get("octaves").and_then(|o| o.as_u64()).unwrap_or(1);
