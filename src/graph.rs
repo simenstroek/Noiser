@@ -28,6 +28,9 @@ pub enum NodeKind {
     Separate,
     /// A vector from three floats; `vals` holds the unconnected defaults of X, Y and Z.
     Combine { vals: [f32; 3] },
+    /// A random number between `vals[0]` (min) and `vals[1]` (max), the same everywhere: it comes from the global
+    /// seed and the node's id, or from `seed` when that is set. Inputs are min and max; `vals` holds their defaults.
+    Random { vals: [f32; 2], seed: Option<u32> },
     /// Blends A into B: `a + (b - a) * factor`, the factor limited to 0..1 when `clamp`. Inputs are
     /// factor, A and B; `vals` holds their unconnected defaults.
     Mix { vals: [f32; 3], clamp: bool },
@@ -111,6 +114,16 @@ impl NodeKind {
         }
     }
 
+    /// The numeric parameters the node can take from an input pin (ports 1 and up, in this order).
+    pub fn param_pins(&self) -> &'static [ParamPin] {
+        match self {
+            NodeKind::Noise(_) => &NOISE_PINS,
+            NodeKind::Pattern(_) => &PATTERN_PINS,
+            NodeKind::Grid { .. } => &GRID_PINS,
+            _ => &[],
+        }
+    }
+
     pub fn input_count(&self) -> usize {
         match self {
             NodeKind::Float(_) | NodeKind::Vec3(_) | NodeKind::Position => 0,
@@ -118,10 +131,12 @@ impl NodeKind {
             NodeKind::NamedRerouteUse { .. } => 0,
             NodeKind::Math { op, .. } => if op.is_ternary() { 3 } else if op.is_unary() { 1 } else { 2 },
             NodeKind::Remap { .. } => 5,
+            NodeKind::Random { .. } => 2,
             NodeKind::Mix { .. } | NodeKind::Combine { .. } => 3,
             NodeKind::Separate => 1,
             NodeKind::Curve { .. } => 1,
-            NodeKind::Normal { .. } | NodeKind::Noise(_) | NodeKind::Grid { .. } | NodeKind::Pattern(_) | NodeKind::Radial(_) | NodeKind::OutDensity | NodeKind::OutNormal => 1,
+            NodeKind::Noise(_) | NodeKind::Grid { .. } | NodeKind::Pattern(_) => 1 + self.param_pins().len(),
+            NodeKind::Normal { .. } | NodeKind::Radial(_) | NodeKind::OutDensity | NodeKind::OutNormal => 1,
             NodeKind::LoadMesh(_) | NodeKind::NoiseGraph(_) | NodeKind::Remesh { .. } | NodeKind::AutoUv(_) | NodeKind::OutMesh(_) | NodeKind::OutImage(_) | NodeKind::ImageSplit | NodeKind::ImageLevels { .. } => 1,
             NodeKind::Bake(s) => 2 + s.custom.len(),
             NodeKind::ImageCombine => 4,
@@ -136,6 +151,7 @@ impl NodeKind {
             NodeKind::Remap { vals, .. } => vals.get(port).copied(),
             NodeKind::Mix { vals, .. } => vals.get(port).copied(),
             NodeKind::Combine { vals } => vals.get(port).copied(),
+            NodeKind::Random { vals, .. } => vals.get(port).copied(),
             _ => None,
         }
     }
@@ -162,6 +178,11 @@ impl NodeKind {
                     *x = v;
                 }
             }
+            NodeKind::Random { vals, .. } => {
+                if let Some(x) = vals.get_mut(port) {
+                    *x = v;
+                }
+            }
             _ => {}
         }
     }
@@ -182,6 +203,57 @@ pub struct Node {
     /// A name shown in the node header instead of its type (for organizing a big graph).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
+    /// Names (`ParamPin::name`) of the numeric parameters shown as input pins: the pin takes over from the field.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pins: Vec<String>,
+}
+
+/// A numeric parameter of a Noise, Pattern or Grid node that can be exposed as an input pin.
+pub struct ParamPin {
+    pub name: &'static str,
+    pub label: &'static str,
+    /// Its place in the node's parameter slots; `None` is the amount, which `Graph::lowered` turns into a Multiply.
+    pub slot: Option<usize>,
+}
+
+const fn pin(name: &'static str, label: &'static str, slot: Option<usize>) -> ParamPin {
+    ParamPin { name, label, slot }
+}
+
+const NOISE_PINS: [ParamPin; 7] = [
+    pin("scale", "Frequency", Some(0)),
+    pin("octaves", "Octaves", Some(2)),
+    pin("lacunarity", "Lacunarity", Some(3)),
+    pin("roughness", "Roughness", Some(4)),
+    pin("distortion", "Distortion", Some(5)),
+    pin("jitter", "Jitter", Some(9)),
+    pin("amount", "Amplitude", None),
+];
+const PATTERN_PINS: [ParamPin; 11] = [
+    pin("count_x", "Count X", Some(0)),
+    pin("count_y", "Count Y", Some(1)),
+    pin("count_z", "Count Z", Some(2)),
+    pin("steps", "Offset steps", Some(3)),
+    pin("gap", "Gap", Some(4)),
+    pin("bevel", "Softness", Some(5)),
+    pin("radius", "Radius", Some(11)),
+    pin("width", "Width", Some(16)),
+    pin("softness", "Edge softness", Some(17)),
+    pin("iterations", "Iterations", Some(18)),
+    pin("amount", "Amplitude", None),
+];
+const GRID_PINS: [ParamPin; 4] = [pin("count_x", "Count X", Some(0)), pin("count_y", "Count Y", Some(1)), pin("count_z", "Count Z", Some(2)), pin("amount", "Amplitude", None)];
+
+impl Node {
+    /// The exposed parameter pins with their input ports (port 1 + the pin's place in `NodeKind::param_pins`).
+    pub fn exposed(&self) -> impl Iterator<Item = (usize, &'static ParamPin)> + '_ {
+        self.kind.param_pins().iter().enumerate().filter(|(_, p)| self.pins.iter().any(|n| n == p.name)).map(|(i, p)| (i + 1, p))
+    }
+
+    /// Whether an input port is shown: the parameter ports of a node only while exposed.
+    pub fn port_visible(&self, port: usize) -> bool {
+        port == 0 || self.kind.param_pins().is_empty() || self.exposed().any(|(p, _)| p == port)
+    }
 }
 
 /// An edge is "output `from_port` of `from` → input `port` of `to`". Nearly every node has one output (port 0);
@@ -256,7 +328,9 @@ impl Graph {
                 NodeKind::Grid { amount, .. } => *amount,
                 _ => continue,
             };
-            if amount == 1.0 || n.muted {
+            // A wired amount pin replaces the field: its wire goes to the Multiply's second input.
+            let amount_port = n.exposed().find(|(_, p)| p.name == "amount").map(|(port, _)| port).filter(|port| self.edges.iter().any(|e| e.to == *id && e.port == *port));
+            if (amount == 1.0 && amount_port.is_none()) || n.muted {
                 continue;
             }
             let mut inner = n.clone();
@@ -270,7 +344,11 @@ impl Graph {
             let new = g.nodes.keys().next_back().map_or(0, |k| k + 1);
             g.nodes.insert(new, inner);
             for e in g.edges.iter_mut().filter(|e| e.to == *id) {
-                e.to = new;
+                if Some(e.port) == amount_port {
+                    e.port = 1;
+                } else {
+                    e.to = new;
+                }
             }
             let m = g.nodes.get_mut(id).unwrap();
             m.kind = NodeKind::Math { op: MathOp::Multiply, a: 0.0, b: amount, c: default_smooth() };
@@ -298,7 +376,7 @@ impl Graph {
 
     pub fn add(&mut self, kind: NodeKind, pos: [f32; 2]) -> NodeId {
         let id = self.nodes.keys().next_back().map_or(0, |k| k + 1);
-        self.nodes.insert(id, Node { kind, pos, cache: None, muted: false, label: None });
+        self.nodes.insert(id, Node { kind, pos, cache: None, muted: false, label: None, pins: Vec::new() });
         id
     }
 
@@ -365,7 +443,7 @@ impl Graph {
     pub fn prune_edges(&mut self) {
         let nodes = &self.nodes;
         // A wire also goes when its output pin is gone (a Bake node with a map unticked).
-        self.edges.retain(|e| nodes.get(&e.to).is_some_and(|n| e.port < n.kind.input_count()) && nodes.get(&e.from).is_some_and(|n| e.from_port == 0 || e.from_port < n.kind.output_count()));
+        self.edges.retain(|e| nodes.get(&e.to).is_some_and(|n| e.port < n.kind.input_count() && n.port_visible(e.port)) && nodes.get(&e.from).is_some_and(|n| e.from_port == 0 || e.from_port < n.kind.output_count()));
     }
 
     pub fn disconnect(&mut self, to: NodeId, port: usize) {
@@ -699,6 +777,15 @@ impl Graph {
                     None => Periodic,
                 }
             }
+            NodeKind::Random { .. } => {
+                let ts: Vec<Tiling> = (0..2).filter_map(|p| input(p, memo, stack)).collect();
+                match ts.iter().find(|t| matches!(t, Broken(_) | Coord)) {
+                    Some(Broken(r)) => Broken(r.clone()),
+                    Some(_) => Broken("a random range that depends on position does not tile".into()),
+                    None if ts.iter().all(|t| *t == Const) => Const,
+                    None => Periodic,
+                }
+            }
             NodeKind::Remap { .. } => {
                 // A nonlinear-looking map of position breaks tiling; the rest follows the inputs.
                 let ts: Vec<Tiling> = (0..5).filter_map(|p| input(p, memo, stack)).collect();
@@ -757,6 +844,8 @@ impl Graph {
             },
         };
         stack.pop();
+        // A wired parameter (a frequency, a count) may change from point to point.
+        let t = if !matches!(t, Broken(_)) && self.pin_wired(id, None) { Broken("a wired parameter may not tile".into()) } else { t };
         memo.insert(id, t.clone());
         t
     }
@@ -810,6 +899,9 @@ impl Graph {
 
     /// The type an input expects; for Math it follows what is connected.
     pub fn input_type(&self, id: NodeId, port: usize) -> PortType {
+        if port > 0 && !self.nodes[&id].kind.param_pins().is_empty() {
+            return PortType::Float;
+        }
         match &self.nodes[&id].kind {
             NodeKind::AutoUv(_) | NodeKind::OutMesh(_) | NodeKind::TransferUv => PortType::Mesh,
             NodeKind::Bake(_) if port == 0 => PortType::Mesh,
@@ -876,6 +968,14 @@ impl Graph {
                 Some(src) => self.range_of(src, stack),
                 None => (0.0, 0.0),
             },
+            NodeKind::Random { vals, .. } => {
+                let mut end = |p: usize| match self.input(id, p) {
+                    Some(src) => self.range_of(src, stack),
+                    None => (vals[p], vals[p]),
+                };
+                let (a, b) = (end(0), end(1));
+                (a.0.min(b.0), a.1.max(b.1))
+            }
             NodeKind::Combine { vals } => {
                 let mut r = (f32::MAX, f32::MIN);
                 for p in 0..3 {
@@ -943,12 +1043,17 @@ impl Graph {
                 let p = curve_points(points);
                 (p.iter().map(|q| q[1]).fold(f32::MAX, f32::min), p.iter().map(|q| q[1]).fold(f32::MIN, f32::max))
             }
-            NodeKind::Grid { .. } => (-1.0, 1.0),
+            NodeKind::Grid { amount, .. } => scaled((-1.0, 1.0), *amount),
             NodeKind::Pattern(p) => scaled((-1.0, 1.0), p.amount),
             NodeKind::OutDensity | NodeKind::OutNormal => UNBOUNDED,
         };
         stack.pop();
-        r
+        if self.pin_wired(id, Some("amount")) { UNBOUNDED } else { r }
+    }
+
+    /// Whether a wire feeds the exposed parameter pin `name` of a node, or any parameter pin (`None`).
+    pub fn pin_wired(&self, id: NodeId, name: Option<&str>) -> bool {
+        self.nodes[&id].exposed().any(|(port, p)| name.is_none_or(|n| n == p.name) && self.edges.iter().any(|e| e.to == id && e.port == port))
     }
 }
 
@@ -1226,7 +1331,7 @@ mod tests {
         assert_eq!(p(&|p| p.mode2d = false).axes(), (0, 1, Some(2)));
         // Range, input pin, and a file written without the newer fields still loads.
         let id = g.add(NodeKind::Pattern(PatternParams::default()), [0.0; 2]);
-        assert_eq!((g.nodes[&id].kind.input_count(), g.input_type(id, 0)), (1, PortType::Vector));
+        assert_eq!((g.nodes[&id].kind.input_count(), g.input_type(id, 0), g.input_type(id, 1)), (12, PortType::Vector, PortType::Float));
         g.connect(id, 2, 0);
         assert_eq!(g.density_range(), (-1.0, 1.0));
         let min: NodeKind = serde_json::from_str(r#"{"Pattern":{"steps":3}}"#).unwrap();

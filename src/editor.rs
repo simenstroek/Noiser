@@ -123,6 +123,7 @@ pub fn title(kind: &NodeKind) -> String {
         NodeKind::Mix { .. } => "Mix".into(),
         NodeKind::Separate => "Separate XYZ".into(),
         NodeKind::Combine { .. } => "Combine XYZ".into(),
+        NodeKind::Random { .. } => "Random".into(),
         NodeKind::Curve { .. } => "Curve".into(),
         NodeKind::Grid { .. } => "Grid".into(),
         NodeKind::Pattern(p) => p.kind.name().into(),
@@ -162,6 +163,8 @@ fn input_label(kind: &NodeKind, port: usize) -> &'static str {
         (NodeKind::Reroute | NodeKind::NamedReroute { .. }, _) => "In",
         (NodeKind::Curve { .. }, _) => "Value",
         (NodeKind::Separate, _) => "Vector",
+        (NodeKind::Random { .. }, 0) => "Min",
+        (NodeKind::Random { .. }, 1) => "Max",
         (NodeKind::Combine { .. }, 0) => "X",
         (NodeKind::Combine { .. }, 1) => "Y",
         (NodeKind::Combine { .. }, _) => "Z",
@@ -173,6 +176,7 @@ fn input_label(kind: &NodeKind, port: usize) -> &'static str {
         (NodeKind::Remap { .. }, 2) => "From max",
         (NodeKind::Remap { .. }, 3) => "To min",
         (NodeKind::Remap { .. }, _) => "To max",
+        (NodeKind::Grid { .. } | NodeKind::Pattern(_) | NodeKind::Noise(_), port) if port > 0 => kind.param_pins()[port - 1].label,
         (NodeKind::Grid { .. } | NodeKind::Pattern(_), _) => "Position",
         (NodeKind::Noise(_) | NodeKind::Radial(_), _) => "Position",
         (NodeKind::Normal { .. }, _) => "Field",
@@ -267,6 +271,7 @@ fn noise_palette() -> Vec<(&'static str, NodeKind)> {
             ("Remap", NodeKind::Remap { vals: [0.0, 0.0, 1.0, 0.0, 1.0], clamp: false }),
             ("Separate XYZ", NodeKind::Separate),
             ("Combine XYZ", NodeKind::Combine { vals: [0.0; 3] }),
+            ("Random", NodeKind::Random { vals: [0.0, 1.0], seed: None }),
             ("Mix", NodeKind::Mix { vals: [0.5, 0.0, 1.0], clamp: true }),
             ("Reroute", NodeKind::Reroute),
             ("Named reroute", NodeKind::NamedReroute { name: "name".into() }),
@@ -431,15 +436,18 @@ impl Editor {
         ((s - origin) / self.zoom - self.pan).to_pos2()
     }
 
-    fn layout(&self, origin: Pos2, kind: &NodeKind, pos: [f32; 2]) -> Layout {
+    fn layout(&self, origin: Pos2, kind: &NodeKind, pos: [f32; 2], pins: &[String]) -> Layout {
         let z = self.zoom;
-        let n_in = kind.input_count();
+        // Parameter pins that are not exposed take no row; their (unused) ports sit on the first one.
+        let shown = |port: usize| port == 0 || kind.param_pins().get(port.wrapping_sub(1)).is_none_or(|p| pins.iter().any(|n| n == p.name));
+        let rows: Vec<usize> = (0..kind.input_count()).scan(0, |row, port| Some(if shown(port) { *row += 1; *row - 1 } else { 0 })).collect();
+        let n_in = rows.iter().copied().max().map_or(0, |m| m + 1).min(kind.input_count());
         let top_left = self.to_screen(origin, pos);
         let top = body_top(kind);
         let n_out = kind.output_count().max(1);
         let h = (top + ROW_H * n_in.max(n_out) as f32 + 6.0) * z;
         let rect = Rect::from_min_size(top_left, Vec2::new(NODE_W * z, h));
-        let inputs = (0..n_in).map(|i| Pos2::new(rect.left(), rect.top() + (top + ROW_H * (i as f32 + 0.5)) * z)).collect();
+        let inputs = rows.iter().map(|&i| Pos2::new(rect.left(), rect.top() + (top + ROW_H * (i as f32 + 0.5)) * z)).collect();
         let outputs: Vec<Pos2> = if kind.output_count() > 1 {
             (0..kind.output_count()).map(|k| Pos2::new(rect.right(), rect.top() + (top + ROW_H * (k as f32 + 0.5)) * z)).collect()
         } else if has_output(kind) {
@@ -483,7 +491,7 @@ impl Editor {
             // Over a Math node's operator dropdown the wheel steps the operator instead, and while
             // any dropdown list or menu is open it belongs to that.
             let over_op = graph.nodes.values().any(|n| {
-                matches!(n.kind, NodeKind::Math { .. }) && op_field(self.layout(origin, &n.kind, n.pos).rect, self.zoom).contains(p)
+                matches!(n.kind, NodeKind::Math { .. }) && op_field(self.layout(origin, &n.kind, n.pos, &n.pins).rect, self.zoom).contains(p)
             });
             if scroll != 0.0 && self.pin_menu.is_none() && !over_op && !egui::Popup::is_any_open(ui.ctx()) {
                 let before = self.to_graph(origin, p);
@@ -531,7 +539,7 @@ impl Editor {
         self.frames(ui, &painter, origin, graph);
 
         let layouts: BTreeMap<NodeId, Layout> =
-            graph.nodes.iter().map(|(&id, n)| (id, self.layout(origin, &n.kind, n.pos))).collect();
+            graph.nodes.iter().map(|(&id, n)| (id, self.layout(origin, &n.kind, n.pos, &n.pins))).collect();
         // Ctrl + right-drag across wires cuts them.
         if ui.input(|i| i.pointer.button_pressed(egui::PointerButton::Secondary)) {
             self.cut_armed = self.cut_without_ctrl || ui.input(|i| i.modifiers.command);
@@ -704,6 +712,9 @@ impl Editor {
 
             // Ports.
             for (port, &p) in l.inputs.iter().enumerate() {
+                if !node.port_visible(port) {
+                    continue;
+                }
                 let connected = graph.input(id, port);
                 let color = type_color(graph.input_type(id, port));
                 painter.circle(p, PORT_R * z, if connected.is_some() { color } else { color.gamma_multiply(0.3) }, Stroke::new(1.0, color));
@@ -1027,7 +1038,7 @@ pub fn arrange(graph: &mut Graph) {
         for id in col.iter() {
             let node = graph.nodes.get_mut(id).unwrap();
             node.pos = [*d as f32 * (NODE_W + 90.0), y];
-            y += ed.layout(Pos2::ZERO, &node.kind, node.pos).rect.height() + 30.0;
+            y += ed.layout(Pos2::ZERO, &node.kind, node.pos, &node.pins).rect.height() + 30.0;
         }
     }
 }
@@ -1309,7 +1320,7 @@ mod tests {
                 assert!(g.nodes[&e.from].pos[0] < g.nodes[&e.to].pos[0], "{name}: {} should be left of {}", e.from, e.to);
             }
             let ed = Editor::default();
-            let rects: Vec<Rect> = g.nodes.values().map(|n| ed.layout(Pos2::ZERO, &n.kind, n.pos).rect).collect();
+            let rects: Vec<Rect> = g.nodes.values().map(|n| ed.layout(Pos2::ZERO, &n.kind, n.pos, &n.pins).rect).collect();
             for (i, a) in rects.iter().enumerate() {
                 assert!(rects[i + 1..].iter().all(|b| !a.intersects(*b)), "{name}: overlap after arranging");
             }
@@ -1322,7 +1333,7 @@ mod tests {
         let ed = Editor::default();
         for name in Graph::TEMPLATES {
             let g = Graph::template(name);
-            let rects: Vec<(NodeId, Rect)> = g.nodes.iter().map(|(id, n)| (*id, ed.layout(Pos2::ZERO, &n.kind, n.pos).rect)).collect();
+            let rects: Vec<(NodeId, Rect)> = g.nodes.iter().map(|(id, n)| (*id, ed.layout(Pos2::ZERO, &n.kind, n.pos, &n.pins).rect)).collect();
             for (i, (a, ra)) in rects.iter().enumerate() {
                 for (b, rb) in &rects[i + 1..] {
                     assert!(!ra.intersects(*rb), "{name}: nodes {a} and {b} overlap ({ra:?} and {rb:?})");
@@ -1344,7 +1355,7 @@ mod tests {
         let (from, to) = {
             let ed = &h.state().0;
             let origin = ed.debug_origin;
-            let (ls, lc) = (ed.layout(origin, &NodeKind::Separate, [200.0, 20.0]), ed.layout(origin, &NodeKind::Combine { vals: [0.0; 3] }, [500.0, 20.0]));
+            let (ls, lc) = (ed.layout(origin, &NodeKind::Separate, [200.0, 20.0], &[]), ed.layout(origin, &NodeKind::Combine { vals: [0.0; 3] }, [500.0, 20.0], &[]));
             (ls.outputs[2], lc.inputs[1])
         };
         drag(&mut h, from, to);

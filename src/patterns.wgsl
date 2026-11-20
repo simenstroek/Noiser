@@ -15,14 +15,14 @@ fn ramp01(lo: f32, hi: f32, x: f32) -> f32 {
 // 2 cell value), mode2d, axis, seed (-1 = global). In 2D mode the wall is extruded along `axis`;
 // the other two axes, in order, are the row axis and the stacking axis (see PatternParams::axes).
 fn bricks(q: vec3f, s: u32) -> f32 {
-    let counts = max(vec3f(P[s], P[s + 1u], P[s + 2u]), vec3f(1e-3));
-    let steps = max(i32(P[s + 3u]), 1);
-    let gap = P[s + 4u];
-    let bevel = P[s + 5u];
-    let mode = u32(P[s + 6u]);
-    let flat2d = P[s + 7u] > 0.5;
-    let axis = u32(P[s + 8u]);
-    let seed = select(u.seed, u32(P[s + 9u]), P[s + 9u] >= 0.0);
+    let counts = max(vec3f(pp(s), pp(s + 1u), pp(s + 2u)), vec3f(1e-3));
+    let steps = max(i32(pp(s + 3u)), 1);
+    let gap = pp(s + 4u);
+    let bevel = pp(s + 5u);
+    let mode = u32(pp(s + 6u));
+    let flat2d = pp(s + 7u) > 0.5;
+    let axis = u32(pp(s + 8u));
+    let seed = select(u.seed, u32(pp(s + 9u)), pp(s + 9u) >= 0.0);
 
     var r = 0u;  // along a row
     var st = 1u; // rows stack along this axis
@@ -61,10 +61,10 @@ fn bricks(q: vec3f, s: u32) -> f32 {
 // A checkerboard. counts are cells per tile (one period of the wave spans two cells, so tiling needs
 // even counts); softness widens the edges between cells. In 2D the pattern is extruded along `axis`.
 fn checker(q: vec3f, s: u32) -> f32 {
-    let counts = max(vec3f(P[s], P[s + 1u], P[s + 2u]), vec3f(1e-3));
-    let flat2d = P[s + 7u] > 0.5;
-    let axis = u32(P[s + 8u]);
-    let soft = max(P[s + 17u], 1e-4);
+    let counts = max(vec3f(pp(s), pp(s + 1u), pp(s + 2u)), vec3f(1e-3));
+    let flat2d = pp(s + 7u) > 0.5;
+    let axis = u32(pp(s + 8u));
+    let soft = max(pp(s + 17u), 1e-4);
     let f = fract(q * counts * 0.5);
     // A triangle wave: 0 at the cell borders, +1 and -1 at the cell centres.
     let tri = 4.0 * abs(fract(f - vec3f(0.25)) - vec3f(0.5)) - vec3f(1.0);
@@ -76,11 +76,11 @@ fn checker(q: vec3f, s: u32) -> f32 {
 // Parallel bands: phase = dot(q, dir) * count (tiles when both are whole). Waves: 0 sine, 1 triangle,
 // 2 sawtooth, 3 square (`width` is the share of each period that is +1, softened by `softness`).
 fn stripes(q: vec3f, s: u32) -> f32 {
-    let count = P[s];
-    let wave = u32(P[s + 10u]);
-    let dir = vec3f(P[s + 13u], P[s + 14u], P[s + 15u]);
-    let width = P[s + 16u];
-    let soft = max(P[s + 17u], 1e-4);
+    let count = pp(s);
+    let wave = u32(pp(s + 10u));
+    let dir = vec3f(pp(s + 13u), pp(s + 14u), pp(s + 15u));
+    let width = pp(s + 16u);
+    let soft = max(pp(s + 17u), 1e-4);
     let f = fract(dot(q, dir) * count);
     switch wave {
         case 1u: { return 1.0 - 4.0 * abs(f - 0.5); }
@@ -97,11 +97,11 @@ fn stripes(q: vec3f, s: u32) -> f32 {
 // 2 face-centred), output (0 distance, 1 dimple profile), radius, profile (0 sphere cap, 1 cone,
 // 2 smooth bowl, 3 flat disc). The nearest lattice point is searched among the 27 surrounding cells.
 fn dimples(q: vec3f, s: u32) -> f32 {
-    let n = max(vec3f(P[s], P[s + 1u], P[s + 2u]), vec3f(1e-3));
-    let lattice = u32(P[s + 10u]);
-    let mode = u32(P[s + 6u]);
-    let radius = max(P[s + 11u], 1e-3);
-    let profile = u32(P[s + 12u]);
+    let n = max(vec3f(pp(s), pp(s + 1u), pp(s + 2u)), vec3f(1e-3));
+    let lattice = u32(pp(s + 10u));
+    let mode = u32(pp(s + 6u));
+    let radius = max(pp(s + 11u), 1e-3);
+    let profile = u32(pp(s + 12u));
     let base = vec3i(floor(q * n));
     var points = array<vec3f, 4>(vec3f(0.5), vec3f(0.0), vec3f(0.0, 0.5, 0.5), vec3f(0.5, 0.0, 0.5));
     var count = 1u;
@@ -151,10 +151,10 @@ fn dimples(q: vec3f, s: u32) -> f32 {
 // tile per axis (whole numbers tile). Output 0 is the field, scaled by its largest value to [-1, 1];
 // output 1 is a thin shell around its zero level (`width` is the thickness): -1 in the sheet, +1 away.
 fn gyroid(q: vec3f, s: u32) -> f32 {
-    let n = vec3f(P[s], P[s + 1u], P[s + 2u]);
-    let variant = u32(P[s + 10u]);
-    let mode = u32(P[s + 6u]);
-    let width = clamp(P[s + 16u], 0.0, 0.999);
+    let n = vec3f(pp(s), pp(s + 1u), pp(s + 2u));
+    let variant = u32(pp(s + 10u));
+    let mode = u32(pp(s + 6u));
+    let width = clamp(pp(s + 16u), 0.0, 0.999);
     let a = 6.2831853 * q * n;
     let sn = sin(a);
     let cs = cos(a);
@@ -205,9 +205,9 @@ fn sierpinski(p_in: vec3f, iterations: u32) -> f32 {
 // +1 empty) from a distance estimate scaled to the cell; output 0 is that estimate unclamped by
 // the shape threshold, i.e. the signed distance in units of the cell.
 fn fractal(q: vec3f, s: u32) -> f32 {
-    let n = max(vec3f(P[s], P[s + 1u], P[s + 2u]), vec3f(1e-3));
-    let variant = u32(P[s + 10u]);
-    let iterations = min(u32(max(P[s + 18u], 1.0)), 6u);
+    let n = max(vec3f(pp(s), pp(s + 1u), pp(s + 2u)), vec3f(1e-3));
+    let variant = u32(pp(s + 10u));
+    let iterations = min(u32(max(pp(s + 18u), 1.0)), 6u);
     let p = (fract(q * n) - vec3f(0.5)) * 2.0; // the cell as [-1, 1]³
     var d = menger(p, iterations);
     // Features are 3^-iterations across, so scale the estimate to keep edges crisp at any depth.
@@ -252,13 +252,13 @@ fn truchet_pipes(x: vec3f, counts: vec3f, width: f32, soft: f32, seed: u32) -> f
 // circles of radius 1/2 around two opposite corners, 1 draws a diagonal. `width` is the line's
 // width as a share of a cell, `softness` how soft its edges are. -1 on the line, +1 away from it.
 fn truchet(q: vec3f, s: u32) -> f32 {
-    let counts = max(vec3f(P[s], P[s + 1u], P[s + 2u]), vec3f(1e-3));
-    let flat2d = P[s + 7u] > 0.5;
-    let axis = u32(P[s + 8u]);
-    let variant = u32(P[s + 10u]);
-    let width = P[s + 16u];
-    let soft = P[s + 17u];
-    let seed = select(u.seed, u32(P[s + 9u]), P[s + 9u] >= 0.0);
+    let counts = max(vec3f(pp(s), pp(s + 1u), pp(s + 2u)), vec3f(1e-3));
+    let flat2d = pp(s + 7u) > 0.5;
+    let axis = u32(pp(s + 8u));
+    let variant = u32(pp(s + 10u));
+    let width = pp(s + 16u);
+    let soft = pp(s + 17u);
+    let seed = select(u.seed, u32(pp(s + 9u)), pp(s + 9u) >= 0.0);
     if (variant == 2u) { return truchet_pipes(q * counts, counts, width, soft, seed); }
     var r = 0u;
     var st = 1u;
@@ -321,14 +321,14 @@ fn triangles(q: vec3f, n: vec3f, gap: f32, bevel: f32, mode: u32, axis: u32, see
 // Outputs: 0 distance (-1 at a wall, +1 at a cell's centre), 1 shape (+1 on the wall, -1 on the
 // cell; `gap` and `bevel` are shares of the cell's radius), 2 a flat random value per cell.
 fn honeycomb(q: vec3f, s: u32) -> f32 {
-    let n = max(vec3f(P[s], P[s + 1u], P[s + 2u]), vec3f(1e-3));
-    let gap = P[s + 4u];
-    let bevel = P[s + 5u];
-    let mode = u32(P[s + 6u]);
-    let flat2d = P[s + 7u] > 0.5;
-    let axis = u32(P[s + 8u]);
-    let seed = select(u.seed, u32(P[s + 9u]), P[s + 9u] >= 0.0);
-    let lattice = u32(P[s + 10u]);
+    let n = max(vec3f(pp(s), pp(s + 1u), pp(s + 2u)), vec3f(1e-3));
+    let gap = pp(s + 4u);
+    let bevel = pp(s + 5u);
+    let mode = u32(pp(s + 6u));
+    let flat2d = pp(s + 7u) > 0.5;
+    let axis = u32(pp(s + 8u));
+    let seed = select(u.seed, u32(pp(s + 9u)), pp(s + 9u) >= 0.0);
+    let lattice = u32(pp(s + 10u));
     if (lattice == 3u) { return triangles(q, n, gap, bevel, mode, axis, seed); }
     var ly = 2u; // the extruded axis in 2D
     if (flat2d && axis == 0u) { ly = 0u; }

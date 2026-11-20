@@ -7,6 +7,18 @@
 
 fn safe_normalize(v: vec3f) -> vec3f { return v / max(length(v), 1e-12); }
 
+// A node's numeric parameters come from P[i], except those a wired input pin replaces: the generated code lists
+// them in ov_i / ov_v (ov_n entries) around the node's call.
+var<private> ov_n: u32;
+var<private> ov_i: array<u32, 12>;
+var<private> ov_v: array<f32, 12>;
+fn pp(i: u32) -> f32 {
+    for (var k = 0u; k < ov_n; k = k + 1u) {
+        if (ov_i[k] == i) { return ov_v[k]; }
+    }
+    return P[i];
+}
+
 // A position in cylindrical (radius from the axis, angle around it, height along it) or spherical (radius from the
 // centre, angle around the axis, angle from the axis) coordinates; the angles are in radians.
 fn radial_coords(q: vec3f, center: vec3f, axis: vec3f, spherical: bool) -> vec3f {
@@ -49,6 +61,12 @@ fn wrap_near(c: vec3i, period: i32) -> vec3i {
 fn hash01(c: vec3i, seed: u32) -> vec3f {
     let h = pcg3d(bitcast<vec3u>(c) + vec3u(seed * 0x9E3779B9u, 0u, 0u));
     return vec3f(h) / 4294967295.0;
+}
+
+// The Random node: one number in [lo, hi] from the global seed and the node's id, or from the node's own seed.
+fn random_range(lo: f32, hi: f32, seed_override: f32, id: u32) -> f32 {
+    let seed = select(u.seed * 0x9E3779B9u + id * 0x85EBCA6Bu, u32(seed_override), seed_override >= 0.0);
+    return mix(lo, hi, hash01(vec3i(0), seed).x);
 }
 
 fn rand_dir(c: vec3i, seed: u32) -> vec3f { return safe_normalize(hash01(c, seed) * 2.0 - 1.0); }

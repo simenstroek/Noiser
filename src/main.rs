@@ -1160,7 +1160,7 @@ impl eframe::App for App {
                         if ui.add(egui::TextEdit::singleline(&mut label).hint_text("Label (shown on the node)").desired_width(f32::INFINITY)).changed() {
                             node.label = Some(label).filter(|l| !l.is_empty());
                         }
-                        node_props(ui, &mut node.kind, &names);
+                        node_props(ui, &mut node.kind, &mut node.pins, &names);
                         // Below the controls: appearing above them mid-drag shifted the slider out from
                         // under the cursor and ended the drag.
                         if let Some(Tiling::Broken(why)) = tiling.get(id) {
@@ -1439,7 +1439,7 @@ mod curve_ui_tests {
     #[test]
     fn the_curve_panel_draws_and_lists_every_point() {
         let kind = NodeKind::Curve { points: vec![[0.0, 0.0], [0.5, 1.0], [1.0, 0.2]], mode: graph::CurveMode::Cubic };
-        let mut h = Harness::builder().with_size(egui::Vec2::new(400.0, 600.0)).build_ui_state(|ui, kind: &mut NodeKind| node_props(ui, kind, &[]), kind);
+        let mut h = Harness::builder().with_size(egui::Vec2::new(400.0, 600.0)).build_ui_state(|ui, kind: &mut NodeKind| node_props(ui, kind, &mut Vec::new(), &[]), kind);
         h.run();
         assert!(h.get_all_by_label("x").count() >= 3, "a remove button per point");
         h.get_by_label("Cubic");
@@ -1448,7 +1448,7 @@ mod curve_ui_tests {
     #[test]
     fn dragging_a_point_in_the_curve_plot_moves_it() {
         let kind = NodeKind::Curve { points: vec![[0.0, 0.0], [0.5, 1.0], [1.0, 0.2]], mode: graph::CurveMode::Linear };
-        let mut h = Harness::builder().with_size(egui::Vec2::new(400.0, 600.0)).with_step_dt(1.0 / 60.0).build_ui_state(|ui, kind: &mut NodeKind| node_props(ui, kind, &[]), kind);
+        let mut h = Harness::builder().with_size(egui::Vec2::new(400.0, 600.0)).with_step_dt(1.0 / 60.0).build_ui_state(|ui, kind: &mut NodeKind| node_props(ui, kind, &mut Vec::new(), &[]), kind);
         h.run();
         let label = h.get_by_label("Interpolation").rect();
         let (left, top) = (label.left(), label.bottom() + ui_spacing());

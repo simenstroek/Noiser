@@ -39,6 +39,12 @@ pub fn ops(g: &Graph, seed: u32) -> Result<Value, String> {
     if order.iter().any(|id| matches!(g.nodes[id].kind, NodeKind::Radial(_))) {
         return Err("a Radial Position node has no .noiser form".into());
     }
+    if order.iter().any(|id| matches!(g.nodes[id].kind, NodeKind::Random { .. })) {
+        return Err("a Random node has no .noiser form".into());
+    }
+    if order.iter().any(|id| g.pin_wired(*id, None)) {
+        return Err("a wired parameter pin (frequency, count, ...) has no .noiser form".into());
+    }
     let input = |id: NodeId, port: usize| reference(id, port).map_or(Value::Null, |s| json!(s));
     let ops: Vec<Value> = order
         .iter()
@@ -60,7 +66,7 @@ pub fn ops(g: &Graph, seed: u32) -> Result<Value, String> {
             let ty = if g.yields_vector(id) { "vector" } else { "float" };
             let mut op = match &g.nodes[&id].kind {
                 NodeKind::Position => json!({"op": "position"}),
-                NodeKind::Radial(_) => unreachable!("refused above"),
+                NodeKind::Radial(_) | NodeKind::Random { .. } => unreachable!("refused above"),
                 NodeKind::LoadMesh(_) | NodeKind::NoiseGraph(_) | NodeKind::Remesh { .. } | NodeKind::AutoUv(_) | NodeKind::Bake(_) | NodeKind::OutMesh(_) | NodeKind::OutImage(_) | NodeKind::ImageSplit | NodeKind::ImageCombine | NodeKind::ImageLevels { .. } | NodeKind::TransferUv => json!({"op": "value", "value": 0.0}), // mesh graph nodes have no .noiser form
                 // A passthrough, written as adding zero.
                 NodeKind::NamedReroute { .. } | NodeKind::NamedRerouteUse { .. } => unreachable!("readers look through named reroutes"),

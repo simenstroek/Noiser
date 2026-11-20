@@ -23,9 +23,34 @@ pub(crate) fn row<T: PartialEq>(ui: &mut egui::Ui, value: &mut T, default: T, wi
     });
 }
 
-/// The output multiplier of a Noise or Pattern node (saves a Multiply node, for example for a warp offset).
-pub(crate) fn amount_row(ui: &mut egui::Ui, amount: &mut f32) {
-    row(ui, amount, 1.0, |ui, v| {
+/// A small button that shows a numeric parameter as an input pin on the node (greying its field out); true while exposed.
+pub(crate) fn pin_toggle(ui: &mut egui::Ui, pins: &mut Vec<String>, name: &str) -> bool {
+    let on = pins.iter().any(|n| n == name);
+    let tip = if on { "Exposed as an input pin: the field is the value while nothing is connected. Click to hide the pin." } else { "Show as an input pin" };
+    if ui.selectable_label(on, "→").on_hover_text(tip).clicked() {
+        if on { pins.retain(|n| n != name) } else { pins.push(name.to_string()) }
+    }
+    pins.iter().any(|n| n == name)
+}
+
+/// `row` for a numeric parameter that can also be an input pin.
+pub(crate) fn prow<T: PartialEq>(ui: &mut egui::Ui, pins: &mut Vec<String>, name: &str, value: &mut T, default: T, widget: impl FnOnce(&mut egui::Ui, &mut T)) {
+    ui.horizontal(|ui| {
+        reset(ui, value, default);
+        let on = pin_toggle(ui, pins, name);
+        ui.add_enabled_ui(!on, |ui| widget(ui, value));
+    });
+}
+
+/// A drag field with a pin button in front.
+fn pin_drag(ui: &mut egui::Ui, pins: &mut Vec<String>, name: &str, value: &mut f32, prefix: String) {
+    let on = pin_toggle(ui, pins, name);
+    ui.add_enabled(!on, egui::DragValue::new(value).range(1.0..=64.0).speed(0.1).prefix(prefix));
+}
+
+/// The output multiplier of a Noise, Pattern or Grid node (saves a Multiply node, for example for a warp offset).
+pub(crate) fn amount_row(ui: &mut egui::Ui, pins: &mut Vec<String>, amount: &mut f32) {
+    prow(ui, pins, "amount", amount, 1.0, |ui, v| {
         ui.add(egui::DragValue::new(v).range(-1000.0..=1000.0).speed(0.005).prefix("amplitude × "))
             .on_hover_text("The node's output is multiplied by this: 0.01 gives a small offset for domain warping without a Multiply node.");
     });
@@ -187,7 +212,7 @@ pub(crate) fn cache_props(ui: &mut egui::Ui, graph: &mut Graph, id: graph::NodeI
 }
 
 /// Properties of one node.
-pub(crate) fn node_props(ui: &mut egui::Ui, kind: &mut NodeKind, names: &[String]) {
+pub(crate) fn node_props(ui: &mut egui::Ui, kind: &mut NodeKind, pins: &mut Vec<String>, names: &[String]) {
     match kind {
         NodeKind::Float(_) | NodeKind::Vec3(_) => {
             let is_vec = matches!(kind, NodeKind::Vec3(_));
@@ -222,6 +247,18 @@ pub(crate) fn node_props(ui: &mut egui::Ui, kind: &mut NodeKind, names: &[String
         }
         NodeKind::Separate => _ = ui.weak("Splits a vector into X, Y and Z floats: drag from the pin of the component you want. An unconnected vector is 0."),
         NodeKind::Combine { .. } => _ = ui.weak("A vector from three floats. Unconnected inputs use the values on the node."),
+        NodeKind::Random { seed, .. } => {
+            row(ui, seed, None, |ui, seed| {
+                let mut locked = seed.is_some();
+                ui.checkbox(&mut locked, "seed override");
+                if locked {
+                    ui.add(egui::DragValue::new(seed.get_or_insert(0)));
+                } else {
+                    *seed = None;
+                }
+            });
+            ui.weak("A random number between min and max, the same at every point. It follows the global seed (and differs per node); a seed override pins it.");
+        }
         NodeKind::Mix { clamp, .. } => {
             row(ui, clamp, true, |ui, c| _ = ui.checkbox(c, "limit the factor to 0..1"));
             ui.weak("A + (B - A) x Factor. The input values sit on the node.");
@@ -259,13 +296,13 @@ pub(crate) fn node_props(ui: &mut egui::Ui, kind: &mut NodeKind, names: &[String
             ui.weak("Drag the points in the plot, double-click to add one, right-click a point to remove it. Before the first point and after the last, the output holds the end value.");
         }
         NodeKind::Pattern(p) => {
-            pattern_props(ui, p);
-            amount_row(ui, &mut p.amount);
+            pattern_props(ui, pins, p);
+            amount_row(ui, pins, &mut p.amount);
         }
         NodeKind::Grid { counts, corners, cubic, amount } => {
             row(ui, counts, [8.0; 3], |ui, v| {
-                for (c, label) in v.iter_mut().zip(["X ", "Y ", "Z "]) {
-                    ui.add(egui::DragValue::new(c).range(1.0..=64.0).speed(0.1).prefix(label));
+                for ((c, label), name) in v.iter_mut().zip(["X ", "Y ", "Z "]).zip(["count_x", "count_y", "count_z"]) {
+                    pin_drag(ui, pins, name, c, label.to_string());
                 }
             });
             row(ui, corners, false, |ui, v| {
@@ -277,7 +314,7 @@ pub(crate) fn node_props(ui: &mut egui::Ui, kind: &mut NodeKind, names: &[String
                 ui.selectable_value(v, true, "Cubic").on_hover_text("Sharp-cornered boxes: the largest offset along any axis, abs(0.5 - fract(position * cells))");
             });
             ui.weak("Cells per tile on each axis; whole numbers tile. Outputs the distance to the nearest cell centre (or corner): -1 there, +1 as far from it as the grid gets. Cubic measures it as the largest offset along any axis, so the cells are boxes rather than spheres.");
-            amount_row(ui, amount);
+            amount_row(ui, pins, amount);
         }
         NodeKind::Normal { flip } => row(ui, flip, false, |ui, f| _ = ui.checkbox(f, "flip")),
         NodeKind::Noise(n) => {
@@ -295,7 +332,7 @@ pub(crate) fn node_props(ui: &mut egui::Ui, kind: &mut NodeKind, names: &[String
                         ui.selectable_value(v, f, name);
                     }
                 });
-                row(ui, &mut n.jitter, d.jitter, |ui, v| _ = ui.add(egui::Slider::new(v, 0.0..=1.0).text("jitter")).on_hover_text("0 puts every point in the middle of its cell (a perfect lattice), 1 anywhere in it"));
+                prow(ui, pins, "jitter", &mut n.jitter, d.jitter, |ui, v| _ = ui.add(egui::Slider::new(v, 0.0..=1.0).text("jitter")).on_hover_text("0 puts every point in the middle of its cell (a perfect lattice), 1 anywhere in it"));
                 if n.feature != graph::WorleyFeature::Edges {
                     row(ui, &mut n.metric, d.metric, |ui, v| {
                         use graph::WorleyMetric::*;
@@ -306,14 +343,14 @@ pub(crate) fn node_props(ui: &mut egui::Ui, kind: &mut NodeKind, names: &[String
                 }
                 row(ui, &mut n.fractal, d.fractal, |ui, v| _ = ui.checkbox(v, "fractal (octaves)"));
             }
-            row(ui, &mut n.scale, d.scale, |ui, v| _ = ui.add(egui::Slider::new(v, 0.5..=32.0).text("frequency (cells/tile)")));
+            prow(ui, pins, "scale", &mut n.scale, d.scale, |ui, v| _ = ui.add(egui::Slider::new(v, 0.5..=32.0).text("frequency (cells/tile)")));
             row(ui, &mut n.normalize, d.normalize, |ui, v| _ = ui.checkbox(v, "normalize 0-1"));
             if n.uses_octaves() {
-                row(ui, &mut n.octaves, d.octaves, |ui, v| _ = ui.add(egui::Slider::new(v, 1..=8).text("octaves")));
-                row(ui, &mut n.lacunarity, d.lacunarity, |ui, v| _ = ui.add(egui::Slider::new(v, 1.0..=4.0).text("lacunarity")));
-                row(ui, &mut n.roughness, d.roughness, |ui, v| _ = ui.add(egui::Slider::new(v, 0.0..=1.0).text("roughness")));
+                prow(ui, pins, "octaves", &mut n.octaves, d.octaves, |ui, v| _ = ui.add(egui::Slider::new(v, 1..=8).text("octaves")));
+                prow(ui, pins, "lacunarity", &mut n.lacunarity, d.lacunarity, |ui, v| _ = ui.add(egui::Slider::new(v, 1.0..=4.0).text("lacunarity")));
+                prow(ui, pins, "roughness", &mut n.roughness, d.roughness, |ui, v| _ = ui.add(egui::Slider::new(v, 0.0..=1.0).text("roughness")));
             }
-            row(ui, &mut n.distortion, d.distortion, |ui, v| _ = ui.add(egui::Slider::new(v, 0.0..=2.0).text("distortion")));
+            prow(ui, pins, "distortion", &mut n.distortion, d.distortion, |ui, v| _ = ui.add(egui::Slider::new(v, 0.0..=2.0).text("distortion")));
             row(ui, &mut n.seed, d.seed, |ui, seed| {
                 let mut locked = seed.is_some();
                 ui.checkbox(&mut locked, "seed override");
@@ -323,7 +360,7 @@ pub(crate) fn node_props(ui: &mut egui::Ui, kind: &mut NodeKind, names: &[String
                     *seed = None;
                 }
             });
-            amount_row(ui, &mut n.amount);
+            amount_row(ui, pins, &mut n.amount);
         }
         NodeKind::Position => _ = ui.label("World position. Feeds noise inputs by default."),
         NodeKind::Radial(r) => {
@@ -421,13 +458,13 @@ pub(crate) fn curve_plot(ui: &mut egui::Ui, points: &mut Vec<[f32; 2]>, mode: gr
 }
 
 /// A row of cell counts for the axes a pattern uses, labelled by what they count.
-pub(crate) fn pattern_counts(ui: &mut egui::Ui, p: &mut graph::PatternParams, labels: [&str; 3]) {
+pub(crate) fn pattern_counts(ui: &mut egui::Ui, pins: &mut Vec<String>, p: &mut graph::PatternParams, labels: [&str; 3]) {
     let d = graph::PatternParams::for_kind(p.kind);
     let used = p.used_axes();
     let names = ["X", "Y", "Z"];
     row(ui, &mut p.counts, d.counts, |ui, c| {
         for a in used {
-            ui.add(egui::DragValue::new(&mut c[a]).range(1.0..=64.0).speed(0.1).prefix(format!("{} ({}) ", labels[a], names[a])));
+            pin_drag(ui, pins, ["count_x", "count_y", "count_z"][a], &mut c[a], format!("{} ({}) ", labels[a], names[a]));
         }
     });
 }
@@ -446,7 +483,7 @@ pub(crate) fn pattern_2d(ui: &mut egui::Ui, p: &mut graph::PatternParams) {
 }
 
 /// The controls of a Pattern node: the kind, then the settings that kind has.
-pub(crate) fn pattern_props(ui: &mut egui::Ui, p: &mut graph::PatternParams) {
+pub(crate) fn pattern_props(ui: &mut egui::Ui, pins: &mut Vec<String>, p: &mut graph::PatternParams) {
     use graph::{PatternKind, PatternOutput::*};
     let before = p.kind;
     egui::ComboBox::from_label("pattern").selected_text(p.kind.name()).show_ui(ui, |ui| {
@@ -469,7 +506,7 @@ pub(crate) fn pattern_props(ui: &mut egui::Ui, p: &mut graph::PatternParams) {
             let names = ["X", "Y", "Z"];
             row(ui, &mut p.counts, d.counts, |ui, c| {
                 let mut count = |ui: &mut egui::Ui, axis: usize, what: &str| {
-                    ui.add(egui::DragValue::new(&mut c[axis]).range(1.0..=64.0).speed(0.1).prefix(format!("{what} ({}) ", names[axis])));
+                    pin_drag(ui, pins, ["count_x", "count_y", "count_z"][axis], &mut c[axis], format!("{what} ({}) ", names[axis]));
                 };
                 count(ui, row_axis, "per row");
                 count(ui, stack_axis, "rows");
@@ -477,7 +514,7 @@ pub(crate) fn pattern_props(ui: &mut egui::Ui, p: &mut graph::PatternParams) {
                     count(ui, l, "layers");
                 }
             });
-            row(ui, &mut p.steps, d.steps, |ui, v| {
+            prow(ui, pins, "steps", &mut p.steps, d.steps, |ui, v| {
                 ui.add(egui::Slider::new(v, 1..=4).text("row offset steps"))
                     .on_hover_text("1 stacks the bricks in a grid, 2 is a running bond (each row shifted half a brick), 3 shifts by thirds.\nThe number of rows must be a multiple of this to tile.");
             });
@@ -489,8 +526,8 @@ pub(crate) fn pattern_props(ui: &mut egui::Ui, p: &mut graph::PatternParams) {
             match p.output {
                 Distance => _ = ui.weak("Distance to the centre of the brick: -1 at the centre, +1 at the corners."),
                 Shape => {
-                    row(ui, &mut p.gap, d.gap, |ui, v| _ = ui.add(egui::Slider::new(v, 0.0..=0.5).text("mortar gap")));
-                    row(ui, &mut p.bevel, d.bevel, |ui, v| _ = ui.add(egui::Slider::new(v, 0.0..=0.5).text("edge softness")));
+                    prow(ui, pins, "gap", &mut p.gap, d.gap, |ui, v| _ = ui.add(egui::Slider::new(v, 0.0..=0.5).text("mortar gap")));
+                    prow(ui, pins, "bevel", &mut p.bevel, d.bevel, |ui, v| _ = ui.add(egui::Slider::new(v, 0.0..=0.5).text("edge softness")));
                     ui.weak("-1 on the brick face, +1 in the mortar.");
                 }
                 CellValue => {
@@ -500,7 +537,7 @@ pub(crate) fn pattern_props(ui: &mut egui::Ui, p: &mut graph::PatternParams) {
             }
         }
         PatternKind::Dimples => {
-            pattern_counts(ui, p, ["cells", "cells", "cells"]);
+            pattern_counts(ui, pins, p, ["cells", "cells", "cells"]);
             row(ui, &mut p.variant, d.variant, |ui, v| {
                 ui.selectable_value(v, 0, "Cubic");
                 ui.selectable_value(v, 1, "Body-centred");
@@ -511,7 +548,7 @@ pub(crate) fn pattern_props(ui: &mut egui::Ui, p: &mut graph::PatternParams) {
                 ui.selectable_value(v, Shape, "Dimples");
             });
             if p.output == Shape {
-                row(ui, &mut p.radius, d.radius, |ui, v| _ = ui.add(egui::Slider::new(v, 0.1..=1.2).text("radius")).on_hover_text("1 makes neighbouring dimples touch"));
+                prow(ui, pins, "radius", &mut p.radius, d.radius, |ui, v| _ = ui.add(egui::Slider::new(v, 0.1..=1.2).text("radius")).on_hover_text("1 makes neighbouring dimples touch"));
                 row(ui, &mut p.profile, d.profile, |ui, v| {
                     ui.selectable_value(v, 0, "Sphere cap");
                     ui.selectable_value(v, 1, "Cone");
@@ -525,12 +562,12 @@ pub(crate) fn pattern_props(ui: &mut egui::Ui, p: &mut graph::PatternParams) {
         }
         PatternKind::Checker => {
             pattern_2d(ui, p);
-            pattern_counts(ui, p, ["cells", "cells", "cells"]);
-            row(ui, &mut p.softness, d.softness, |ui, v| _ = ui.add(egui::Slider::new(v, 0.0..=1.0).text("edge softness")));
+            pattern_counts(ui, pins, p, ["cells", "cells", "cells"]);
+            prow(ui, pins, "softness", &mut p.softness, d.softness, |ui, v| _ = ui.add(egui::Slider::new(v, 0.0..=1.0).text("edge softness")));
             ui.weak("+1 and -1 cells. Every used count must be even to tile.");
         }
         PatternKind::Stripes => {
-            row(ui, &mut p.counts[0], d.counts[0], |ui, v| _ = ui.add(egui::DragValue::new(v).range(1.0..=64.0).speed(0.1).prefix("stripes per tile ")));
+            prow(ui, pins, "count_x", &mut p.counts[0], d.counts[0], |ui, v| _ = ui.add(egui::DragValue::new(v).range(1.0..=64.0).speed(0.1).prefix("stripes per tile ")));
             row(ui, &mut p.dir, d.dir, |ui, v| {
                 for (c, name) in v.iter_mut().zip(["X ", "Y ", "Z "]) {
                     ui.add(egui::DragValue::new(c).range(-8.0..=8.0).speed(0.1).prefix(name));
@@ -544,17 +581,17 @@ pub(crate) fn pattern_props(ui: &mut egui::Ui, p: &mut graph::PatternParams) {
                 ui.selectable_value(v, 3, "Square");
             });
             if p.variant == 3 {
-                row(ui, &mut p.width, d.width, |ui, v| _ = ui.add(egui::Slider::new(v, 0.0..=1.0).text("width")));
-                row(ui, &mut p.softness, d.softness, |ui, v| _ = ui.add(egui::Slider::new(v, 0.0..=1.0).text("edge softness")));
+                prow(ui, pins, "width", &mut p.width, d.width, |ui, v| _ = ui.add(egui::Slider::new(v, 0.0..=1.0).text("width")));
+                prow(ui, pins, "softness", &mut p.softness, d.softness, |ui, v| _ = ui.add(egui::Slider::new(v, 0.0..=1.0).text("edge softness")));
             }
         }
         PatternKind::Fractal => {
-            pattern_counts(ui, p, ["cells", "cells", "cells"]);
+            pattern_counts(ui, pins, p, ["cells", "cells", "cells"]);
             row(ui, &mut p.variant, d.variant, |ui, v| {
                 ui.selectable_value(v, 0, "Menger sponge");
                 ui.selectable_value(v, 1, "Sierpinski tetrahedron");
             });
-            row(ui, &mut p.iterations, d.iterations, |ui, v| _ = ui.add(egui::Slider::new(v, 1..=6).text("iterations")));
+            prow(ui, pins, "iterations", &mut p.iterations, d.iterations, |ui, v| _ = ui.add(egui::Slider::new(v, 1..=6).text("iterations")));
             ui.weak("-1 in the solid, +1 in the empty space, from a distance estimate. Changing the iterations does not recompile the shader.");
         }
         PatternKind::Truchet => {
@@ -566,9 +603,9 @@ pub(crate) fn pattern_props(ui: &mut egui::Ui, p: &mut graph::PatternParams) {
             if p.variant < 2 {
                 pattern_2d(ui, p);
             }
-            pattern_counts(ui, p, ["cells", "cells", "cells"]);
-            row(ui, &mut p.width, d.width, |ui, v| _ = ui.add(egui::Slider::new(v, 0.0..=1.0).text("line width")));
-            row(ui, &mut p.softness, d.softness, |ui, v| _ = ui.add(egui::Slider::new(v, 0.0..=1.0).text("edge softness")));
+            pattern_counts(ui, pins, p, ["cells", "cells", "cells"]);
+            prow(ui, pins, "width", &mut p.width, d.width, |ui, v| _ = ui.add(egui::Slider::new(v, 0.0..=1.0).text("line width")));
+            prow(ui, pins, "softness", &mut p.softness, d.softness, |ui, v| _ = ui.add(egui::Slider::new(v, 0.0..=1.0).text("edge softness")));
             pattern_seed(ui, p, &d);
             ui.weak("-1 on the line, +1 away from it. Each cell is flipped at random; the lines join across cells.");
         }
@@ -591,7 +628,7 @@ pub(crate) fn pattern_props(ui: &mut egui::Ui, p: &mut graph::PatternParams) {
                     }
                 });
             }
-            pattern_counts(ui, p, ["cells", "cells", "cells"]);
+            pattern_counts(ui, pins, p, ["cells", "cells", "cells"]);
             if p.variant == 0 {
                 ui.weak("Hexagons are regular when the cell counts are in the ratio 1 : 0.577: 7 × 4, 12 × 7, 26 × 15.");
             }
@@ -606,8 +643,8 @@ pub(crate) fn pattern_props(ui: &mut egui::Ui, p: &mut graph::PatternParams) {
             match p.output {
                 Distance => _ = ui.weak("-1 at a wall, +1 at the centre of a cell."),
                 Shape => {
-                    row(ui, &mut p.gap, d.gap, |ui, v| _ = ui.add(egui::Slider::new(v, 0.0..=1.0).text("wall width")));
-                    row(ui, &mut p.bevel, d.bevel, |ui, v| _ = ui.add(egui::Slider::new(v, 0.0..=1.0).text("edge softness")));
+                    prow(ui, pins, "gap", &mut p.gap, d.gap, |ui, v| _ = ui.add(egui::Slider::new(v, 0.0..=1.0).text("wall width")));
+                    prow(ui, pins, "bevel", &mut p.bevel, d.bevel, |ui, v| _ = ui.add(egui::Slider::new(v, 0.0..=1.0).text("edge softness")));
                     ui.weak("+1 on the walls, -1 inside the cells.");
                 }
                 CellValue => {
@@ -617,7 +654,7 @@ pub(crate) fn pattern_props(ui: &mut egui::Ui, p: &mut graph::PatternParams) {
             }
         }
         PatternKind::Gyroid => {
-            pattern_counts(ui, p, ["periods", "periods", "periods"]);
+            pattern_counts(ui, pins, p, ["periods", "periods", "periods"]);
             row(ui, &mut p.variant, d.variant, |ui, v| {
                 ui.selectable_value(v, 0, "Gyroid");
                 ui.selectable_value(v, 1, "Schwarz P");
@@ -628,7 +665,7 @@ pub(crate) fn pattern_props(ui: &mut egui::Ui, p: &mut graph::PatternParams) {
                 ui.selectable_value(v, Shape, "Shell");
             });
             if p.output == Shape {
-                row(ui, &mut p.width, d.width, |ui, v| _ = ui.add(egui::Slider::new(v, 0.0..=0.95).text("thickness")));
+                prow(ui, pins, "width", &mut p.width, d.width, |ui, v| _ = ui.add(egui::Slider::new(v, 0.0..=0.95).text("thickness")));
                 ui.weak("-1 in a thin sheet around the surface, +1 away from it.");
             } else {
                 ui.weak("The field itself, scaled to -1..1; its zero level is the surface.");

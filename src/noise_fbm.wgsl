@@ -5,16 +5,16 @@
 // worley metric, worley jitter (P[s..s+10]).
 // Every BASE stays within [-1, 1]; Graph::density_range relies on it.
 fn noise_kKIND(q: vec3f, s: u32) -> f32 {
-    let scale = P[s];
-    let normalize = P[s + 1u] > 0.5;
-    let octaves = select(1u, u32(P[s + 2u]), HAS_OCTAVES);
-    let lacunarity = P[s + 3u];
-    let roughness = P[s + 4u];
-    let distortion = P[s + 5u];
-    let seed = select(u.seed, u32(P[s + 6u]), P[s + 6u] >= 0.0);
-    let feature = u32(P[s + 7u]);
-    let metric = u32(P[s + 8u]);
-    let jitter = P[s + 9u];
+    let scale = pp(s);
+    let normalize = pp(s + 1u) > 0.5;
+    let octaves = select(1u, u32(pp(s + 2u)), HAS_OCTAVES);
+    let lacunarity = pp(s + 3u);
+    let roughness = pp(s + 4u);
+    let distortion = pp(s + 5u);
+    let seed = select(u.seed, u32(pp(s + 6u)), pp(s + 6u) >= 0.0);
+    let feature = u32(pp(s + 7u));
+    let metric = u32(pp(s + 8u));
+    let jitter = pp(s + 9u);
 
     // Whole-number scale and lacunarity tile; anything else samples the unwrapped lattice.
     let tiles = fract(scale) == 0.0 && (octaves <= 1u || fract(lacunarity) == 0.0);

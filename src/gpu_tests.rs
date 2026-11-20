@@ -2748,3 +2748,53 @@ fn radial_positions_and_displacement_outputs() {
         assert!((v * v - s).abs() < 1e-4, "{v}^2 != {s}");
     }
 }
+
+#[test]
+fn wired_parameter_pins_and_random_nodes() {
+    let Some(gpu) = gpu() else { return eprintln!("no GPU adapter; skipping") };
+    // A Grid whose X count (a pin) comes from a Float: 4 cells make the cell centre 0.125, 8 cells 0.0625.
+    let mut g = Graph::default();
+    let grid = g.add(NodeKind::Grid { counts: [4.0; 3], corners: false, cubic: true, amount: 1.0 }, [0.0; 2]);
+    let count = g.add(NodeKind::Float(8.0), [0.0; 2]);
+    let out = g.add(NodeKind::OutDensity, [0.0; 2]);
+    g.connect(grid, out, 0);
+    g.nodes.get_mut(&grid).unwrap().pins = vec!["count_x".into(), "amount".into()];
+    g.connect(count, grid, 1);
+    let at = [[0.0625, 0.125, 0.125]];
+    near(eval(&gpu, &g, &at)[0], -1.0, "x count 8 puts the centre at 0.0625");
+    g.prune_edges();
+    assert!(g.pin_wired(grid, Some("count_x")) && matches!(g.tiling()[&grid], crate::graph::Tiling::Broken(_)), "a wired pin is kept and breaks tiling");
+    // The amplitude pin: wired, it multiplies the output.
+    let amp = g.add(NodeKind::Float(0.5), [0.0; 2]);
+    g.connect(amp, grid, 4);
+    near(eval(&gpu, &g, &[[0.0625, 0.125, 0.125]])[0], -0.5, "amplitude pin");
+    // Hiding the pin drops its wire.
+    g.nodes.get_mut(&grid).unwrap().pins.clear();
+    g.prune_edges();
+    assert!(g.edges.iter().all(|e| e.to != grid || e.port == 0), "wires into hidden pins go");
+
+    // A noise frequency pin changes the result against the field value.
+    let noise = |wire: bool| {
+        let mut g = Graph::default();
+        let n = g.add(NodeKind::Noise(NoiseParams { scale: 2.0, ..Default::default() }), [0.0; 2]);
+        let out = g.add(NodeKind::OutDensity, [0.0; 2]);
+        g.connect(n, out, 0);
+        if wire {
+            let f = g.add(NodeKind::Float(8.0), [0.0; 2]);
+            g.nodes.get_mut(&n).unwrap().pins = vec!["scale".into()];
+            g.connect(f, n, 1);
+        }
+        g
+    };
+    let pts = points(64, 3);
+    let (plain, wired) = (eval(&gpu, &noise(false), &pts), eval(&gpu, &noise(true), &pts));
+    assert!(plain.iter().zip(&wired).any(|(a, b)| (a - b).abs() > 0.05), "a wired frequency changes the noise");
+
+    // Random: inside the range, the same at every point, different per seed, pinned by an override.
+    let random = |seed: Option<u32>| single_node_graph(NodeKind::Random { vals: [2.0, 4.0], seed });
+    let at_points = |g: &Graph| eval(&gpu, g, &points(16, 9));
+    let a = at_points(&random(None));
+    assert!(a.iter().all(|v| (2.0..=4.0).contains(v) && (*v - a[0]).abs() < 1e-6), "{a:?}");
+    let (s1, s2) = (at_points(&random(Some(1)))[0], at_points(&random(Some(2)))[0]);
+    assert!((s1 - s2).abs() > 1e-3 && (2.0..=4.0).contains(&s1) && (2.0..=4.0).contains(&s2), "{s1} {s2}");
+}

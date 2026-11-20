@@ -126,6 +126,7 @@ fn compile_inner(g: &Graph, caches: &BTreeMap<NodeId, u32>, eps: f32, preview: b
                 }
             }
             NodeKind::Combine { vals } => params.extend(vals),
+            NodeKind::Random { vals, seed } => params.extend([vals[0], vals[1], seed.map_or(-1.0, |s| s as f32)]),
             NodeKind::Radial(r) => {
                 params.push(if r.mode == crate::graph::RadialMode::Spherical { 1.0 } else { 0.0 });
                 params.extend(r.center);
@@ -279,7 +280,18 @@ impl Gen<'_> {
         let mut body = String::new();
         for &id in &order {
             let line = self.node_expr(id)?;
+            // Wired parameter pins override the node's parameter slots while it is evaluated (see `pp` in noise.wgsl).
+            let wired = self.wired_params(id);
+            for (k, (slot, e)) in wired.iter().enumerate() {
+                writeln!(body, "    ov_i[{k}] = {}u; ov_v[{k}] = {e};", self.slots[&id] + slot).unwrap();
+            }
+            if !wired.is_empty() {
+                writeln!(body, "    ov_n = {}u;", wired.len()).unwrap();
+            }
             writeln!(body, "    let v{id} = {line};").unwrap();
+            if !wired.is_empty() {
+                writeln!(body, "    ov_n = 0u;").unwrap();
+            }
         }
         let ty = self.types[&root];
         writeln!(self.out, "fn c{root}(p: vec3f) -> {} {{\n{body}    return v{root};\n}}", ty.name()).unwrap();
@@ -319,6 +331,14 @@ impl Gen<'_> {
         seen.insert(id);
         order.push(id);
         Ok(())
+    }
+
+    /// The (slot, expression) of each wired parameter pin of a Noise or Pattern node.
+    fn wired_params(&self, id: NodeId) -> Vec<(usize, String)> {
+        if self.caches.contains_key(&id) || !matches!(self.g.nodes[&id].kind, NodeKind::Noise(_) | NodeKind::Pattern(_)) {
+            return Vec::new();
+        }
+        self.g.nodes[&id].exposed().filter_map(|(port, pin)| Some((pin.slot?, self.operand(id, port, Ty::F, "")))).filter(|(_, e)| !e.is_empty()).collect()
     }
 
     /// The input on `port` as an expression of type `want`, or `fallback` when unconnected.
@@ -412,6 +432,10 @@ impl Gen<'_> {
                 let x: Vec<String> = (0..3).map(|p| self.operand(id, p, Ty::F, &format!("P[{}]", s + p))).collect();
                 (Ty::V, format!("vec3f({}, {}, {})", x[0], x[1], x[2]))
             }
+            NodeKind::Random { .. } => {
+                let x: Vec<String> = (0..2).map(|p| self.operand(id, p, Ty::F, &format!("P[{}]", s + p))).collect();
+                (Ty::F, format!("random_range({}, {}, P[{}], {id}u)", x[0], x[1], s + 2))
+            }
             NodeKind::Mix { .. } => {
                 let x: Vec<String>  = (0..3).map(|p| self.operand(id, p, Ty::F, &format!("P[{}]", s + p))).collect();
                 (Ty::F, format!("mix_ab({}, {}, {}, P[{}] > 0.5)", x[0], x[1], x[2], s + 3))
@@ -422,7 +446,8 @@ impl Gen<'_> {
             }
             NodeKind::Grid { .. } => {
                 let q = self.operand(id, 0, Ty::V, "p");
-                (Ty::F, format!("grid_dist({q}, vec3f(P[{s}], P[{}], P[{}]), P[{}] > 0.5, P[{}] > 0.5)", s + 1, s + 2, s + 3, s + 4))
+                let count = |k: usize| if self.g.nodes[&id].port_visible(1 + k) { self.operand(id, 1 + k, Ty::F, &format!("P[{}]", s + k)) } else { format!("P[{}]", s + k) };
+                (Ty::F, format!("grid_dist({q}, vec3f({}, {}, {}), P[{}] > 0.5, P[{}] > 0.5)", count(0), count(1), count(2), s + 3, s + 4))
             }
             NodeKind::Pattern(p) => {
                 let q = self.operand(id, 0, Ty::V, "p");

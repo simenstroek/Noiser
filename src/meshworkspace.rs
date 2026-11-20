@@ -858,7 +858,7 @@ impl crate::App {
                         if ui.add(egui::TextEdit::singleline(&mut label).hint_text("Label (shown on the node)").desired_width(f32::INFINITY)).changed() {
                             node.label = Some(label).filter(|l| !l.is_empty());
                         }
-                        crate::node_props(ui, &mut node.kind, &names);
+                        crate::node_props(ui, &mut node.kind, &mut node.pins, &names);
                     }
                     [] => _ = ui.weak("Select a node to edit it. Double-click a Noise Graph node to open that graph in the Noise graph tab."),
                     _ => _ = ui.weak(format!("{} nodes selected", sel.len())),
