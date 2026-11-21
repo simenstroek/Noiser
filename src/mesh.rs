@@ -38,10 +38,13 @@ impl Mesh {
     /// that share a position, so the surface is connected even where UV seams split vertices.
     pub fn load_obj(path: &Path) -> Result<Mesh, String> {
         let options = tobj::LoadOptions { triangulate: true, single_index: false, ..Default::default() };
-        // Materials are never used here, so the .mtl file is not read: a broken or missing one must not stop the mesh.
+        // Materials are never used here, so the lines that name them are dropped before parsing: a broken or missing .mtl
+        // file, or an empty `usemtl`, must not stop the mesh (the parser fails on them).
         let fail = |e: &dyn std::fmt::Display| format!("could not read {}: {e}", path.display());
-        let mut reader = std::io::BufReader::new(std::fs::File::open(path).map_err(|e| fail(&e))?);
-        let (models, _) = tobj::load_obj_buf(&mut reader, &options, |_| Ok(Default::default())).map_err(|e| fail(&e))?;
+        let bytes = std::fs::read(path).map_err(|e| fail(&e))?;
+        let text: String = String::from_utf8_lossy(&bytes).lines().filter(|l| !l.starts_with("mtllib") && !l.starts_with("usemtl")).flat_map(|l| [l, "
+"]).collect();
+        let (models, _) = tobj::load_obj_buf(&mut text.as_bytes(), &options, |_| Ok(Default::default())).map_err(|e| fail(&e))?;
         let mut mesh = Mesh::default();
         for model in models {
             let base = mesh.positions.len() as u32;
@@ -302,6 +305,14 @@ Kd not numbers
 Ns
 ").unwrap();
         for (mtl, name) in [("bad.mtl", "broken"), ("absent.mtl", "missing")] {
+            // Blender writes an empty `usemtl` for an object without material.
+            std::fs::write(dir.join(format!("{name}_empty.obj")), "usemtl 
+v 0 0 0
+v 1 0 0
+v 0 1 0
+f 1 2 3
+").unwrap();
+            assert_eq!(Mesh::load_obj(&dir.join(format!("{name}_empty.obj"))).unwrap().triangles.len(), 1);
             let path = dir.join(format!("{name}.obj"));
             std::fs::write(&path, format!("mtllib {mtl}
 usemtl a
