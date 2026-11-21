@@ -38,7 +38,10 @@ impl Mesh {
     /// that share a position, so the surface is connected even where UV seams split vertices.
     pub fn load_obj(path: &Path) -> Result<Mesh, String> {
         let options = tobj::LoadOptions { triangulate: true, single_index: false, ..Default::default() };
-        let (models, _materials) = tobj::load_obj(path, &options).map_err(|e| format!("could not read {}: {e}", path.display()))?;
+        // Materials are never used here, so the .mtl file is not read: a broken or missing one must not stop the mesh.
+        let fail = |e: &dyn std::fmt::Display| format!("could not read {}: {e}", path.display());
+        let mut reader = std::io::BufReader::new(std::fs::File::open(path).map_err(|e| fail(&e))?);
+        let (models, _) = tobj::load_obj_buf(&mut reader, &options, |_| Ok(Default::default())).map_err(|e| fail(&e))?;
         let mut mesh = Mesh::default();
         for model in models {
             let base = mesh.positions.len() as u32;
@@ -287,6 +290,27 @@ f 1 2 3
         let back = norm.to_object(n.positions[7]);
         for a in 0..3 {
             assert!((back[a] - m.positions[7][a]).abs() < 1e-4);
+        }
+    }
+
+    #[test]
+    fn an_obj_with_a_broken_or_missing_material_file_still_loads() {
+        let dir = std::env::temp_dir().join("noiser_mtl_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("bad.mtl"), "newmtl a
+Kd not numbers
+Ns
+").unwrap();
+        for (mtl, name) in [("bad.mtl", "broken"), ("absent.mtl", "missing")] {
+            let path = dir.join(format!("{name}.obj"));
+            std::fs::write(&path, format!("mtllib {mtl}
+usemtl a
+v 0 0 0
+v 1 0 0
+v 0 1 0
+f 1 2 3
+")).unwrap();
+            assert_eq!(Mesh::load_obj(&path).unwrap().triangles.len(), 1, "{name}");
         }
     }
 
