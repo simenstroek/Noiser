@@ -5,7 +5,7 @@
 use crate::mesh::Mesh;
 use crate::sdf_file::SdfFile;
 use crate::sdf_model::layer_fields;
-use crate::surface::surface_nets;
+use crate::surface::{RawMesh, surface_nets};
 use rayon::prelude::*;
 use std::path::Path;
 
@@ -17,6 +17,12 @@ pub fn load(path: &Path) -> Result<Mesh, String> {
 }
 
 pub fn mesh_from_file(file: &SdfFile, resolution: usize) -> Result<Mesh, String> {
+    let raw = raw_mesh_from_file(file, resolution)?;
+    Ok(Mesh { positions: raw.positions, triangles: raw.triangles, colors: Vec::new(), uvs: Vec::new() })
+}
+
+/// The same mesh with its normals, ready to be written as OBJ or PLY.
+pub fn raw_mesh_from_file(file: &SdfFile, resolution: usize) -> Result<RawMesh, String> {
     let fields: Vec<_> = layer_fields(file).into_iter().filter(|field| !field.hidden).collect();
     let mut bounds: Option<([f64; 3], [f64; 3])> = None;
     for field in &fields {
@@ -59,7 +65,8 @@ pub fn mesh_from_file(file: &SdfFile, resolution: usize) -> Result<Mesh, String>
             [file[0] as f32, -file[2] as f32, file[1] as f32]
         })
         .collect();
-    Ok(Mesh { positions, triangles: raw.triangles, colors: Vec::new(), uvs: Vec::new() })
+    let normals = raw.normals.iter().map(|n| [n[0], -n[2], n[1]]).collect();
+    Ok(RawMesh { positions, normals, triangles: raw.triangles })
 }
 
 #[cfg(test)]
@@ -100,5 +107,29 @@ mod tests {
         let json = r#"{"version":[0,6,1],"environment":{},"assemblies":[{"resolution":5,"shapes":[]}],
             "layers":[{"name":"L","assembly":0,"hidden":false,"position":[0,0,0],"rotation":[0,0,0],"scale":[1,1,1]}]}"#;
         assert!(mesh_from_file(&SdfFile::from_json(json).unwrap(), 32).is_err());
+    }
+
+    #[test]
+    fn the_exported_mesh_has_outward_normals_and_can_be_written() {
+        let json = r#"{"version":[0,6,1],"environment":{},
+            "assemblies":[{"resolution":5,"shapes":[{"name":"","hidden":false,"type":"shape","position":[0,2,0],"rotation":[0,0,0],
+              "scale":[2,2,2],"color":[1,1,1],"mode":"add","chamfer":false,"blend":0,"blend_strength":0,"mirror_x":false,"mirror_y":false,
+              "mirror_z":false,"mirror_blend":0,"brush":"sphere","bevel":0,"round":0.1,"thickness":1,"cone":0,"star":0,"points":6,
+              "repeat_mode":"linear","linear_repeats":[1,1,1],"steps":[1.5,1.5,1.5],"radial_repeats":1,"radius":1.5,"repeat_axis":"x"}]}],
+            "layers":[{"name":"L","assembly":0,"hidden":false,"position":[0,0,0],"rotation":[0,0,0],"scale":[1,1,1]}]}"#;
+        let mesh = raw_mesh_from_file(&SdfFile::from_json(json).unwrap(), 48).unwrap();
+        assert_eq!(mesh.normals.len(), mesh.positions.len());
+        // The centre is file (0, 2, 0), which is (0, 0, 2) Z up; every normal points away from it.
+        for (p, n) in mesh.positions.iter().zip(&mesh.normals) {
+            let out = [p[0], p[1], p[2] - 2.0];
+            let dot = out[0] * n[0] + out[1] * n[1] + out[2] * n[2];
+            assert!(dot > 0.8, "normal {n:?} at {p:?} points inwards (dot {dot})");
+        }
+        let dir = std::env::temp_dir();
+        for name in ["noiser_export_test.obj", "noiser_export_test.ply"] {
+            let path = dir.join(name);
+            if name.ends_with("obj") { mesh.write_obj(&path).unwrap() } else { mesh.write_ply(&path).unwrap() }
+            assert!(std::fs::metadata(&path).unwrap().len() > 1000);
+        }
     }
 }

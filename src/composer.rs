@@ -290,6 +290,9 @@ pub struct Composer {
     frame_pending: bool,
     drag: Option<Drag>,
     pending: Option<Pending>,
+    /// Samples along the longest side when exporting a mesh.
+    export_samples: usize,
+    export_job: Option<std::sync::mpsc::Receiver<String>>,
     /// Where the viewport was drawn last (tests aim the pointer with it).
     last_view: egui::Rect,
     pub status: String,
@@ -320,6 +323,8 @@ impl Default for Composer {
             frame_pending: true,
             drag: None,
             pending: None,
+            export_samples: 224,
+            export_job: None,
             last_view: egui::Rect::NOTHING,
             status: String::new(),
         }
@@ -395,6 +400,32 @@ impl Composer {
         }
     }
 
+    /// Writes the visible layers as an OBJ or PLY mesh (Z up, like SDF Modeler's exports), on a worker thread.
+    fn export_mesh(&mut self) {
+        if self.export_job.is_some() {
+            return;
+        }
+        let name = self.path.as_ref().and_then(|p| p.file_stem()).map_or("composition".to_string(), |n| n.to_string_lossy().into_owned());
+        let Some(path) = rfd::FileDialog::new().add_filter("OBJ", &["obj"]).add_filter("PLY (binary)", &["ply"]).set_file_name(format!("{name}.obj")).save_file() else { return };
+        let (file, samples) = (self.file.clone(), self.export_samples);
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let message = match crate::sdf_mesh::raw_mesh_from_file(&file, samples) {
+                Ok(mesh) => {
+                    let written = if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("ply")) { mesh.write_ply(&path) } else { mesh.write_obj(&path) };
+                    match written {
+                        Ok(()) => format!("Exported {} triangles to {}", mesh.triangles.len(), path.display()),
+                        Err(e) => format!("Could not write {}: {e}", path.display()),
+                    }
+                }
+                Err(e) => e,
+            };
+            let _ = sender.send(message);
+        });
+        self.export_job = Some(receiver);
+        self.status = "Exporting the mesh…".into();
+    }
+
     /// The File and Edit menus of the app's menu bar, while this tab is showing.
     pub fn menus(&mut self, ui: &mut egui::Ui) {
         ui.menu_button("File", |ui| {
@@ -412,6 +443,11 @@ impl Composer {
             }
             if ui.add(egui::Button::new("Save as…").shortcut_text("Ctrl+Shift+S")).clicked() {
                 self.save(true);
+                ui.close();
+            }
+            ui.separator();
+            if ui.add_enabled(self.export_job.is_none(), egui::Button::new("Export mesh…")).clicked() {
+                self.export_mesh();
                 ui.close();
             }
         });
@@ -1515,6 +1551,15 @@ impl Composer {
             }
         }
 
+        if let Some(job) = &self.export_job
+            && let Ok(message) = job.try_recv()
+        {
+            self.status = message;
+            self.export_job = None;
+        }
+        if self.export_job.is_some() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(200));
+        }
         egui::Panel::top("composer toolbar").show(ui, |ui| {
             ui.horizontal(|ui| {
                 if ui.button("New").clicked() {
@@ -1529,6 +1574,11 @@ impl Composer {
                 if ui.button("Save as…").clicked() {
                     self.save(true);
                 }
+                ui.separator();
+                if ui.add_enabled(self.export_job.is_none(), egui::Button::new("Export mesh…")).on_hover_text("Write the visible layers as an OBJ or PLY mesh").clicked() {
+                    self.export_mesh();
+                }
+                ui.add(egui::DragValue::new(&mut self.export_samples).range(48..=640).speed(2.0).suffix(" samples")).on_hover_text("Samples along the longest side of the mesh extraction: more is finer and slower");
                 ui.separator();
                 if ui.add_enabled(!self.undo.is_empty(), egui::Button::new("Undo")).clicked() {
                     self.undo();
