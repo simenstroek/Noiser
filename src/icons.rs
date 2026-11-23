@@ -6,6 +6,8 @@ pub fn source(name: &str) -> Option<egui::ImageSource<'static>> {
         "add" => include_bytes!("../assets/ui_icons/add.svg"),
         "add_layer" => include_bytes!("../assets/ui_icons/add_layer.svg"),
         "avoid" => include_bytes!("../assets/ui_icons/avoid.svg"),
+        "bake" => include_bytes!("../assets/ui_icons/bake.svg"),
+        "close" => include_bytes!("../assets/ui_icons/close.svg"),
         "collapsed" => include_bytes!("../assets/ui_icons/collapsed.svg"),
         "deboss" => include_bytes!("../assets/ui_icons/deboss.svg"),
         "delete" => include_bytes!("../assets/ui_icons/delete.svg"),
@@ -20,9 +22,12 @@ pub fn source(name: &str) -> Option<egui::ImageSource<'static>> {
         "group" => include_bytes!("../assets/ui_icons/group.svg"),
         "group_row" => include_bytes!("../assets/ui_icons/group_row.svg"),
         "intersect" => include_bytes!("../assets/ui_icons/intersect.svg"),
+        "library" => include_bytes!("../assets/ui_icons/library.svg"),
         "local" => include_bytes!("../assets/ui_icons/local.svg"),
+        "mesh_graph" => include_bytes!("../assets/ui_icons/mesh_graph.svg"),
         "move" => include_bytes!("../assets/ui_icons/move.svg"),
         "new" => include_bytes!("../assets/ui_icons/new.svg"),
+        "noise" => include_bytes!("../assets/ui_icons/noise.svg"),
         "open" => include_bytes!("../assets/ui_icons/open.svg"),
         "paint" => include_bytes!("../assets/ui_icons/paint.svg"),
         "push" => include_bytes!("../assets/ui_icons/push.svg"),
@@ -31,6 +36,7 @@ pub fn source(name: &str) -> Option<egui::ImageSource<'static>> {
         "save" => include_bytes!("../assets/ui_icons/save.svg"),
         "save_as" => include_bytes!("../assets/ui_icons/save_as.svg"),
         "scale" => include_bytes!("../assets/ui_icons/scale.svg"),
+        "settings" => include_bytes!("../assets/ui_icons/settings.svg"),
         "shape_cube" => include_bytes!("../assets/ui_icons/shape_cube.svg"),
         "shape_cylinder" => include_bytes!("../assets/ui_icons/shape_cylinder.svg"),
         "shape_polygon" => include_bytes!("../assets/ui_icons/shape_polygon.svg"),
@@ -39,6 +45,7 @@ pub fn source(name: &str) -> Option<egui::ImageSource<'static>> {
         "shell" => include_bytes!("../assets/ui_icons/shell.svg"),
         "snap" => include_bytes!("../assets/ui_icons/snap.svg"),
         "subtract" => include_bytes!("../assets/ui_icons/subtract.svg"),
+        "udim" => include_bytes!("../assets/ui_icons/udim.svg"),
         "undo" => include_bytes!("../assets/ui_icons/undo.svg"),
         "up" => include_bytes!("../assets/ui_icons/up.svg"),
         _ => return None,
@@ -53,6 +60,7 @@ pub fn image(name: &str, size: f32, tint: egui::Color32) -> egui::Image<'static>
 
 /// A square icon button whose accessible name is `label`; the caller adds the tooltip. `selected` makes it a toggle.
 pub fn button(ui: &mut egui::Ui, name: &str, label: &str, selected: Option<bool>, enabled: bool) -> egui::Response {
+    egui_extras::install_image_loaders(ui.ctx());
     let tint = if enabled { ui.visuals().widgets.inactive.fg_stroke.color } else { ui.visuals().weak_text_color() };
     let mut button = egui::Button::image(image(name, 16.0, tint)).min_size(egui::vec2(24.0, 24.0));
     if let Some(on) = selected {

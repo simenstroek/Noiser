@@ -471,6 +471,10 @@ impl Composer {
     }
 
     /// The File and Edit menus of the app's menu bar, while this tab is showing.
+    pub fn set_export_samples(&mut self, samples: usize) {
+        self.export_samples = samples.clamp(48, 640);
+    }
+
     pub fn menus(&mut self, ui: &mut egui::Ui) {
         ui.menu_button("File", |ui| {
             if ui.add(egui::Button::new("New").shortcut_text("Ctrl+N")).clicked() {
@@ -513,7 +517,7 @@ impl Composer {
     }
 
     fn open(&mut self) {
-        let Some(path) = rfd::FileDialog::new().add_filter("SDF Modeler file", &["sdf"]).pick_file() else { return };
+        let Some(path) = crate::library::dialog(crate::library::Kind::Sdf, rfd::FileDialog::new().add_filter("SDF Modeler file", &["sdf"])).pick_file() else { return };
         self.open_path(path);
     }
 
@@ -532,7 +536,7 @@ impl Composer {
             (Some(path), false) => path.clone(),
             _ => {
                 let name = self.path.as_ref().and_then(|p| p.file_name()).map_or("composition.sdf".to_string(), |n| n.to_string_lossy().into_owned());
-                match rfd::FileDialog::new().add_filter("SDF Modeler file", &["sdf"]).set_file_name(name).save_file() {
+                match crate::library::dialog(crate::library::Kind::Sdf, rfd::FileDialog::new().add_filter("SDF Modeler file", &["sdf"]).set_file_name(name)).save_file() {
                     Some(path) => path,
                     None => return,
                 }
@@ -541,11 +545,50 @@ impl Composer {
         match self.file.save(&path) {
             Ok(()) => {
                 self.status = format!("Saved {}", path.display());
+                crate::library::request_thumbnail(&path);
                 self.path = Some(path);
                 self.modified = false;
             }
             Err(e) => self.status = e,
         }
+    }
+
+    /// Opens `path` (asking about unsaved changes first).
+    pub fn open_request(&mut self, path: PathBuf) {
+        self.request(Pending::Path(path));
+    }
+
+    /// Adds the visible layers of another file to this composition, each as a group that keeps the layer's placement.
+    pub fn insert_file(&mut self, path: &std::path::Path) -> Result<(), String> {
+        let file = SdfFile::load(path)?;
+        let mut groups = Vec::new();
+        for layer in file.layers.iter().filter(|l| !l.hidden) {
+            let Some(assembly) = file.assemblies.get(layer.assembly) else { continue };
+            let mut group = new_group();
+            group.name = layer.name.clone();
+            group.position = layer.position;
+            group.rotation = layer.rotation;
+            group.scale = [layer.scale[0]; 3];
+            group.children = Some(assembly.shapes.clone());
+            groups.push(group);
+        }
+        if groups.is_empty() {
+            return Err("that file has nothing visible to add".into());
+        }
+        let name = path.file_stem().map_or_else(|| "Inserted".to_string(), |n| n.to_string_lossy().into_owned());
+        let node = if groups.len() == 1 {
+            let mut only = groups.remove(0);
+            only.name = name;
+            only
+        } else {
+            let mut outer = new_group();
+            outer.name = name;
+            outer.children = Some(groups);
+            outer
+        };
+        self.add_node(node);
+        self.status = format!("Added {}", path.display());
+        Ok(())
     }
 
     fn commit_if_settled(&mut self, pointer_down: bool) {
@@ -1273,6 +1316,7 @@ impl Composer {
     fn viewport(&mut self, ui: &mut egui::Ui, format: wgpu::TextureFormat) {
         let rect = ui.available_rect_before_wrap();
         self.last_view = rect;
+        crate::library::set_view_rect(rect);
         let response = ui.interact(rect, ui.scope_id().with("composer view"), egui::Sense::click_and_drag());
         let ctx = ui.ctx().clone();
         let size = rect.size();

@@ -31,6 +31,8 @@ mod surface;
 mod noiser_file;
 mod props;
 mod composer;
+mod library;
+mod prefs;
 mod icons;
 mod composer_gpu;
 mod composer_render;
@@ -45,6 +47,7 @@ mod view;
 
 use eframe::{egui, egui_wgpu};
 use graph::{Graph, Tiling};
+use prefs::Prefs;
 use props::*;
 use view::{MAX_PARAMS, Uniforms};
 
@@ -210,7 +213,13 @@ struct App {
     recent: Vec<std::path::PathBuf>,
     shortcuts_open: bool,
     prefs: Prefs,
+    /// The preferences the window and the app were last brought in line with.
+    applied_prefs: Option<Prefs>,
     prefs_open: bool,
+    prefs_tab: prefs::PrefsTab,
+    drawer: library::Drawer,
+    /// Thumbnails waiting for a screenshot: the file and the view to cut out of it.
+    thumbnails: Vec<(std::path::PathBuf, egui::Rect, std::sync::mpsc::Receiver<std::sync::Arc<egui::ColorImage>>)>,
     /// Which tab of the side panel is showing.
     side_tab: SideTab,
     /// A New / Open that is waiting for the user to decide about unsaved changes.
@@ -239,6 +248,9 @@ impl App {
         let mut args = std::env::args().skip(1);
         let (mut graph_arg, mut mesh_arg, mut open_mesh_export) = (None, None, false);
         let mut mesh_tab = false;
+        let mut library_root_arg: Option<String> = None;
+        let mut show_library = false;
+        let mut show_prefs: Option<prefs::PrefsTab> = None;
         let mut auto_preview = false;
         let mut uv_view = false;
         let mut map_view = false;
@@ -270,6 +282,18 @@ impl App {
                 show_mask = true;
             } else if a == "--open-mesh-export" {
                 open_mesh_export = true;
+            } else if a == "--library-root" {
+                library_root_arg = args.next();
+            } else if a == "--library" {
+                show_library = true;
+            } else if a == "--prefs" {
+                show_prefs = Some(match args.next().unwrap_or_default().as_str() {
+                    "keybinds" => prefs::PrefsTab::Keybinds,
+                    "performance" => prefs::PrefsTab::Performance,
+                    "paths" => prefs::PrefsTab::FilePaths,
+                    "style" => prefs::PrefsTab::Style,
+                    _ => prefs::PrefsTab::General,
+                });
             } else if a == "--mesh-tab" {
                 mesh_tab = true;
             } else if a == "--window" {
@@ -315,6 +339,9 @@ impl App {
         // Started with a file, mesh or template: the getting-started window is not needed.
         if std::env::args().nth(1).is_some() {
             prefs.seen_about = true;
+        }
+        if let Some(root) = library_root_arg {
+            prefs.library_root = root;
         }
         cc.egui_ctx.set_zoom_factor(prefs.ui_scale);
         let mut editor = editor::Editor::default();
@@ -380,7 +407,11 @@ impl App {
             history: history::History::new(&saved_for_history),
             shortcuts_open: false,
             prefs: prefs.clone(),
+            applied_prefs: None,
             prefs_open: false,
+            prefs_tab: Default::default(),
+            drawer: Default::default(),
+            thumbnails: Vec::new(),
             side_tab: SideTab::default(),
             pending: None,
             about_open: false,
@@ -400,6 +431,11 @@ impl App {
             app.composer.restore(&json, path, modified);
         }
         let graph_from_arg = mesh_graph_arg.is_some();
+        app.drawer.open = show_library;
+        if let Some(tab) = show_prefs {
+            app.prefs_open = true;
+            app.prefs_tab = tab;
+        }
         if mesh_tab || mesh_graph_arg.is_some() {
             app.workspace = meshworkspace::Workspace::Mesh;
         }
@@ -681,7 +717,7 @@ impl App {
     }
 
     fn file_dialog() -> rfd::FileDialog {
-        rfd::FileDialog::new().add_filter("Noiser graph", &["noisegraph"])
+        library::dialog(library::Kind::Noise, rfd::FileDialog::new().add_filter("Noiser graph", &["noisegraph"]))
     }
 
     fn open(&mut self) {
@@ -750,6 +786,7 @@ impl App {
             Ok(()) => {
                 self.saved = self.graph.clone();
                 self.status = format!("Saved {}", path.display());
+                library::request_thumbnail(&path);
                 push_recent(&mut self.recent, path.clone());
                 self.path = Some(path);
             }
@@ -830,38 +867,135 @@ enum Pending {
     Path(std::path::PathBuf),
 }
 
-/// Settings that belong to the user, not to a graph; saved with the app state.
-#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
-#[serde(default)]
-struct Prefs {
-    /// Scale of the whole interface (egui zoom factor).
-    ui_scale: f32,
-    /// Rolling crash-recovery backups of the open graph.
-    backups: bool,
-    /// Nodes snap to a grid when released.
-    snap_nodes: bool,
-    /// The About / getting-started window was shown once already.
-    seen_about: bool,
-}
-
-impl Default for Prefs {
-    fn default() -> Self {
-        Prefs { ui_scale: 1.0, backups: true, snap_nodes: false, seen_about: false }
-    }
-}
-
-impl Prefs {
-    fn sane(mut self) -> Self {
-        self.ui_scale = if self.ui_scale.is_finite() { self.ui_scale.clamp(0.75, 2.0) } else { 1.0 };
-        self
-    }
-}
-
 /// Moves `path` to the front of the recent list, without duplicates, at most 10 long.
 fn push_recent(list: &mut Vec<std::path::PathBuf>, path: std::path::PathBuf) {
     list.retain(|p| *p != path);
     list.insert(0, path);
     list.truncate(10);
+}
+
+impl App {
+    /// Brings the window and the global settings in line with the preferences, once after each change.
+    fn apply_prefs(&mut self, ctx: &egui::Context) {
+        if self.applied_prefs.as_ref() == Some(&self.prefs) {
+            return;
+        }
+        let before = self.applied_prefs.replace(self.prefs.clone());
+        let changed = |f: &dyn Fn(&Prefs) -> bool| before.as_ref().is_none_or(f);
+        library::set_root(self.prefs.library_path());
+        library::set_thumbnails(self.prefs.thumbnails);
+        sdf_mesh::set_resolution(self.prefs.sdf_mesh_resolution as usize);
+        if changed(&|b| b.theme != self.prefs.theme || b.accent != self.prefs.accent) {
+            ctx.set_theme(self.prefs.theme.preference());
+            ctx.set_visuals_of(egui::Theme::Dark, prefs::visuals(true, self.prefs.accent));
+            ctx.set_visuals_of(egui::Theme::Light, prefs::visuals(false, self.prefs.accent));
+        }
+        if changed(&|b| b.render_scale != self.prefs.render_scale) {
+            self.pv.render_scale = self.prefs.render_scale;
+        }
+        if changed(&|b| b.max_steps != self.prefs.max_steps) {
+            self.pv.max_steps = self.prefs.max_steps;
+        }
+        if changed(&|b| b.export_samples != self.prefs.export_samples) {
+            self.composer.set_export_samples(self.prefs.export_samples as usize);
+        }
+    }
+
+    /// Writes the pictures asked for by files saved into the library, from screenshots of the window.
+    fn collect_thumbnails(&mut self, ctx: &egui::Context) {
+        for file in library::take_requests() {
+            if let Some(rect) = library::view_rect() {
+                let (tx, rx) = std::sync::mpsc::channel();
+                self.thumbnails.push((file, rect, rx));
+                ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::ScreenshotCallback::new(move |image| {
+                    let _ = tx.send(image);
+                })));
+                ctx.request_repaint();
+            }
+        }
+        let mut waiting = Vec::new();
+        for (file, rect, rx) in std::mem::take(&mut self.thumbnails) {
+            match rx.try_recv() {
+                Ok(shot) => {
+                    if let Err(e) = library::save_thumbnail(&shot, rect, ctx.pixels_per_point(), &library::thumbnail_path(&file)) {
+                        self.status = format!("No picture saved for {}: {e}", file.display());
+                    }
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => waiting.push((file, rect, rx)),
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {}
+            }
+        }
+        if !waiting.is_empty() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(50));
+        }
+        self.thumbnails = waiting;
+    }
+
+    /// The library drawer (a key, `Tab` by default), and what dropping one of its cards does in the open tab.
+    fn library_drawer(&mut self, ui: &mut egui::Ui) {
+        use meshworkspace::Workspace;
+        let ctx = ui.ctx().clone();
+        let key = self.prefs.library_key.key();
+        if !ctx.egui_wants_keyboard_input() && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, key)) {
+            self.drawer.open = !self.drawer.open;
+        }
+        if !self.drawer.open {
+            return;
+        }
+        let hint = match self.workspace {
+            Workspace::Composer => "Drag an SDF into the view to add it to the composition.",
+            Workspace::Noise => "Drag an SDF onto the view to use it as the mesh.",
+            Workspace::Mesh => "Drag a file into the graph to make a node from it.",
+        };
+        let outer = ui.max_rect();
+        let action = self.drawer.show(ui, hint);
+        let keep_out = egui::Rect::from_min_max(egui::pos2(outer.left(), ui.available_rect_before_wrap().bottom()), outer.right_bottom());
+        match action {
+            Some(library::Action::ChooseFolder) => {
+                self.prefs_open = true;
+                self.prefs_tab = prefs::PrefsTab::FilePaths;
+            }
+            Some(library::Action::Open(path, kind)) => self.open_library_item(path, kind),
+            None => {}
+        }
+        if let Some((item, at)) = library::Drawer::dropped(&ctx, keep_out) {
+            self.drop_library_item(item, at);
+        }
+    }
+
+    fn open_library_item(&mut self, path: std::path::PathBuf, kind: library::Kind) {
+        use meshworkspace::Workspace;
+        match kind {
+            library::Kind::Sdf => {
+                self.workspace = Workspace::Composer;
+                self.composer.open_request(path);
+            }
+            library::Kind::Noise => {
+                self.workspace = Workspace::Noise;
+                self.request(Pending::Path(path));
+            }
+            library::Kind::MeshGraph => {
+                self.workspace = Workspace::Mesh;
+                self.mesh_ws.drop_file(path);
+            }
+            library::Kind::Bake | library::Kind::Udim => {}
+        }
+    }
+
+    fn drop_library_item(&mut self, item: library::LibraryItem, at: egui::Pos2) {
+        use meshworkspace::Workspace;
+        match (self.workspace, item.kind) {
+            (Workspace::Composer, library::Kind::Sdf) => {
+                if let Err(e) = self.composer.insert_file(&item.path) {
+                    self.status = e;
+                }
+            }
+            (Workspace::Noise, library::Kind::Sdf) => self.start_mesh_load(item.path),
+            (Workspace::Noise, library::Kind::Noise) => self.request(Pending::Path(item.path)),
+            (Workspace::Mesh, _) => self.mesh_ws.drop_file_at(item.path, Some(at)),
+            _ => {}
+        }
+    }
 }
 
 impl eframe::App for App {
@@ -896,6 +1030,7 @@ impl eframe::App for App {
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let cpu_start = std::time::Instant::now();
+        self.collect_thumbnails(&ui.ctx().clone());
         self.recovery_prompt(&ui.ctx().clone());
         self.poll_mesh_job(&ui.ctx().clone());
         self.mesh_export_window(&ui.ctx().clone());
@@ -1036,20 +1171,13 @@ impl eframe::App for App {
             ui.label("• File > Import mesh shapes a low-poly OBJ, PLY or STL with the graph; Export displaced mesh writes the high-resolution result.");
             ui.label("• Help > Keyboard shortcuts lists the keys. Source and releases: github.com/simenstroek/Noiser");
         });
-        egui::Window::new("Preferences").open(&mut self.prefs_open).collapsible(false).resizable(false).show(&ctx, |ui| {
-            let r = ui.add(egui::Slider::new(&mut self.prefs.ui_scale, 0.75..=2.0).text("Interface scale"));
-            r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Slider, true, "Interface scale"));
-            // Applied on release: rescaling under the dragged slider would move it.
-            if r.changed() && !r.dragged() || r.drag_stopped() {
+        egui::Window::new("Preferences").open(&mut self.prefs_open).collapsible(false).resizable(false).anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0]).show(&ctx, |ui| {
+            let effects = prefs::show(&mut self.prefs, &mut self.prefs_tab, ui, &SHORTCUTS);
+            if effects.scale_committed {
                 ctx.set_zoom_factor(self.prefs.ui_scale);
             }
-            ui.checkbox(&mut self.prefs.backups, "Keep rolling backups for crash recovery");
-            ui.checkbox(&mut self.prefs.snap_nodes, "Snap nodes to a grid when released");
-            if ui.button("Reset to defaults").clicked() {
-                self.prefs = Prefs { seen_about: true, ..Prefs::default() };
-                ctx.set_zoom_factor(1.0);
-            }
         });
+        self.apply_prefs(&ctx);
         self.export_window(&ui.ctx().clone());
         if let Some(s) = self.session.as_mut().filter(|_| self.graph != self.saved && self.prefs.backups)
             && s.backup(&self.graph, self.path.as_deref()) {
@@ -1183,9 +1311,19 @@ impl eframe::App for App {
                 });
                 ui.separator();
                 ui.weak(&self.status);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if icons::button(ui, "settings", "Preferences", None, true).on_hover_text("Preferences").clicked() {
+                        self.prefs_open = true;
+                    }
+                    let key = self.prefs.library_key.label();
+                    if icons::button(ui, "library", "Library", Some(self.drawer.open), true).on_hover_text(format!("Library: saved SDFs, noise graphs and mesh graphs ({key})")).clicked() {
+                        self.drawer.open = !self.drawer.open;
+                    }
+                });
             });
         });
         self.workspace_tabs(ui);
+        self.library_drawer(ui);
         match self.workspace {
             meshworkspace::Workspace::Mesh => {
                 self.mesh_workspace_ui(ui);
@@ -1313,6 +1451,7 @@ impl eframe::App for App {
         egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| {
             let full = ui.available_rect_before_wrap();
             let (r3d, rslice) = full.split_left_right_at_fraction(0.5);
+            library::set_view_rect(r3d);
             let resp = ui.interact(r3d, ui.scope_id().with("view3d"), egui::Sense::click_and_drag());
             if resp.double_clicked() {
                 (self.yaw, self.pitch, self.dist) = (0.6, 0.35, 3.5); // back to the starting camera

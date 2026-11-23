@@ -97,6 +97,7 @@ pub struct Editor {
     op_scroll_stepped: bool,
     #[cfg(test)]
     debug_origin: Pos2,
+    canvas_origin: Pos2,
 }
 
 impl Default for Editor {
@@ -125,6 +126,7 @@ impl Default for Editor {
             op_scroll_stepped: false,
             #[cfg(test)]
             debug_origin: Pos2::ZERO,
+            canvas_origin: Pos2::ZERO,
         }
     }
 }
@@ -451,6 +453,12 @@ impl Editor {
         origin + (Vec2::new(p[0], p[1]) + self.pan) * self.zoom
     }
 
+    /// Where a screen position is in the graph, as of the last frame the editor was shown.
+    pub fn screen_to_graph(&self, s: Pos2) -> [f32; 2] {
+        let p = self.to_graph(self.canvas_origin, s);
+        [p.x, p.y]
+    }
+
     fn to_graph(&self, origin: Pos2, s: Pos2) -> Pos2 {
         ((s - origin) / self.zoom - self.pan).to_pos2()
     }
@@ -496,6 +504,7 @@ impl Editor {
         let painter = ui.painter_at(canvas);
         painter.rect_filled(canvas, 0.0, Color32::from_gray(24));
         let origin = canvas.min;
+        self.canvas_origin = origin;
         let pointer = ui.input(|i| i.pointer.hover_pos());
         if self.preview.is_some_and(|p| !graph.nodes.contains_key(&p)) {
             self.preview = None;

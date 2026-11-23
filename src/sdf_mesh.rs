@@ -10,11 +10,15 @@ use crate::surface::{RawMesh, surface_nets};
 use rayon::prelude::*;
 use std::path::Path;
 
-/// Samples along the longest side of the grid the composition is extracted from.
-pub const RESOLUTION: usize = 160;
+/// Samples along the longest side of the grid the composition is extracted from (a preference).
+static RESOLUTION: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(160);
+
+pub fn set_resolution(samples: usize) {
+    RESOLUTION.store(samples.clamp(32, 400), std::sync::atomic::Ordering::Relaxed);
+}
 
 pub fn load(path: &Path) -> Result<Mesh, String> {
-    mesh_from_file(&SdfFile::load(path)?, RESOLUTION)
+    mesh_from_file(&SdfFile::load(path)?, RESOLUTION.load(std::sync::atomic::Ordering::Relaxed))
 }
 
 pub fn mesh_from_file(file: &SdfFile, resolution: usize) -> Result<Mesh, String> {

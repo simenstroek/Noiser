@@ -502,11 +502,19 @@ impl MeshWorkspace {
     /// A file dropped on the window: a mesh becomes a Load Mesh node, a noise graph a Noise Graph node, a mesh graph is
     /// opened (after asking when there are unsaved changes).
     pub fn drop_file(&mut self, path: PathBuf) {
+        self.drop_file_at(path, None);
+    }
+
+    /// Like `drop_file`, with the node placed under a screen position when there is one.
+    pub fn drop_file_at(&mut self, path: PathBuf, screen: Option<egui::Pos2>) {
         let ext = path.extension().map_or(String::new(), |e| e.to_string_lossy().to_lowercase());
-        let at = {
-            // Below the lowest node, at the left, so it does not land on top of anything.
-            let y = self.graph.nodes.values().map(|n| n.pos[1]).fold(0.0, f32::max);
-            [0.0, y + 120.0]
+        let at = match screen {
+            Some(p) => self.editor.screen_to_graph(p),
+            None => {
+                // Below the lowest node, at the left, so it does not land on top of anything.
+                let y = self.graph.nodes.values().map(|n| n.pos[1]).fold(0.0, f32::max);
+                [0.0, y + 120.0]
+            }
         };
         let text = path.to_string_lossy().into_owned();
         match ext.as_str() {
@@ -590,7 +598,7 @@ impl MeshWorkspace {
     pub fn save(&mut self, ask: bool) -> Result<(), String> {
         let path = match (&self.path, ask) {
             (Some(p), false) => p.clone(),
-            _ => match rfd::FileDialog::new().add_filter("Mesh graph", &["meshgraph"]).set_file_name("mesh.meshgraph").save_file() {
+            _ => match crate::library::dialog(crate::library::Kind::MeshGraph, rfd::FileDialog::new().add_filter("Mesh graph", &["meshgraph"]).set_file_name("mesh.meshgraph")).save_file() {
                 Some(p) => p,
                 None => return Ok(()),
             },
@@ -606,12 +614,13 @@ impl MeshWorkspace {
         crate::keep_previous_version(&path, &text);
         std::fs::write(&path, text).map_err(|e| format!("{}: {e}", path.display()))?;
         self.saved = self.graph.clone();
+        crate::library::request_thumbnail(&path);
         self.path = Some(path);
         Ok(())
     }
 
     pub fn open(&mut self) -> Result<(), String> {
-        let Some(path) = rfd::FileDialog::new().add_filter("Mesh graph", &["meshgraph"]).pick_file() else { return Ok(()) };
+        let Some(path) = crate::library::dialog(crate::library::Kind::MeshGraph, rfd::FileDialog::new().add_filter("Mesh graph", &["meshgraph"])).pick_file() else { return Ok(()) };
         let g = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display())).and_then(|s| Graph::from_json(&s))?;
         self.set(g, Some(path));
         Ok(())
@@ -978,6 +987,7 @@ impl crate::App {
         });
         egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| {
             let rect = ui.available_rect_before_wrap();
+            crate::library::set_view_rect(rect);
             let resp = ui.interact(rect, ui.scope_id().with("mesh preview"), egui::Sense::click_and_drag());
             let d = resp.drag_delta();
             let map_view = self.mesh_ws.show_map && !self.mesh_ws.map_files.is_empty();
@@ -1150,7 +1160,7 @@ impl crate::App {
                     let hint = if uv { "UV layout" } else { "Drag to turn, scroll to zoom, double-click to reset." };
                     painter.text(rect.left_top() + egui::vec2(8.0, 6.0), egui::Align2::LEFT_TOP, format!("{}: {} triangles. {hint}", p.name, p.triangles.len()), egui::FontId::proportional(12.0), egui::Color32::from_gray(160));
                 }
-                None => _ = painter.text(rect.center(), egui::Align2::CENTER_CENTER, "Run the graph to see its mesh here", egui::FontId::proportional(14.0), egui::Color32::from_gray(120)),
+                None => _ = painter.text(view_rect.center(), egui::Align2::CENTER_CENTER, "Run the graph to see its mesh here", egui::FontId::proportional(14.0), egui::Color32::from_gray(120)),
             }
             self.mesh_ws.preview = preview;
             let has_maps = !self.mesh_ws.map_files.is_empty();
