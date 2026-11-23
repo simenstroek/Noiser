@@ -1144,4 +1144,51 @@ mod tests {
         }
         eprintln!("compared {checked} layer(s) with SDF Modeler's exports");
     }
+
+    /// Every point inside the surface lies in the box the viewport marches and the Mesh graph looks in.
+    fn assert_inside_bounds(name: &str, shapes: &[String]) {
+        let layer = field(shapes);
+        let fields = vec![layer];
+        let scene = file_scene(&fields, None);
+        let (lo, hi) = scene.bounds.expect("something is drawn");
+        // The box as the viewport grows it (see Uniforms::new).
+        let grow = [0, 1, 2].map(|a| (hi[a] - lo[a]) * 0.08 + 0.05);
+        let (lo, hi) = ([0, 1, 2].map(|a| lo[a] - grow[a]), [0, 1, 2].map(|a| hi[a] + grow[a]));
+        let steps = 48;
+        let (span_lo, span_hi) = ([-6.0, -6.0, -6.0], [6.0, 6.0, 6.0]);
+        let mut checked = 0;
+        for i in 0..=steps {
+            for j in 0..=steps {
+                for k in 0..=steps {
+                    let t = [i, j, k].map(|n| n as f64 / steps as f64);
+                    let p = [0, 1, 2].map(|a| span_lo[a] + (span_hi[a] - span_lo[a]) * t[a]);
+                    if fields[0].distance(p).is_some_and(|d| d < 0.0) {
+                        checked += 1;
+                        for a in 0..3 {
+                            assert!(p[a] >= lo[a] && p[a] <= hi[a], "{name}: the point {p:?} is inside the shape but outside the bounds {lo:?} {hi:?}");
+                        }
+                    }
+                }
+            }
+        }
+        assert!(checked > 100, "{name}: the shape has some volume ({checked} samples)");
+    }
+
+    #[test]
+    fn the_bounds_hold_every_point_inside_the_surface() {
+        let ball = node("sphere", "");
+        let moved = |text: &str, position: &str| text.replace(r#""position":[0,0,0]"#, position);
+        // Two balls joined by a wide smooth blend.
+        let blended = |text: String| text.replace(r#""blend":0.0"#, r#""blend":0.8"#);
+        assert_inside_bounds("blended balls", &[blended(moved(&ball, r#""position":[-1.2,0,0]"#)), blended(moved(&ball, r#""position":[1.2,0,0]"#))]);
+        // A ball with a push that raises a bump out of its top.
+        let bump = moved(&ball, r#""position":[0,1.0,0]"#).replace(r#""mode":"add""#, r#""mode":"push""#).replace(r#""scale":[2,2,2]"#, r#""scale":[1,1,1]"#).replace(r#""blend_strength":0.0"#, r#""blend_strength":0.6"#);
+        assert_inside_bounds("pushed ball", &[ball.clone(), bump]);
+        // A ball with a shell-shaped emboss.
+        let emboss = moved(&ball, r#""position":[0,0.8,0]"#).replace(r#""mode":"add""#, r#""mode":"emboss""#).replace(r#""blend_strength":0.0"#, r#""blend_strength":0.5"#);
+        assert_inside_bounds("embossed ball", &[ball.clone(), emboss]);
+        // A cube moved off to one side, mirrored and repeated three times.
+        let copies = node("cube", "").replace(r#""position":[0,0,0]"#, r#""position":[2,0,0]"#).replace(r#""mirror_x":false"#, r#""mirror_x":true"#).replace(r#""linear_repeats":[1,1,1]"#, r#""linear_repeats":[3,1,1]"#);
+        assert_inside_bounds("mirrored copies", &[copies]);
+    }
 }
