@@ -8,7 +8,7 @@ also displace low-polygon meshes (single files or whole batches, from the app or
 Everything is evaluated on the GPU (Rust, egui, wgpu). Resolution never limits the detail: the graph
 stays a function, and exports sample it at whatever resolution you ask for.
 
-The three tabs: the **SDF Composer** (build and edit shapes, with the library drawer along the bottom), the **Noise graph** (a Warped cells graph, with its 3D view and slice) and the **Mesh graph** (a rocket from the Composer roughened by a noise graph, shown as the ray-marched field and as the remeshed result).
+The three tabs: the **SDF Composer** (build and edit shapes, with the library drawer along the bottom), the **Noise graph** (a Warped cells graph, with its 3D view and slice) and the **Mesh graph** (a rocket from the Composer roughened by a noise graph, shown as the ray-marched field and as the remeshed result; no mesh file is needed, the Load SDF node is the only input).
 
 ![The SDF Composer with the move gizmo on a fin, and the library drawer](docs/screenshots/composer.png)
 ![The Noise graph tab with a Warped cells graph](docs/screenshots/noise-graph.png)
