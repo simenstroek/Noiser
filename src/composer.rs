@@ -235,6 +235,21 @@ enum DropZone {
     After,
 }
 
+/// What waits for an answer to "unsaved changes".
+#[derive(Clone, Debug)]
+enum Pending {
+    New,
+    Open,
+    Path(PathBuf),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Answer {
+    Save,
+    Discard,
+    Cancel,
+}
+
 enum Action {
     Select(Vec<usize>),
     ToggleHidden(Vec<usize>),
@@ -273,6 +288,7 @@ pub struct Composer {
     scene_serial: u64,
     frame_pending: bool,
     drag: Option<Drag>,
+    pending: Option<Pending>,
     pub status: String,
 }
 
@@ -299,6 +315,7 @@ impl Default for Composer {
             scene_serial: 0,
             frame_pending: true,
             drag: None,
+            pending: None,
             status: String::new(),
         }
     }
@@ -340,6 +357,69 @@ impl Composer {
         self.version += 1;
         self.fields = None;
         self.frame_pending = true;
+    }
+
+    /// Runs `action`, after asking when the composition has unsaved changes.
+    fn request(&mut self, action: Pending) {
+        if self.modified {
+            self.pending = Some(action);
+        } else {
+            self.run(action);
+        }
+    }
+
+    fn run(&mut self, action: Pending) {
+        match action {
+            Pending::New => self.new_document(),
+            Pending::Open => self.open(),
+            Pending::Path(path) => self.open_path(path),
+        }
+    }
+
+    /// The document for the app's storage: its JSON, its path and whether it has unsaved changes. None when empty.
+    pub fn storage(&self) -> Option<(String, String, bool)> {
+        let empty = self.file.assemblies.iter().all(|a| a.shapes.is_empty());
+        (!empty || self.path.is_some()).then(|| (self.file.to_json(), self.path.as_ref().map_or(String::new(), |p| p.to_string_lossy().into_owned()), self.modified))
+    }
+
+    /// Puts back what `storage` returned.
+    pub fn restore(&mut self, json: &str, path: Option<PathBuf>, modified: bool) {
+        if let Ok(file) = SdfFile::from_json(json) {
+            self.replace_document(file, path);
+            self.modified = modified;
+        }
+    }
+
+    /// The File and Edit menus of the app's menu bar, while this tab is showing.
+    pub fn menus(&mut self, ui: &mut egui::Ui) {
+        ui.menu_button("File", |ui| {
+            if ui.add(egui::Button::new("New").shortcut_text("Ctrl+N")).clicked() {
+                self.request(Pending::New);
+                ui.close();
+            }
+            if ui.add(egui::Button::new("Open…").shortcut_text("Ctrl+O")).clicked() {
+                self.request(Pending::Open);
+                ui.close();
+            }
+            if ui.add(egui::Button::new("Save").shortcut_text("Ctrl+S")).clicked() {
+                self.save(false);
+                ui.close();
+            }
+            if ui.add(egui::Button::new("Save as…").shortcut_text("Ctrl+Shift+S")).clicked() {
+                self.save(true);
+                ui.close();
+            }
+        });
+        ui.menu_button("Edit", |ui| {
+            if ui.add_enabled(!self.undo.is_empty(), egui::Button::new("Undo").shortcut_text("Ctrl+Z")).clicked() {
+                self.undo();
+                ui.close();
+            }
+            if ui.add_enabled(!self.redo.is_empty(), egui::Button::new("Redo").shortcut_text("Ctrl+Y")).clicked() {
+                self.redo();
+                ui.close();
+            }
+        });
     }
 
     fn new_document(&mut self) {
@@ -1297,22 +1377,58 @@ impl Composer {
             self.save(ctx.input(|i| i.modifiers.shift));
         }
         if open {
-            self.open();
+            self.request(Pending::Open);
+        }
+        if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::N)) {
+            self.request(Pending::New);
         }
         for dropped in ctx.input(|i| i.raw.dropped_files.clone()) {
             let path = dropped.path().to_path_buf();
             if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("sdf")) {
-                self.open_path(path);
+                self.request(Pending::Path(path));
+            }
+        }
+        if let Some(action) = self.pending.clone() {
+            let mut answer = None;
+            egui::Window::new("Unsaved changes").collapsible(false).resizable(false).anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0]).show(&ctx, |ui| {
+                ui.label("The composition has changes that are not saved.");
+                ui.horizontal(|ui| {
+                    if ui.button("Save").clicked() {
+                        answer = Some(Answer::Save);
+                    }
+                    if ui.button("Discard").clicked() {
+                        answer = Some(Answer::Discard);
+                    }
+                    if ui.button("Cancel").clicked() {
+                        answer = Some(Answer::Cancel);
+                    }
+                });
+            });
+            match answer {
+                Some(Answer::Save) => {
+                    self.save(false);
+                    if !self.modified {
+                        self.pending = None;
+                        self.run(action);
+                    }
+                }
+                Some(Answer::Discard) => {
+                    self.pending = None;
+                    self.modified = false;
+                    self.run(action);
+                }
+                Some(Answer::Cancel) => self.pending = None,
+                None => {}
             }
         }
 
         egui::Panel::top("composer toolbar").show(ui, |ui| {
             ui.horizontal(|ui| {
                 if ui.button("New").clicked() {
-                    self.new_document();
+                    self.request(Pending::New);
                 }
                 if ui.button("Open…").clicked() {
-                    self.open();
+                    self.request(Pending::Open);
                 }
                 if ui.button("Save").clicked() {
                     self.save(false);
@@ -1556,5 +1672,38 @@ mod drag_tests {
         c.add_node(new_group());
         c.move_node(&[1], Some(&[1]), DropZone::Inside);
         assert_eq!(c.shapes().len(), 2);
+    }
+}
+
+#[cfg(test)]
+mod safety_tests {
+    use super::*;
+
+    #[test]
+    fn new_asks_first_when_there_are_unsaved_changes() {
+        let mut c = Composer::default();
+        c.add_node(new_shape("cube"));
+        assert!(c.modified);
+        c.request(Pending::New);
+        assert!(c.pending.is_some());
+        assert_eq!(c.shapes().len(), 1, "nothing happens until the question is answered");
+        c.pending = None;
+        c.modified = false;
+        c.request(Pending::New);
+        assert!(c.pending.is_none());
+        assert_eq!(c.shapes().len(), 0);
+    }
+
+    #[test]
+    fn the_document_survives_a_restart() {
+        let mut c = Composer::default();
+        assert!(c.storage().is_none(), "an empty blank composition is not worth keeping");
+        c.add_node(new_shape("sphere"));
+        c.add_node(new_shape("cube"));
+        let (json, path, modified) = c.storage().unwrap();
+        let mut restored = Composer::default();
+        restored.restore(&json, (!path.is_empty()).then(|| PathBuf::from(path)), modified);
+        assert_eq!(restored.shapes().len(), 2);
+        assert!(restored.modified);
     }
 }

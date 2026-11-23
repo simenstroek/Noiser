@@ -392,6 +392,11 @@ impl App {
         if let Some(p) = sdf_arg {
             app.composer.open_path(p);
             app.workspace = meshworkspace::Workspace::Composer;
+        } else if let Some(json) = cc.storage.and_then(|s| s.get_string(COMPOSER_KEY)).filter(|j| !j.is_empty()) {
+            // The composition as it was left, an unsaved one included.
+            let path = cc.storage.and_then(|s| s.get_string(COMPOSER_PATH_KEY)).filter(|p| !p.is_empty()).map(std::path::PathBuf::from);
+            let modified = cc.storage.and_then(|s| s.get_string(COMPOSER_MODIFIED_KEY)).as_deref() == Some("1");
+            app.composer.restore(&json, path, modified);
         }
         let graph_from_arg = mesh_graph_arg.is_some();
         if mesh_tab || mesh_graph_arg.is_some() {
@@ -784,6 +789,9 @@ fn keep_previous_version(path: &std::path::Path, new_text: &str) {
 
 const PICKS_KEY: &str = "node_picks";
 const MESH_GRAPH_KEY: &str = "mesh_graph";
+const COMPOSER_KEY: &str = "composer_document";
+const COMPOSER_PATH_KEY: &str = "composer_path";
+const COMPOSER_MODIFIED_KEY: &str = "composer_modified";
 const MESH_GRAPH_PATH_KEY: &str = "mesh_graph_path";
 const SHORTCUTS: [(&str, &str); 18] = [
     ("Ctrl+S / Ctrl+Shift+S / Ctrl+O / Ctrl+N", "Save / Save As / Open / New"),
@@ -855,6 +863,14 @@ impl eframe::App for App {
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         if let Ok(s) = serde_json::to_string(&self.editor.picks) {
             storage.set_string(PICKS_KEY, s);
+        }
+        match self.composer.storage() {
+            Some((json, path, modified)) => {
+                storage.set_string(COMPOSER_KEY, json);
+                storage.set_string(COMPOSER_PATH_KEY, path);
+                storage.set_string(COMPOSER_MODIFIED_KEY, if modified { "1" } else { "0" }.into());
+            }
+            None => storage.set_string(COMPOSER_KEY, String::new()),
         }
         storage.set_string(MESH_GRAPH_KEY, self.mesh_ws.graph.to_json());
         storage.set_string(MESH_GRAPH_PATH_KEY, self.mesh_ws.path.as_ref().map_or(String::new(), |p| p.to_string_lossy().into_owned()));
@@ -1054,6 +1070,9 @@ impl eframe::App for App {
 
         egui::Panel::top("menu").show(ui, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
+                if self.workspace == meshworkspace::Workspace::Composer {
+                    self.composer.menus(ui);
+                } else {
                 ui.menu_button("File", |ui| {
                     if ui.add(egui::Button::new("New").shortcut_text("Ctrl+N")).clicked() {
                         self.request(Pending::New);
@@ -1142,6 +1161,7 @@ impl eframe::App for App {
                         ui.close();
                     }
                 });
+                }
                 ui.menu_button("Help", |ui| {
                     if ui.button("Keyboard shortcuts").clicked() {
                         self.shortcuts_open = true;
