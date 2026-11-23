@@ -284,15 +284,31 @@ impl Runner<'_> {
             graph_meshes.push(GraphMesh { view: m.view.clone(), origin: m.origin, voxel: m.voxel, centre: m.norm.center, scale: m.norm.scale });
             loaded.push(m);
         }
-        if loaded.is_empty() && require_mesh {
-            return Err("the field has no Load Mesh node, so there is no surface to extract".into());
+// A Load SDF node knows where its shape is, so it can stand in for a mesh as the place to look for the surface.
+        let sdf_boxes: Vec<([f32; 3], [f32; 3])> = g.nodes.values().filter_map(|n| if let NodeKind::LoadSdf(p) = &n.kind { p.field_bounds() } else { None }).collect();
+        if loaded.is_empty() && sdf_boxes.is_empty() && require_mesh {
+            return Err("the field has no Load Mesh or Load SDF node, so there is no surface to extract".into());
         }
         let ev = MeshEvaluator::new_graph(self.device, self.queue, &g, self.seed, graph_meshes)?;
-        let (mut lo, mut hi) = if loaded.is_empty() { ([0.0; 3], [0.0; 3]) } else { ([f32::MAX; 3], [f32::MIN; 3]) };
+let (mut lo, mut hi) = if loaded.is_empty() && sdf_boxes.is_empty() { ([0.0; 3], [0.0; 3]) } else { ([f32::MAX; 3], [f32::MIN; 3]) };
         for m in &loaded {
             for a in 0..3 {
                 lo[a] = lo[a].min(m.lo[a]);
                 hi[a] = hi[a].max(m.hi[a]);
+            }
+        }
+        for (blo, bhi) in &sdf_boxes {
+            for a in 0..3 {
+                lo[a] = lo[a].min(blo[a]);
+                hi[a] = hi[a].max(bhi[a]);
+            }
+        }
+        if loaded.is_empty() && !sdf_boxes.is_empty() {
+            // The shape's own box is tight: leave room for noise and the surface sitting on the edge.
+            let margin = (0..3).map(|a| hi[a] - lo[a]).fold(0.0, f32::max) * 0.08;
+            for a in 0..3 {
+                lo[a] -= margin;
+                hi[a] += margin;
             }
         }
         let radius = (0..3).map(|a| hi[a] - lo[a]).fold(0.0, f32::max) * 0.5;

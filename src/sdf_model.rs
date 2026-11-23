@@ -338,11 +338,16 @@ impl Brush {
 
     /// How far the shape reaches from its centre.
     fn extent(&self) -> f64 {
-        let half = match self {
-            Brush::Sphere { radii } => *radii,
-            Brush::Cube { half, .. } | Brush::Cylinder { half, .. } | Brush::Prism { half, .. } | Brush::Polygon { half, .. } => *half,
-        };
-        (half[0] * half[0] + half[1] * half[1] + half[2] * half[2]).sqrt()
+        match self {
+            // An ellipsoid fits in a ball as big as its longest radius.
+            Brush::Sphere { radii } => radii[0].max(radii[1]).max(radii[2]),
+            // A cylinder is round around its Y axis.
+            Brush::Cylinder { half, .. } => {
+                let across = half[0].max(half[2]);
+                (across * across + half[1] * half[1]).sqrt()
+            }
+            Brush::Cube { half, .. } | Brush::Prism { half, .. } | Brush::Polygon { half, .. } => (half[0] * half[0] + half[1] * half[1] + half[2] * half[2]).sqrt(),
+        }
     }
 
     fn distance(&self, p: V3) -> f64 {

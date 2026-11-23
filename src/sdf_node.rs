@@ -53,6 +53,19 @@ impl LoadSdfParams {
     }
 }
 
+impl LoadSdfParams {
+    /// The box the shape fills in the field's own coordinates (after fitting), when the file can be read.
+    pub fn field_bounds(&self) -> Option<([f32; 3], [f32; 3])> {
+        let loaded = load(&self.file);
+        let data = loaded.as_ref().as_ref().ok()?;
+        let (lo, hi) = data.scene.bounds?;
+        let [ox, oy, oz, scale, cx, cy, cz] = self.shader_params(Some(data));
+        let (offset, center) = ([ox, oy, oz], [cx, cy, cz]);
+        let map = |p: [f64; 3]| [0, 1, 2].map(|a| offset[a] + (p[a] as f32 - center[a]) * scale);
+        Some((map(lo), map(hi)))
+    }
+}
+
 // ---- loading ----------------------------------------------------------------------------------------------------
 
 struct Entry {
@@ -314,6 +327,19 @@ mod tests {
         assert_eq!(std::path::PathBuf::from(&found), dir.join("ball.sdf"));
         assert!(loaded.is_ok(), "the file loads through its relative name");
         assert_eq!(resolve("ball.sdf"), "ball.sdf", "without a graph folder the name stays as it is");
+    }
+
+    #[test]
+    fn the_field_bounds_follow_the_fit() {
+        let path = temp_sphere("noiser_sdf_node_bounds.sdf");
+        let loose = LoadSdfParams { file: path.clone(), fit: false, ..Default::default() }.field_bounds().unwrap();
+        for a in 0..3 {
+            assert!((loose.0[a] + 1.0).abs() < 0.05 && (loose.1[a] - 1.0).abs() < 0.05, "a sphere of size 2: {loose:?}");
+        }
+        let fitted = LoadSdfParams { file: path, fit: true, size: 0.8, offset: [0.5; 3] }.field_bounds().unwrap();
+        for a in 0..3 {
+            assert!((fitted.0[a] - 0.1).abs() < 0.02 && (fitted.1[a] - 0.9).abs() < 0.02, "inside the tile: {fitted:?}");
+        }
     }
 
     #[test]
