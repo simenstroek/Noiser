@@ -228,10 +228,19 @@ fn axis_color(axis: usize) -> egui::Color32 {
 
 // ---- state --------------------------------------------------------------------------------------------------------
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DropZone {
+    Before,
+    Inside,
+    After,
+}
+
 enum Action {
     Select(Vec<usize>),
     ToggleHidden(Vec<usize>),
     ToggleCollapsed(Vec<usize>),
+    /// Move a node next to, into, or (onto a shape) together with another; `None` means the end of the top level.
+    Drop { from: Vec<usize>, onto: Option<Vec<usize>>, zone: DropZone },
 }
 
 struct Row {
@@ -500,6 +509,77 @@ impl Composer {
         let mut new_path = parent;
         new_path.push(index);
         new_path.push(0);
+        self.selection = Some(new_path);
+        self.touch();
+    }
+
+    /// Moves a node by drag and drop. `onto` is the row it was dropped on; dropping on a shape's middle wraps both in a
+    /// new group.
+    fn move_node(&mut self, from: &[usize], onto: Option<&[usize]>, zone: DropZone) {
+        if from.is_empty() || onto.is_some_and(|o| o == from || o.starts_with(from)) {
+            return;
+        }
+        let Some(node) = node_at(self.shapes(), from).cloned() else { return };
+        let (from_index, from_parent) = (from[from.len() - 1], from[..from.len() - 1].to_vec());
+        // Where the target sits once the dragged node is out of the tree.
+        let onto: Option<Vec<usize>> = onto.map(|target| {
+            let mut target = target.to_vec();
+            let depth = from.len() - 1;
+            if target.len() > depth && target[..depth] == from[..depth] && target[depth] > from_index {
+                target[depth] -= 1;
+            }
+            target
+        });
+        let Some(shapes) = self.shapes_mut() else { return };
+        {
+            let Some(list) = siblings_mut(shapes, &from_parent) else { return };
+            if from_index >= list.len() {
+                return;
+            }
+            list.remove(from_index);
+        }
+        let new_path = match onto {
+            None => {
+                shapes.push(node);
+                vec![shapes.len() - 1]
+            }
+            Some(target) => {
+                let (index, parent) = (target[target.len() - 1], target[..target.len() - 1].to_vec());
+                let target_is_group = node_at(shapes, &target).is_some_and(|n| n.kind == "group");
+                match zone {
+                    DropZone::Inside if target_is_group => {
+                        let Some(group) = node_at_mut(shapes, &target) else { return };
+                        let children = group.children.get_or_insert_with(Vec::new);
+                        children.push(node);
+                        let mut path = target;
+                        path.push(children.len() - 1);
+                        path
+                    }
+                    DropZone::Inside => {
+                        let Some(list) = siblings_mut(shapes, &parent) else { return };
+                        if index >= list.len() {
+                            return;
+                        }
+                        let existing = list.remove(index);
+                        let mut group = new_group();
+                        group.children = Some(vec![existing, node]);
+                        list.insert(index, group);
+                        let mut path = parent;
+                        path.push(index);
+                        path.push(1);
+                        path
+                    }
+                    DropZone::Before | DropZone::After => {
+                        let Some(list) = siblings_mut(shapes, &parent) else { return };
+                        let at = (if zone == DropZone::After { index + 1 } else { index }).min(list.len());
+                        list.insert(at, node);
+                        let mut path = parent;
+                        path.push(at);
+                        path
+                    }
+                }
+            }
+        };
         self.selection = Some(new_path);
         self.touch();
     }
@@ -868,14 +948,41 @@ impl Composer {
                     if row.hidden || !row.supported {
                         label = label.weak();
                     }
-                    if ui.selectable_label(selected, label).clicked() {
+                    let response = ui.add(egui::Button::selectable(selected, label).sense(egui::Sense::click_and_drag()));
+                    if response.clicked() {
                         actions.push(Action::Select(row.path.clone()));
                     }
+                    if response.drag_started() {
+                        response.dnd_set_drag_payload(row.path.clone());
+                    }
+                    if response.dnd_hover_payload::<Vec<usize>>().is_some()
+                        && let Some(pointer) = ui.input(|i| i.pointer.interact_pos())
+                    {
+                        let fraction = ((pointer.y - response.rect.top()) / response.rect.height().max(1.0)).clamp(0.0, 1.0);
+                        let zone = if fraction < 0.25 { DropZone::Before } else if fraction > 0.75 { DropZone::After } else { DropZone::Inside };
+                        let stroke = egui::Stroke::new(2.0, egui::Color32::from_rgb(235, 150, 70));
+                        match zone {
+                            DropZone::Before => _ = ui.painter().hline(response.rect.x_range(), response.rect.top(), stroke),
+                            DropZone::After => _ = ui.painter().hline(response.rect.x_range(), response.rect.bottom(), stroke),
+                            DropZone::Inside => _ = ui.painter().rect_stroke(response.rect, 3.0, stroke, egui::StrokeKind::Inside),
+                        }
+                        if let Some(payload) = response.dnd_release_payload::<Vec<usize>>() {
+                            actions.push(Action::Drop { from: (*payload).clone(), onto: Some(row.path.clone()), zone });
+                        }
+                    }
                 });
+            }
+            let rest = ui.allocate_response(egui::vec2(ui.available_width(), ui.available_height().max(24.0)), egui::Sense::hover());
+            if rest.dnd_hover_payload::<Vec<usize>>().is_some() {
+                ui.painter().rect_stroke(rest.rect, 3.0, egui::Stroke::new(1.5, egui::Color32::from_rgb(235, 150, 70)), egui::StrokeKind::Inside);
+                if let Some(payload) = rest.dnd_release_payload::<Vec<usize>>() {
+                    actions.push(Action::Drop { from: (*payload).clone(), onto: None, zone: DropZone::After });
+                }
             }
         });
         for action in actions {
             match action {
+                Action::Drop { from, onto, zone } => self.move_node(&from, onto.as_deref(), zone),
                 Action::Select(path) => self.selection = Some(path),
                 Action::ToggleCollapsed(path) => {
                     if !self.collapsed.remove(&path) {
@@ -1079,7 +1186,12 @@ impl Composer {
                 if self.tool == Tool::Scale {
                     painter.rect_filled(egui::Rect::from_center_size(b, egui::vec2(9.0, 9.0)), 1.0, color);
                 } else {
-                    painter.circle_filled(b, 5.0, color);
+                    // An arrow head, so a move handle cannot be mistaken for a scale handle.
+                    let direction = (b - a).normalized();
+                    let side = egui::vec2(-direction.y, direction.x);
+                    let tip = b + direction * 10.0;
+                    let base = b - direction * 4.0;
+                    painter.add(egui::Shape::convex_polygon(vec![tip, base + side * 6.5, base - side * 6.5], color, egui::Stroke::NONE));
                 }
             }
         }
@@ -1372,5 +1484,66 @@ mod tests {
         let r = euler_matrix(c.shapes()[0].rotation);
         // About y by 90 degrees, in one direction or the other.
         assert!((r[0][2].abs() - 1.0).abs() < 1e-6 && (r[1][1] - 1.0).abs() < 1e-6, "{r:?}");
+    }
+}
+
+#[cfg(test)]
+mod drag_tests {
+    use super::*;
+
+    fn composer_with(names: &[&str]) -> Composer {
+        let mut c = Composer::default();
+        for name in names {
+            c.add_node(new_shape("cube"));
+            let last = c.selection.clone().unwrap();
+            node_at_mut(c.shapes_mut().unwrap(), &last).unwrap().name = name.to_string();
+        }
+        c
+    }
+
+    fn names(c: &Composer) -> Vec<String> {
+        c.shapes().iter().map(|n| n.name.clone()).collect()
+    }
+
+    #[test]
+    fn dropping_on_the_edges_reorders() {
+        let mut c = composer_with(&["a", "b", "c"]);
+        c.move_node(&[0], Some(&[2]), DropZone::After);
+        assert_eq!(names(&c), ["b", "c", "a"]);
+        c.move_node(&[2], Some(&[0]), DropZone::Before);
+        assert_eq!(names(&c), ["a", "b", "c"]);
+    }
+
+    #[test]
+    fn dropping_a_shape_on_a_shape_makes_a_group_of_both() {
+        let mut c = composer_with(&["a", "b", "c"]);
+        c.move_node(&[0], Some(&[2]), DropZone::Inside);
+        assert_eq!(c.shapes().len(), 2);
+        assert_eq!(c.shapes()[1].kind, "group");
+        let inner: Vec<_> = c.shapes()[1].children().iter().map(|n| n.name.as_str()).collect();
+        assert_eq!(inner, ["c", "a"]);
+        assert_eq!(c.selection, Some(vec![1, 1]));
+    }
+
+    #[test]
+    fn shapes_move_into_and_out_of_groups() {
+        let mut c = composer_with(&["a", "b"]);
+        c.add_node(new_group());
+        assert_eq!(c.shapes().len(), 3);
+        c.move_node(&[0], Some(&[2]), DropZone::Inside);
+        assert_eq!(c.shapes().len(), 2);
+        assert_eq!(c.shapes()[1].children().len(), 1);
+        c.move_node(&[1, 0], None, DropZone::After);
+        assert_eq!(c.shapes().len(), 3);
+        assert_eq!(c.shapes()[2].name, "a");
+        assert!(c.shapes()[1].children().is_empty());
+    }
+
+    #[test]
+    fn a_group_cannot_be_dropped_into_itself() {
+        let mut c = composer_with(&["a"]);
+        c.add_node(new_group());
+        c.move_node(&[1], Some(&[1]), DropZone::Inside);
+        assert_eq!(c.shapes().len(), 2);
     }
 }
