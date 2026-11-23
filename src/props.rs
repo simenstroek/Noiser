@@ -69,6 +69,16 @@ pub(crate) enum SideTab {
 }
 
 impl SideTab {
+    pub(crate) fn icon(self) -> &'static str {
+        match self {
+            SideTab::View3d => "view_3d",
+            SideTab::Material => "material",
+            SideTab::Lighting => "lighting",
+            SideTab::Slice => "slice",
+            SideTab::Mesh => "mesh",
+        }
+    }
+
     pub(crate) const ALL: [(SideTab, &'static str); 5] = [(SideTab::View3d, "3D view"), (SideTab::Material, "Material"), (SideTab::Lighting, "Lighting"), (SideTab::Slice, "Slice"), (SideTab::Mesh, "Mesh")];
 }
 

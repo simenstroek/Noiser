@@ -27,6 +27,14 @@ impl Workspace {
         }
     }
 
+    pub fn icon(self) -> &'static str {
+        match self {
+            Workspace::Noise => "noise",
+            Workspace::Mesh => "mesh_graph",
+            Workspace::Composer => "shape_cube",
+        }
+    }
+
     /// The colour of the tab and of the outline around the tab's contents.
     pub fn color(self) -> egui::Color32 {
         match self {
@@ -740,7 +748,7 @@ impl crate::App {
                     let color = workspace.color();
                     let text_color = if is_selected { ui.visuals().strong_text_color() } else { ui.visuals().text_color() };
                     let galley = ui.painter().layout_no_wrap(workspace.label().to_string(), egui::FontId::proportional(14.0), text_color);
-                    let (rect, response) = ui.allocate_exact_size(galley.size() + egui::vec2(28.0, 10.0), egui::Sense::click());
+                    let (rect, response) = ui.allocate_exact_size(galley.size() + egui::vec2(28.0 + 22.0, 10.0), egui::Sense::click());
                     let (fill, stroke) = if is_selected {
                         (ui.visuals().panel_fill, egui::Stroke::new(2.0, color))
                     } else if response.hovered() {
@@ -750,7 +758,9 @@ impl crate::App {
                     };
                     let corners = egui::CornerRadius { nw: TAB_CORNER, ne: TAB_CORNER, sw: 0, se: 0 };
                     ui.painter().rect(rect, corners, fill, stroke, egui::StrokeKind::Inside);
-                    ui.painter().galley(rect.center() - galley.size() * 0.5, galley, text_color);
+                    egui_extras::install_image_loaders(ui.ctx());
+                    crate::icons::image(workspace.icon(), 16.0, if is_selected { color } else { color.gamma_multiply(0.8) }).paint_at(ui, egui::Rect::from_center_size(egui::pos2(rect.left() + 18.0, rect.center().y), egui::vec2(16.0, 16.0)));
+                    ui.painter().galley(egui::pos2(rect.left() + 32.0, rect.center().y - galley.size().y * 0.5), galley, text_color);
                     if is_selected {
                         selected_span = Some((rect.left() + 1.0, rect.right() - 1.0));
                     } else if response.clicked() {
@@ -887,17 +897,17 @@ impl crate::App {
         }
         egui::Panel::right("mesh props").default_size(340.0).show(ui, |ui| {
             ui.horizontal_wrapped(|ui| {
-                if ui.button("New").clicked() && self.mesh_ws.may_discard() {
+                if crate::icons::button(ui, "new", "New", None, true).on_hover_text("New mesh graph").clicked() && self.mesh_ws.may_discard() {
                     self.mesh_ws.set(MeshWorkspace::example(), None);
                 }
-                if ui.button("Open…").clicked() && self.mesh_ws.may_discard()
+                if crate::icons::button(ui, "open", "Open…", None, true).on_hover_text("Open a mesh graph… (Ctrl+O)").clicked() && self.mesh_ws.may_discard()
                     && let Err(e) = self.mesh_ws.open() {
                         self.status = e;
                     }
-                if ui.button("Save").on_hover_text("Ctrl+S. Saves the mesh graph, refreshes the embedded copy of every noise graph it uses, and saves the open noise graph too if it is one of them.").clicked() {
+                if crate::icons::button(ui, "save", "Save", None, true).on_hover_text("Save (Ctrl+S). Saves the mesh graph, refreshes the embedded copy of every noise graph it uses, and saves the open noise graph too if it is one of them.").clicked() {
                     self.save_mesh_graph(false);
                 }
-                if ui.button("Save as…").clicked() {
+                if crate::icons::button(ui, "save_as", "Save as…", None, true).on_hover_text("Save as…").clicked() {
                     self.save_mesh_graph(true);
                 }
             });
@@ -909,23 +919,23 @@ impl crate::App {
             ui.separator();
             ui.horizontal(|ui| {
                 let running = self.mesh_ws.running();
-                if ui.add_enabled(!running, egui::Button::new("Run")).on_hover_text("Runs every Remesh, Auto UVs and Bake that feeds an output node and writes the files.").clicked() {
+                if crate::icons::tinted_button(ui, "play", "Run", None, !running, Some(egui::Color32::from_rgb(110, 200, 120))).on_hover_text("Runs every Remesh, Auto UVs and Bake that feeds an output node and writes the files.").clicked() {
                     let (d, q, g) = (self.rs.device.clone(), self.rs.queue.clone(), self.graph_for_run());
                     self.mesh_ws.start(g, d, q, vec![None]);
                 }
-                if ui.add_enabled(!running, egui::Button::new("Preview")).on_hover_text("A quick look at the shape the first Remesh makes (6,000 triangles at most), without UVs or maps: for tuning the noise graphs.").clicked() {
+                if crate::icons::button(ui, "preview", "Preview", None, !running).on_hover_text("A quick look at the shape the first Remesh makes (6,000 triangles at most), without UVs or maps: for tuning the noise graphs.").clicked() {
                     let (d, q, g) = (self.rs.device.clone(), self.rs.queue.clone(), self.graph_for_run());
                     self.mesh_ws.start_preview(g, d, q);
                 }
-                if ui.add_enabled(!running, egui::Button::new("Run on files…")).on_hover_text("Runs the graph once for each mesh file you pick: a Load Mesh node whose path is {batch} reads that file, and {name} in an output name becomes its name.").clicked()
+                if crate::icons::tinted_button(ui, "run_files", "Run on files…", None, !running, Some(egui::Color32::from_rgb(110, 200, 120))).on_hover_text("Runs the graph once for each mesh file you pick: a Load Mesh node whose path is {batch} reads that file, and {name} in an output name becomes its name.").clicked()
                     && let Some(files) = rfd::FileDialog::new().add_filter("Mesh", &["obj", "ply", "stl", "gltf", "glb", "fbx", "sdf"]).pick_files() {
                         let (d, q, g) = (self.rs.device.clone(), self.rs.queue.clone(), self.graph_for_run());
                         self.mesh_ws.start(g, d, q, files.into_iter().map(Some).collect());
                     }
-                if ui.button("UDIM pack…").on_hover_text("After a batch: packs many meshes and their maps into one UDIM tileset with one combined mesh.").clicked() {
+                if crate::icons::button(ui, "udim", "UDIM pack…", None, true).on_hover_text("After a batch: packs many meshes and their maps into one UDIM tileset with one combined mesh.").clicked() {
                     self.mesh_ws.udim.open = true;
                 }
-                if ui.add_enabled(running, egui::Button::new("Cancel")).on_hover_text("Stops the run before its next node (a node that is already working finishes first).").clicked() {
+                if crate::icons::tinted_button(ui, "stop", "Cancel", None, running, Some(egui::Color32::from_rgb(230, 110, 100))).on_hover_text("Stops the run before its next node (a node that is already working finishes first).").clicked() {
                     crate::meshgraph::CANCEL.store(true, std::sync::atomic::Ordering::Relaxed);
                 }
                 ui.add(egui::DragValue::new(&mut self.mesh_ws.seed).prefix("seed "));

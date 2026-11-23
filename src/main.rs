@@ -1211,10 +1211,10 @@ impl eframe::App for App {
                     self.composer.menus(ui);
                 } else {
                 ui.menu_button("File", |ui| {
-                    if ui.add(egui::Button::new("New").shortcut_text("Ctrl+N")).clicked() {
+                    if icons::menu_item(ui, "new", "New", "Ctrl+N").clicked() {
                         self.request(Pending::New);
                     }
-                    ui.menu_button("New from template", |ui| {
+                    icons::submenu(ui, "template", "New from template", |ui| {
                         for name in Graph::TEMPLATES {
                             if ui.button(name).clicked() {
                                 self.request(Pending::Template(name));
@@ -1222,11 +1222,11 @@ impl eframe::App for App {
                             }
                         }
                     });
-                    if ui.add(egui::Button::new("Open…").shortcut_text("Ctrl+O")).clicked() {
+                    if icons::menu_item(ui, "open", "Open…", "Ctrl+O").clicked() {
                         self.open();
                     }
                     ui.add_enabled_ui(!self.recent.is_empty(), |ui| {
-                        ui.menu_button("Open recent", |ui| {
+                        icons::submenu(ui, "recent", "Open recent", |ui| {
                             let mut pick = None;
                             for p in &self.recent {
                                 let name = p.file_name().map_or_else(|| p.display().to_string(), |n| n.to_string_lossy().into_owned());
@@ -1240,31 +1240,31 @@ impl eframe::App for App {
                             }
                         });
                     });
-                    if ui.add(egui::Button::new("Save").shortcut_text("Ctrl+S")).clicked() {
+                    if icons::menu_item(ui, "save", "Save", "Ctrl+S").clicked() {
                         self.save(false);
                     }
-                    if ui.add(egui::Button::new("Save As…").shortcut_text("Ctrl+Shift+S")).clicked() {
+                    if icons::menu_item(ui, "save_as", "Save As…", "Ctrl+Shift+S").clicked() {
                         self.save(true);
                     }
                     ui.separator();
-                    if ui.button("Import mesh (OBJ)…").clicked()
+                    if icons::menu_item(ui, "import_mesh", "Import mesh (OBJ)…", "").clicked()
                         && let Some(p) = rfd::FileDialog::new().add_filter("Mesh (OBJ, PLY, STL, glTF, FBX, SDF)", &["obj", "ply", "stl", "gltf", "glb", "fbx", "sdf"]).pick_file() {
                             self.start_mesh_load(p);
                         }
-                    if ui.add_enabled(self.mesh.is_some(), egui::Button::new("Export displaced mesh…")).clicked() {
+                    if icons::menu_item_enabled(ui, "export", "Export displaced mesh…", "", self.mesh.is_some()).clicked() {
                         self.mesh_export_open = true;
                     }
-                    if ui.button("Batch displace meshes…").clicked() {
+                    if icons::menu_item(ui, "batch", "Batch displace meshes…", "").clicked() {
                         self.batch_open = true;
                     }
                     ui.separator();
-                    if ui.button("Export…").clicked() {
+                    if icons::menu_item(ui, "export", "Export…", "").clicked() {
                         self.export_open = true;
                     }
-                    if ui.add_enabled(self.export_job.is_none(), egui::Button::new("Export Math Function (.noiser)…")).clicked() {
+                    if icons::menu_item_enabled(ui, "function", "Export Math Function (.noiser)…", "", self.export_job.is_none()).clicked() {
                         self.export_function();
                     }
-                    if ui.button("Export shader code (HLSL, GLSL, WGSL)…").clicked() {
+                    if icons::menu_item(ui, "code", "Export shader code (HLSL, GLSL, WGSL)…", "").clicked() {
                         let name = self.path.as_ref().and_then(|p| p.file_stem()).map_or("noise".into(), |n| n.to_string_lossy().into_owned());
                         if let Some(path) = rfd::FileDialog::new().add_filter("HLSL", &["hlsl"]).add_filter("GLSL", &["glsl"]).add_filter("WGSL", &["wgsl"]).set_file_name(format!("{name}.hlsl")).save_file() {
                             self.status = match path.extension().and_then(|e| e.to_str()).and_then(shaderexport::Lang::from_extension) {
@@ -1278,33 +1278,33 @@ impl eframe::App for App {
                     }
                 });
                 ui.menu_button("Edit", |ui| {
-                    if ui.add_enabled(self.history.can_undo(), egui::Button::new("Undo").shortcut_text("Ctrl+Z")).clicked() {
+                    if icons::menu_item_enabled(ui, "undo", "Undo", "Ctrl+Z", self.history.can_undo()).clicked() {
                         self.undo(false);
                     }
-                    if ui.add_enabled(self.history.can_redo(), egui::Button::new("Redo").shortcut_text("Ctrl+Y")).clicked() {
+                    if icons::menu_item_enabled(ui, "redo", "Redo", "Ctrl+Y", self.history.can_redo()).clicked() {
                         self.undo(true);
                     }
                     ui.separator();
-                    if ui.button("Arrange nodes").on_hover_text("Lay the graph out in columns, inputs on the left").clicked() {
+                    if icons::menu_item(ui, "arrange", "Arrange nodes", "").on_hover_text("Lay the graph out in columns, inputs on the left").clicked() {
                         editor::arrange(&mut self.graph);
                         self.editor.frame_next = true;
                     }
-                    if ui.button("Exposed parameters…").clicked() {
+                    if icons::menu_item(ui, "tune", "Exposed parameters…", "").clicked() {
                         self.exposed_open = true;
                         ui.close();
                     }
-                    if ui.button("Preferences…").clicked() {
+                    if icons::menu_item(ui, "settings", "Preferences…", "").clicked() {
                         self.prefs_open = true;
                         ui.close();
                     }
                 });
                 }
                 ui.menu_button("Help", |ui| {
-                    if ui.button("Keyboard shortcuts").clicked() {
+                    if icons::menu_item(ui, "keyboard", "Keyboard shortcuts", "").clicked() {
                         self.shortcuts_open = true;
                         ui.close();
                     }
-                    if ui.button("About Noiser").clicked() {
+                    if icons::menu_item(ui, "info", "About Noiser", "").clicked() {
                         self.about_open = true;
                         ui.close();
                     }
@@ -1372,7 +1372,9 @@ impl eframe::App for App {
             });
             ui.horizontal_wrapped(|ui| {
                 for (tab, name) in SideTab::ALL {
-                    ui.selectable_value(&mut self.side_tab, tab, name);
+                    if icons::text_tab(ui, tab.icon(), name, self.side_tab == tab).clicked() {
+                        self.side_tab = tab;
+                    }
                 }
             });
             ui.separator();

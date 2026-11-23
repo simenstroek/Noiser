@@ -477,34 +477,34 @@ impl Composer {
 
     pub fn menus(&mut self, ui: &mut egui::Ui) {
         ui.menu_button("File", |ui| {
-            if ui.add(egui::Button::new("New").shortcut_text("Ctrl+N")).clicked() {
+            if crate::icons::menu_item(ui, "new", "New", "Ctrl+N").clicked() {
                 self.request(Pending::New);
                 ui.close();
             }
-            if ui.add(egui::Button::new("Open…").shortcut_text("Ctrl+O")).clicked() {
+            if crate::icons::menu_item(ui, "open", "Open…", "Ctrl+O").clicked() {
                 self.request(Pending::Open);
                 ui.close();
             }
-            if ui.add(egui::Button::new("Save").shortcut_text("Ctrl+S")).clicked() {
+            if crate::icons::menu_item(ui, "save", "Save", "Ctrl+S").clicked() {
                 self.save(false);
                 ui.close();
             }
-            if ui.add(egui::Button::new("Save as…").shortcut_text("Ctrl+Shift+S")).clicked() {
+            if crate::icons::menu_item(ui, "save_as", "Save as…", "Ctrl+Shift+S").clicked() {
                 self.save(true);
                 ui.close();
             }
             ui.separator();
-            if ui.add_enabled(self.export_job.is_none(), egui::Button::new("Export mesh…")).clicked() {
+            if crate::icons::menu_item_enabled(ui, "export", "Export mesh…", "", self.export_job.is_none()).clicked() {
                 self.export_mesh();
                 ui.close();
             }
         });
         ui.menu_button("Edit", |ui| {
-            if ui.add_enabled(!self.undo.is_empty(), egui::Button::new("Undo").shortcut_text("Ctrl+Z")).clicked() {
+            if crate::icons::menu_item_enabled(ui, "undo", "Undo", "Ctrl+Z", !self.undo.is_empty()).clicked() {
                 self.undo();
                 ui.close();
             }
-            if ui.add_enabled(!self.redo.is_empty(), egui::Button::new("Redo").shortcut_text("Ctrl+Y")).clicked() {
+            if crate::icons::menu_item_enabled(ui, "redo", "Redo", "Ctrl+Y", !self.redo.is_empty()).clicked() {
                 self.redo();
                 ui.close();
             }

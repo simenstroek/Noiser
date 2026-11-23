@@ -192,7 +192,7 @@ pub fn show(prefs: &mut Prefs, tab: &mut PrefsTab, ui: &mut egui::Ui, shortcuts:
             });
             let steps = ui.add(egui::Slider::new(&mut prefs.max_steps, 32..=600).logarithmic(true).text("Starting max march steps"));
             steps.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Slider, true, "Starting max march steps"));
-            ui.weak("These are the values the preview starts from and returns to; they also apply to the open preview when changed here.");
+            ui.weak("These are the values the preview starts from; changing them here also changes the open preview.");
             heading(ui, "SDF files");
             let resolution = ui.add(egui::Slider::new(&mut prefs.sdf_mesh_resolution, 32..=400).text("Mesh resolution"));
             resolution.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Slider, true, "Mesh resolution"));
