@@ -26,6 +26,8 @@ fn path_row(ui: &mut egui::Ui, id: &str, path: &mut String, hint: &str, filter: 
             let mut dialog = rfd::FileDialog::new();
             if let Some(dir) = start.filter(|d| d.is_dir()) {
                 dialog = dialog.set_directory(dir);
+            } else if filter.is_none() {
+                dialog = crate::library::dialog(crate::library::Kind::Bake, dialog);
             }
             let picked = match filter {
                 Some((name, extensions)) => dialog.add_filter(name, extensions).pick_file(),
@@ -194,7 +196,7 @@ pub fn props(ui: &mut egui::Ui, kind: &mut NodeKind) -> bool {
                     (o.ply, o.glb) = (ply, glb);
                 });
             }
-            path_row(ui, "output folder", &mut o.folder, "folder (empty: next to the graph)", None);
+            path_row(ui, "output folder", &mut o.folder, "folder (empty: library Bakes, else next to the graph)", None);
             ui.horizontal(|ui| {
                 ui.label("name");
                 ui.add(egui::TextEdit::singleline(&mut o.name).desired_width(140.0));

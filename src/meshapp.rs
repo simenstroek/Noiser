@@ -452,7 +452,7 @@ impl App {
             });
             ui.horizontal(|ui| {
                 if ui.button("Output folder…").clicked()
-                    && let Some(dir) = rfd::FileDialog::new().pick_folder() {
+                    && let Some(dir) = crate::library::dialog(crate::library::Kind::Bake, rfd::FileDialog::new()).pick_folder() {
                         self.batch_dir = Some(dir);
                     }
                 match &self.batch_dir {

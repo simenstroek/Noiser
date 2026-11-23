@@ -581,7 +581,7 @@ impl App {
         s.axis = self.pv.slice_axis;
         s.pos = self.pv.slice_pos;
         let name = self.path.as_ref().and_then(|p| p.file_stem()).map_or("noise".into(), |n| n.to_string_lossy().into_owned());
-        let Some(path) = rfd::FileDialog::new().add_filter("Export", &[s.extension()]).set_file_name(format!("{name}.{}", s.extension())).save_file() else { return };
+        let Some(path) = library::dialog(library::Kind::Bake, rfd::FileDialog::new().add_filter("Export", &[s.extension()]).set_file_name(format!("{name}.{}", s.extension()))).save_file() else { return };
         // Export always evaluates the full graph: no preview, no caches. Compiling happens on the
         // worker thread too, since the driver can take seconds.
         let graph = self.graph.clone();

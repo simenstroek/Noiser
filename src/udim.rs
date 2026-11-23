@@ -223,13 +223,13 @@ impl Tool {
             ui.horizontal(|ui| {
                 ui.label("folder");
                 ui.add(egui::TextEdit::singleline(&mut self.folder).desired_width(260.0));
-                if ui.button("Browse…").clicked() && let Some(d) = rfd::FileDialog::new().pick_folder() {
+                if ui.button("Browse…").clicked() && let Some(d) = crate::library::dialog(crate::library::Kind::Udim, rfd::FileDialog::new()).pick_folder() {
                     self.folder = d.display().to_string();
                 }
             });
             if ui.button("Select meshes…").clicked() && let Some(files) = rfd::FileDialog::new().add_filter("Mesh", &["obj", "ply", "gltf", "glb"]).pick_files() {
                 if self.folder.is_empty() && let Some(dir) = files.first().and_then(|f| f.parent()) {
-                    self.folder = dir.join("UDIM").display().to_string();
+                    self.folder = crate::library::dir(crate::library::Kind::Udim).filter(|d| d.is_dir()).unwrap_or_else(|| dir.join("UDIM")).display().to_string();
                 }
                 self.files = files;
                 self.files.sort();

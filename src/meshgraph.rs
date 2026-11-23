@@ -310,7 +310,12 @@ impl Runner<'_> {
     }
 
     fn output_path(&self, o: &OutParams, suffix: &str, ext: &str) -> PathBuf {
-        let dir = if o.folder.is_empty() { self.base.clone() } else { self.resolve(&o.folder) };
+        let dir = if !o.folder.is_empty() {
+            self.resolve(&o.folder)
+        } else {
+            // Nothing chosen: the library's Bakes folder when there is one, else next to the graph.
+            crate::library::dir(crate::library::Kind::Bake).filter(|d| d.is_dir()).unwrap_or_else(|| self.base.clone())
+        };
         let _ = std::fs::create_dir_all(&dir);
         let stem = self.batch_file.as_ref().and_then(|f| f.file_stem()).map_or(String::new(), |s| s.to_string_lossy().into_owned());
         let name = format!("{}{suffix}", o.name.replace("{name}", &stem));
