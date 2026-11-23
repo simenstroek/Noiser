@@ -15,6 +15,12 @@ stays a function, and exports sample it at whatever resolution you ask for.
 ![Clouds in cloud mode](docs/screenshots/clouds-cloud.png)
 ![Coral graph displacing a monkey mesh](docs/screenshots/coral-monkey.png)
 
+The three tabs: the **SDF Composer** (build and edit shapes, with the library drawer along the bottom), the **Noise graph** (a Warped cells graph, with its 3D view and slice) and the **Mesh graph** (a rocket from the Composer roughened by a noise graph, shown as the ray-marched field and as the remeshed result).
+
+![The SDF Composer with the move gizmo on a fin, and the library drawer](docs/screenshots/composer.png)
+![The Noise graph tab with a Warped cells graph](docs/screenshots/noise-graph.png)
+![The Mesh graph tab: an SDF shape plus a noise graph, remeshed](docs/screenshots/mesh-graph.png)
+
 > **Status: early and moving fast.** Windows only for now (a Vulkan or DX12 GPU is required).
 > Releases are builds of whatever state the project is in at the time; see
 > [Releases](../../releases) and the notes there.
@@ -22,7 +28,7 @@ stays a function, and exports sample it at whatever resolution you ask for.
 ## Running it
 
 Download `noiser-windows-x64.zip` from the latest release, unzip it and run `noiser.exe`. To open a
-graph straight away: `noiser.exe SimpleTestGraph.noisegraph` (an example is in the zip).
+graph straight away: `noiser.exe SimpleTestGraph.noisegraph` (an example is in the zip). The `examples` folder in the repository has a few shapes for the SDF Composer (`Rocket.sdf`, `Pawn.sdf`, `Gear.sdf`) and a noise graph (`Cells.noisegraph`).
 
 To build from source you need a recent stable Rust toolchain:
 
@@ -127,6 +133,8 @@ The preview has material settings (colour, specular, roughness, soft shadows), l
 quarter) and a march step limit; none of them affect exports.
 
 **Library.** Set a library folder under Preferences > File paths (the Create the folders button makes `SDFs`, `Noises`, `Mesh Graphs`, `Bakes` and `UDIM Packs` in it). Open and Save dialogs then start in the matching folder, and bake, export and UDIM pack output defaults to `Bakes` and `UDIM Packs` (exporters can still be pointed elsewhere). A file saved into the library gets a small picture of the active view next to it (`name.sdf.png`), so the files themselves stay light. Press Tab (changeable in Preferences > Keybinds) in any tab for the library drawer: drag an SDF into the Composer to add it to the composition, onto the Noise graph view to use it as the mesh, or into the Mesh graph to make a node from it; double-click a card to open it.
+
+![Preferences, File paths tab](docs/screenshots/preferences.png)
 **Preferences** have tabs for General, Keybinds, Performance (starting preview resolution and march steps, the resolution of `.sdf` meshes, the Composer's export samples), File paths and Style (scale, theme, accent colour).
 
 ## Controls
@@ -138,6 +146,8 @@ quarter) and a march step limit; none of them affect exports.
 | | Delete removes the selection, Ctrl+D duplicates it at the cursor, Ctrl+C / Ctrl+V copy and paste, M mutes, F / Home frame, Ctrl+A selects all; drop a lone node on a wire to splice it in; Ctrl+S / Ctrl+O save and open |
 | 3D view | Drag orbits, scroll zooms |
 | Slice view | Scroll moves the slice; hovering shows the value under the pointer |
+| SDF Composer | Drag orbits, Shift-drag or right-drag pans, scroll zooms; W / E / R pick the move, rotate and scale gizmo (the squares on the move gizmo move along two axes); Alt-drag a handle to drag a copy; F frames everything, C the selection; Ctrl+D duplicates, Ctrl+G groups |
+| Library | Tab (changeable) opens the drawer; drag a card into the view; double-click opens it |
 
 ## Project docs
 
@@ -148,5 +158,5 @@ quarter) and a march step limit; none of them affect exports.
 
 ## Roadmap
 
-Ideas: exposed graph parameters for batch work, shader-code export of the density
-function. See `PLAN.md` for the details.
+Ideas: splines in the SDF Composer (files that use them show those parts missing), the colours of `.sdf` files in the viewport, more pattern nodes, Linux and macOS builds.
+See `PLAN.md` for the details.
