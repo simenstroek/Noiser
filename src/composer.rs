@@ -471,6 +471,15 @@ impl Composer {
     }
 
     /// The File and Edit menus of the app's menu bar, while this tab is showing.
+    pub fn is_modified(&self) -> bool {
+        self.modified
+    }
+
+    /// Saves to the file it was opened from or saved to last (a dialog when it has none).
+    pub fn save_current(&mut self) {
+        self.save(false);
+    }
+
     pub fn set_export_samples(&mut self, samples: usize) {
         self.export_samples = samples.clamp(48, 640);
     }

@@ -1098,7 +1098,8 @@ impl eframe::App for App {
             self.title = title;
         }
         // Closing with unsaved changes asks first.
-        if ctx.input(|i| i.viewport().close_requested()) && dirty && !self.close_ok {
+        let any_dirty = dirty || self.composer.is_modified() || self.mesh_ws.dirty();
+        if ctx.input(|i| i.viewport().close_requested()) && any_dirty && !self.close_ok {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             self.close_prompt = true;
         }
@@ -1124,27 +1125,51 @@ impl eframe::App for App {
             });
         }
         if self.close_prompt {
+            let mut quit = false;
             egui::Window::new("Unsaved changes").collapsible(false).resizable(false).anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0]).show(&ctx, |ui| {
-                ui.label("The graph has changes that are not saved.");
-                ui.horizontal(|ui| {
-                    if ui.button("Save").clicked() {
-                        self.save(false);
-                        if self.graph == self.saved {
-                            self.close_ok = true;
-                            self.close_prompt = false;
-                            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                ui.label("These tabs have changes that are not saved:");
+                if self.graph != self.saved {
+                    ui.horizontal(|ui| {
+                        ui.label("Noise graph");
+                        if icons::button(ui, "save", "Save the noise graph", None, true).on_hover_text("Save the noise graph").clicked() {
+                            self.save(false);
                         }
-                    }
-                    if ui.button("Discard").clicked() {
-                        self.close_ok = true;
-                        self.close_prompt = false;
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    });
+                }
+                if self.composer.is_modified() {
+                    ui.horizontal(|ui| {
+                        ui.label("SDF Composer");
+                        if icons::button(ui, "save", "Save the composition", None, true).on_hover_text("Save the composition").clicked() {
+                            self.composer.save_current();
+                        }
+                    });
+                }
+                if self.mesh_ws.dirty() {
+                    ui.horizontal(|ui| {
+                        ui.label("Mesh graph");
+                        if icons::button(ui, "save", "Save the mesh graph", None, true).on_hover_text("Save the mesh graph").clicked() {
+                            self.save_mesh_graph(false);
+                        }
+                    });
+                }
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if ui.button("Quit without saving").clicked() {
+                        quit = true;
                     }
                     if ui.button("Cancel").clicked() {
                         self.close_prompt = false;
                     }
                 });
             });
+            if !(self.graph != self.saved || self.composer.is_modified() || self.mesh_ws.dirty()) {
+                quit = true;
+            }
+            if quit {
+                self.close_ok = true;
+                self.close_prompt = false;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
         }
         egui::Window::new("Exposed parameters").open(&mut self.exposed_open).collapsible(false).show(&ctx, |ui| {
             ui.weak("Name a node setting so a script can set it: noiser-batch.cmd graph.noisegraph --param name=value. The field is the setting's name in the .noisegraph file (scale, octaves, jitter, weight, value for a Value node...).");

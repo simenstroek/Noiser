@@ -720,7 +720,7 @@ impl crate::App {
 
     /// Saves the mesh graph. A noise graph that is open and changed in the Noise graph tab, and that this mesh graph
     /// uses, is saved first, so the copy embedded in the mesh graph is the one just edited.
-    fn save_mesh_graph(&mut self, ask: bool) {
+    pub(crate) fn save_mesh_graph(&mut self, ask: bool) {
         let uses_open = self.path.as_ref().is_some_and(|open| {
             let base = self.mesh_ws.base();
             let same = |a: &std::path::Path, b: &std::path::Path| a == b || matches!((std::fs::canonicalize(a), std::fs::canonicalize(b)), (Ok(x), Ok(y)) if x == y);
