@@ -30,6 +30,7 @@ mod shaderexport;
 mod surface;
 mod noiser_file;
 mod props;
+mod sdf_file;
 #[cfg(test)]
 mod gpu_tests;
 mod vdb;
