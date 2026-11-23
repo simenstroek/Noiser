@@ -927,9 +927,13 @@ impl eframe::App for App {
         }
         // Window title: the file and an asterisk for unsaved changes.
         let dirty = self.graph != self.saved;
-        let title = match (&self.path, dirty) {
-            (None, false) => "Noiser".to_string(),
-            (p, d) => format!("Noiser - {}{}", p.as_ref().and_then(|p| p.file_name()).map_or("untitled".into(), |n| n.to_string_lossy()), if d { " *" } else { "" }),
+        let title = if self.workspace == meshworkspace::Workspace::Composer {
+            format!("Noiser - {}", self.composer.title())
+        } else {
+            match (&self.path, dirty) {
+                (None, false) => "Noiser".to_string(),
+                (p, d) => format!("Noiser - {}{}", p.as_ref().and_then(|p| p.file_name()).map_or("untitled".into(), |n| n.to_string_lossy()), if d { " *" } else { "" }),
+            }
         };
         if title != self.title {
             ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));

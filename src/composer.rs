@@ -400,6 +400,22 @@ impl Composer {
         }
     }
 
+    /// The file name and an asterisk for unsaved changes, for the window title.
+    pub fn title(&self) -> String {
+        let name = self.path.as_ref().and_then(|p| p.file_name()).map_or("untitled".to_string(), |n| n.to_string_lossy().into_owned());
+        format!("{name}{}", if self.modified { " *" } else { "" })
+    }
+
+    /// Frames the selected node: its place in the view and a distance that shows it whole.
+    fn frame_selection(&mut self, rect: egui::Rect) {
+        let Some(g) = self.gizmo_geometry(rect) else { return };
+        let Some(path) = self.selection.clone() else { return };
+        let Some(node) = node_at(self.shapes(), &path) else { return };
+        let size = if node.kind == "group" { 1.0 } else { node.scale[0].max(node.scale[1]).max(node.scale[2]) };
+        let reach = (size * 0.75 * g.parent.s).max(0.05);
+        self.camera = self.camera.framing([g.origin[0] - reach, g.origin[1] - reach, g.origin[2] - reach], [g.origin[0] + reach, g.origin[1] + reach, g.origin[2] + reach]);
+    }
+
     /// Writes the visible layers as an OBJ or PLY mesh (Z up, like SDF Modeler's exports), on a worker thread.
     fn export_mesh(&mut self) {
         if self.export_job.is_some() {
@@ -1123,8 +1139,10 @@ impl Composer {
                     } else {
                         ui.add_space(20.0);
                     }
-                    let eye = if row.hidden { "  " } else { "o" };
-                    if ui.small_button(eye).on_hover_text("Show or hide").clicked() {
+                    let mut visible = !row.hidden;
+                    let toggle = ui.add(egui::Checkbox::without_text(&mut visible));
+                    toggle.widget_info(|| egui::WidgetInfo::selected(egui::accesskit::Role::CheckBox, true, visible, format!("Visible: {}", row.label)));
+                    if toggle.on_hover_text("Show or hide").changed() {
                         actions.push(Action::ToggleHidden(row.path.clone()));
                     }
                     let selected = self.selection.as_ref() == Some(&row.path);
@@ -1290,6 +1308,13 @@ impl Composer {
             painter.text(rect.center(), egui::Align2::CENTER_CENTER, "Add a shape from the hierarchy panel", egui::FontId::proportional(15.0), egui::Color32::from_gray(150));
         }
         self.draw_orientation(&painter, rect);
+        painter.text(
+            rect.right_bottom() + egui::vec2(-10.0, -8.0),
+            egui::Align2::RIGHT_BOTTOM,
+            "drag: orbit  ·  shift-drag / right-drag: pan  ·  wheel: zoom  ·  F: frame all  ·  C: frame selection  ·  W E R: tools",
+            egui::FontId::proportional(11.0),
+            egui::Color32::from_gray(120),
+        );
         let active = self.drag.as_ref().map(|d| d.axis);
         if let Some(g) = geometry {
             self.draw_gizmo(&painter, rect, &g, hovered_axis.or(active));
@@ -1499,6 +1524,10 @@ impl Composer {
             }
             if frame {
                 self.frame_pending = true;
+            }
+            if ctx.input(|i| i.key_pressed(egui::Key::C) && !i.modifiers.command) {
+                let rect = self.last_view;
+                self.frame_selection(rect);
             }
         }
         let (save, open) = ctx.input(|i| (i.modifiers.command && i.key_pressed(egui::Key::S), i.modifiers.command && i.key_pressed(egui::Key::O)));
@@ -2100,5 +2129,33 @@ mod ui_tests {
         h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::D);
         h.run();
         assert_eq!(h.state().shapes().len(), 2);
+    }
+
+    #[test]
+    fn the_visibility_checkbox_hides_a_shape_and_c_frames_the_selection() {
+        let mut h = harness();
+        h.run();
+        click(&mut h, "Cube");
+        click(&mut h, "Sphere");
+        assert!(!h.state().shapes()[0].hidden);
+        click(&mut h, "Visible: Cube");
+        assert!(h.state().shapes()[0].hidden, "the cube is hidden");
+        assert!(!h.state().shapes()[1].hidden);
+        // Move the sphere away, then C brings the camera to it.
+        h.state_mut().shapes_mut().unwrap()[1].position = [30.0, 0.0, 0.0];
+        h.state_mut().touch();
+        h.run();
+        h.key_press(egui::Key::C);
+        h.run();
+        let target = h.state().camera.target;
+        assert!((target[0] - 30.0).abs() < 1e-6, "the camera looks at the sphere: {target:?}");
+    }
+
+    #[test]
+    fn the_window_title_follows_the_composition() {
+        let mut c = Composer::default();
+        assert_eq!(c.title(), "untitled");
+        c.add_node(new_shape("cube"));
+        assert_eq!(c.title(), "untitled *");
     }
 }
