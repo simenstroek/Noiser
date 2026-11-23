@@ -4,7 +4,7 @@
 use crate::composer_gpu::{Uniforms, ViewCallback};
 use crate::composer_render::{Camera, pick};
 use crate::sdf_file::{Assembly, Layer, Node, SdfFile};
-use crate::sdf_model::{GpuScene, LayerField, M3, V3, euler_matrix, into_frame};
+use crate::sdf_model::{GpuScene, LayerField, M3, V3, euler_matrix, file_scene, into_frame, layer_fields};
 use eframe::{egui, egui_wgpu, wgpu};
 use serde_json::{Map, Value};
 use std::collections::HashSet;
@@ -268,8 +268,8 @@ pub struct Composer {
     camera: Camera,
     tool: Tool,
     space: Space,
-    field: Option<Arc<LayerField>>,
-    scene_cache: Option<((u64, Option<Vec<usize>>), Arc<GpuScene>)>,
+    fields: Option<Arc<Vec<LayerField>>>,
+    scene_cache: Option<((u64, Option<Vec<usize>>, usize), Arc<GpuScene>)>,
     scene_serial: u64,
     frame_pending: bool,
     drag: Option<Drag>,
@@ -294,7 +294,7 @@ impl Default for Composer {
             camera: Camera::default(),
             tool: Tool::Move,
             space: Space::Local,
-            field: None,
+            fields: None,
             scene_cache: None,
             scene_serial: 0,
             frame_pending: true,
@@ -323,7 +323,7 @@ impl Composer {
         self.changed = true;
         self.modified = true;
         self.version += 1;
-        self.field = None;
+        self.fields = None;
     }
 
     fn replace_document(&mut self, file: SdfFile, path: Option<PathBuf>) {
@@ -338,7 +338,7 @@ impl Composer {
         self.modified = false;
         self.changed = false;
         self.version += 1;
-        self.field = None;
+        self.fields = None;
         self.frame_pending = true;
     }
 
@@ -418,7 +418,7 @@ impl Composer {
         self.layer = self.layer.min(self.file.layers.len().saturating_sub(1));
         self.modified = true;
         self.version += 1;
-        self.field = None;
+        self.fields = None;
         if self.selection.as_ref().is_some_and(|path| node_at(self.shapes(), path).is_none()) {
             self.selection = None;
         }
@@ -608,31 +608,34 @@ impl Composer {
 
     // ---- derived data ----
 
-    fn field(&mut self) -> Arc<LayerField> {
-        if self.field.is_none() {
-            let built = LayerField::for_assembly(&self.file, self.assembly_index()).unwrap_or_else(|| LayerField::for_assembly(&blank_file(), 0).unwrap());
-            self.field = Some(Arc::new(built));
+    fn fields(&mut self) -> Arc<Vec<LayerField>> {
+        if self.fields.is_none() {
+            self.fields = Some(Arc::new(layer_fields(&self.file)));
         }
-        self.field.clone().unwrap()
+        self.fields.clone().unwrap()
     }
 
     /// The shape tree flattened for the GPU, rebuilt when the document or the selection changed.
     fn scene(&mut self) -> Arc<GpuScene> {
-        let key = (self.version, self.selection.clone());
+        let key = (self.version, self.selection.clone(), self.layer);
         if let Some((cached, scene)) = &self.scene_cache
             && *cached == key
         {
             return scene.clone();
         }
-        let field = self.field();
-        let scene = Arc::new(field.gpu_scene(self.selection.as_deref()));
+        let fields = self.fields();
+        let scene = Arc::new(file_scene(&fields, self.selection.as_deref().map(|path| (self.layer, path))));
         self.scene_serial += 1;
         self.scene_cache = Some((key, scene.clone()));
         scene
     }
 
     fn parent_frame(&self, path: &[usize]) -> Xf {
-        let mut frame = Xf { t: [0.0; 3], r: IDENTITY, s: 1.0 };
+        // The layer's own placement comes first: the scene is drawn in the file's coordinates.
+        let mut frame = match self.file.layers.get(self.layer) {
+            Some(layer) => Xf { t: layer.position, r: euler_matrix(layer.rotation), s: if layer.scale[0] == 0.0 { 1.0 } else { layer.scale[0] } },
+            None => Xf { t: [0.0; 3], r: IDENTITY, s: 1.0 },
+        };
         let mut nodes = self.shapes();
         for &index in &path[..path.len().saturating_sub(1)] {
             let Some(node) = nodes.get(index) else { break };
@@ -894,12 +897,23 @@ impl Composer {
                 for (i, name) in names.iter().enumerate() {
                     if ui.selectable_value(&mut self.layer, i, name).clicked() {
                         self.selection = None;
-                        self.field = None;
+                        self.fields = None;
                         self.version += 1;
                         self.frame_pending = true;
                     }
                 }
             });
+            let mut toggled = false;
+            if let Some(layer) = self.file.layers.get_mut(self.layer) {
+                let mut visible = !layer.hidden;
+                if ui.checkbox(&mut visible, "").on_hover_text("Show this layer").changed() {
+                    layer.hidden = !visible;
+                    toggled = true;
+                }
+            }
+            if toggled {
+                self.touch();
+            }
             if ui.button("+").on_hover_text("Add a layer").clicked() {
                 self.add_layer();
             }
@@ -1094,8 +1108,14 @@ impl Composer {
         {
             let local = p - rect.min;
             let ndc = [2.0 * local.x as f64 / size.x as f64 - 1.0, 1.0 - 2.0 * local.y as f64 / size.y as f64];
-            let field = self.field();
-            self.selection = pick(&field, &self.camera, ndc, size.x as f64 / size.y as f64);
+            let fields = self.fields();
+            match pick(&fields, &self.camera, ndc, size.x as f64 / size.y as f64) {
+                Some((layer, path)) => {
+                    self.layer = layer.min(self.file.layers.len().saturating_sub(1));
+                    self.selection = Some(path);
+                }
+                None => self.selection = None,
+            }
         }
 
         // Draw: the GPU interprets the flattened tree straight into this rectangle.

@@ -7,6 +7,9 @@ use crate::sdf_model::{GPU_SHAPE_STRIDE, GpuScene};
 use eframe::{egui, egui_wgpu, wgpu};
 use std::sync::Arc;
 
+/// The interpreter's WGSL, shared with the Load SDF node.
+pub const SDF_LIBRARY: &str = include_str!("composer_sdf_lib.wgsl");
+
 pub const MAX_SHAPES: usize = 1024;
 pub const MAX_OPS: usize = 4096;
 /// Points the test entry point can evaluate in one go.
@@ -80,7 +83,8 @@ impl ComposerGpu {
     pub fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> ComposerGpu {
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("composer view"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("composer_view.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(format!("{}
+{}", include_str!("composer_view.wgsl"), SDF_LIBRARY).into()),
         });
         let entry = |binding: u32, ty, visibility| wgpu::BindGroupLayoutEntry {
             binding,
@@ -304,6 +308,53 @@ mod tests {
         }
         eprintln!("compared {compared} points, worst difference {worst}");
         assert!(compared > 0 || sample_files().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod file_tests {
+    use super::*;
+    use crate::sdf_file::SdfFile;
+    use crate::sdf_model::{file_scene, layer_fields};
+
+    /// A whole file (every layer, with its placement, united) on the GPU matches the CPU's union of the layers.
+    #[test]
+    fn a_whole_file_on_the_gpu_matches_the_union_of_its_layers() {
+        let Some(gpu) = crate::gpu_tests::gpu() else {
+            eprintln!("no GPU adapter: skipped");
+            return;
+        };
+        let Ok(home) = std::env::var("USERPROFILE") else { return };
+        let folder = std::path::Path::new(&home).join("Documents").join("SDF Modeler").join("sdfs");
+        let view = ComposerGpu::new(&gpu.device, wgpu::TextureFormat::Rgba8Unorm);
+        let mut compared = 0;
+        for name in ["robot", "mech", "headphones", "bricks", "fried_egg"] {
+            let Ok(file) = SdfFile::load(&folder.join(format!("{name}.sdf"))) else { continue };
+            let fields = layer_fields(&file);
+            let scene = file_scene(&fields, None);
+            let Some((lo, hi)) = scene.bounds else { continue };
+            if !view.upload_for_test(&gpu.queue, &scene, 0) {
+                continue;
+            }
+            let mut state = 0x2545F4914F6CDD1Du64;
+            let mut next = || {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                (state >> 11) as f64 / (1u64 << 53) as f64
+            };
+            let points: Vec<[f32; 3]> = (0..3000).map(|_| [0, 1, 2].map(|k| (lo[k] + (hi[k] - lo[k]) * next()) as f32)).collect();
+            let gpu_d = view.evaluate_points(&gpu.device, &gpu.queue, &scene, &points);
+            for (p, g) in points.iter().zip(gpu_d) {
+                let c = fields.iter().filter(|f| !f.hidden).filter_map(|f| f.distance([p[0] as f64, p[1] as f64, p[2] as f64])).fold(f64::INFINITY, f64::min);
+                if !c.is_finite() || c.abs() > 1.0 {
+                    continue;
+                }
+                assert!((c - g as f64).abs() < 3e-3 + 3e-3 * c.abs(), "{name}: cpu {c} gpu {g} at {p:?}");
+                compared += 1;
+            }
+        }
+        eprintln!("compared {compared} points across whole files");
     }
 }
 

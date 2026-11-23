@@ -906,7 +906,70 @@ fn down_apply(down: &Down, p: V3) -> V3 {
     ]
 }
 
+/// Every visible layer of a file as one scene, each with its placement and the layers combined by union. The shapes
+/// under `selected` (a layer index and a tree path) are marked.
+pub fn file_scene(fields: &[LayerField], selected: Option<(usize, &[usize])>) -> GpuScene {
+    let mut flattener = Flattener { scene: GpuScene::default(), selected: None, added: Vec::new(), everything: Vec::new() };
+    let mut any = false;
+    for (index, field) in fields.iter().enumerate() {
+        if field.hidden {
+            continue;
+        }
+        flattener.selected = selected.filter(|(layer, _)| *layer == index).map(|(_, path)| path);
+        // Entering the layer: `p_local = (Rᵀ (p − position)) ⊘ scale`, and back out: `p = position + R · (scale ⊙ p_local)`.
+        let rt = transpose(&field.rotation);
+        let mut m = [[0.0; 3]; 3];
+        for i in 0..3 {
+            for j in 0..3 {
+                m[i][j] = rt[i][j] / field.scale[i];
+            }
+        }
+        let c = [
+            -(m[0][0] * field.position[0] + m[0][1] * field.position[1] + m[0][2] * field.position[2]),
+            -(m[1][0] * field.position[0] + m[1][1] * field.position[1] + m[1][2] * field.position[2]),
+            -(m[2][0] * field.position[0] + m[2][1] * field.position[1] + m[2][2] * field.position[2]),
+        ];
+        let down = Down { m, c };
+        let up = Up { t: field.position, r: field.rotation, s: field.scale[0] };
+        let before = flattener.scene.ops.len();
+        let emitted = flattener.emit(&field.items, down, up, &mut Vec::new(), false);
+        if emitted && flattener.scene.ops.len() > before {
+            if (field.scale[0].abs() - 1.0).abs() > 1e-9 {
+                flattener.scene.ops.push([3.0, field.scale[0].abs() as f32, 0.0, 0.0]);
+            }
+            if any {
+                flattener.scene.ops.push([1.0, Mode::Add.code(), 0.0, 0.0]);
+            }
+            any = true;
+        }
+    }
+    flattener.finish()
+}
+
+impl Flattener<'_> {
+    fn finish(mut self) -> GpuScene {
+        let spheres = if self.added.is_empty() { &self.everything } else { &self.added };
+        let mut bounds: Option<(V3, V3)> = None;
+        for (center, radius) in spheres {
+            let (lo, hi) = bounds.get_or_insert(([f64::MAX; 3], [f64::MIN; 3]));
+            for axis in 0..3 {
+                lo[axis] = lo[axis].min(center[axis] - radius);
+                hi[axis] = hi[axis].max(center[axis] + radius);
+            }
+        }
+        self.scene.bounds = bounds;
+        self.scene
+    }
+}
+
 impl LayerField {
+    /// The distance of one node alone at `p` in the file's coordinates (this layer's placement applied).
+    pub fn node_distance_in_file(&self, path: &[usize], p: V3) -> Option<f64> {
+        let local = into_frame(&self.rotation, sub(p, self.position));
+        let local = [local[0] / self.scale[0], local[1] / self.scale[1], local[2] / self.scale[2]];
+        self.node_distance(path, local).map(|d| d * self.scale[0].abs())
+    }
+
     /// The tree flattened for the GPU, with the shapes under `selected` marked. The layer's own placement is not
     /// applied: the scene is in the assembly's frame.
     pub fn gpu_scene(&self, selected: Option<&[usize]>) -> GpuScene {

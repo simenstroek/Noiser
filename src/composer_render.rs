@@ -97,11 +97,14 @@ impl Camera {
 
 // ---- ray marching -------------------------------------------------------------------------------------------------
 
-fn march(field: &LayerField, origin: V3, direction: V3, far: f64) -> Option<(f64, V3)> {
+fn march(fields: &[LayerField], origin: V3, direction: V3, far: f64) -> Option<(f64, V3)> {
     let mut t = 0.0;
     for _ in 0..220 {
         let p = add_scaled(origin, direction, t);
-        let d = field.assembly_distance(p)?;
+        let d = fields.iter().filter(|f| !f.hidden).filter_map(|f| f.distance(p)).fold(f64::INFINITY, f64::min);
+        if !d.is_finite() {
+            return None;
+        }
         if d < 0.0004 * (1.0 + t) {
             return Some((t, p));
         }
@@ -113,15 +116,20 @@ fn march(field: &LayerField, origin: V3, direction: V3, far: f64) -> Option<(f64
     None
 }
 
-/// Finds the shape under a point of the view, for picking.
-pub fn pick(field: &LayerField, camera: &Camera, ndc: [f64; 2], aspect: f64) -> Option<Vec<usize>> {
+/// Finds the shape under a point of the view, for picking: its layer and its path in that layer's tree.
+pub fn pick(fields: &[LayerField], camera: &Camera, ndc: [f64; 2], aspect: f64) -> Option<(usize, Vec<usize>)> {
     let (origin, direction) = camera.ray(ndc, aspect);
     let far = camera.distance * 3.0 + 60.0;
-    let (_, p) = march(field, origin, direction, far)?;
-    field
-        .leaf_paths()
-        .into_iter()
-        .filter_map(|path| field.node_distance(&path, p).map(|d| (d.abs(), path)))
-        .min_by(|a, b| a.0.partial_cmp(&b.0).unwrap())
-        .map(|(_, path)| path)
+    let (_, p) = march(fields, origin, direction, far)?;
+    let mut best: Option<(f64, usize, Vec<usize>)> = None;
+    for (layer, field) in fields.iter().enumerate().filter(|(_, f)| !f.hidden) {
+        for path in field.leaf_paths() {
+            if let Some(d) = field.node_distance_in_file(&path, p).map(f64::abs)
+                && best.as_ref().is_none_or(|(b, ..)| d < *b)
+            {
+                best = Some((d, layer, path));
+            }
+        }
+    }
+    best.map(|(_, layer, path)| (layer, path))
 }
