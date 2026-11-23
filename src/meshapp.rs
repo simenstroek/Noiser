@@ -136,7 +136,7 @@ impl App {
         ui.heading("Mesh");
         ui.horizontal(|ui| {
             if ui.button("Import mesh (OBJ)…").clicked()
-                && let Some(p) = rfd::FileDialog::new().add_filter("Mesh (OBJ, PLY, STL, glTF, FBX)", &["obj", "ply", "stl", "gltf", "glb", "fbx"]).pick_file() {
+                && let Some(p) = rfd::FileDialog::new().add_filter("Mesh (OBJ, PLY, STL, glTF, FBX, SDF)", &["obj", "ply", "stl", "gltf", "glb", "fbx", "sdf"]).pick_file() {
                     self.start_mesh_load(p);
                 }
             if ui.button("Batch…").on_hover_text("Shape many meshes with this graph").clicked() {
@@ -422,7 +422,7 @@ impl App {
             ui.label("Shapes every mesh with the same graph and writes a high-resolution mesh for each.");
             ui.horizontal(|ui| {
                 if ui.button("Add meshes (OBJ)…").clicked()
-                    && let Some(files) = rfd::FileDialog::new().add_filter("Mesh (OBJ, PLY, STL, glTF, FBX)", &["obj", "ply", "stl", "gltf", "glb", "fbx"]).pick_files() {
+                    && let Some(files) = rfd::FileDialog::new().add_filter("Mesh (OBJ, PLY, STL, glTF, FBX, SDF)", &["obj", "ply", "stl", "gltf", "glb", "fbx", "sdf"]).pick_files() {
                         for f in files {
                             if !self.batch_files.contains(&f) {
                                 self.batch_files.push(f);

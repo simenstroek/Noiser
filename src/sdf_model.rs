@@ -662,6 +662,27 @@ impl LayerField {
         out
     }
 
+    /// The box around the layer's added shapes in the file's coordinates (the layer's placement applied).
+    pub fn world_bounds(&self) -> Option<(V3, V3)> {
+        let (lo, hi) = self.gpu_scene(None).bounds?;
+        let mut out: Option<(V3, V3)> = None;
+        for corner in 0..8 {
+            let local = [0, 1, 2].map(|a| if corner >> a & 1 == 0 { lo[a] * self.scale[a] } else { hi[a] * self.scale[a] });
+            let r = &self.rotation;
+            let p = [
+                self.position[0] + r[0][0] * local[0] + r[0][1] * local[1] + r[0][2] * local[2],
+                self.position[1] + r[1][0] * local[0] + r[1][1] * local[1] + r[1][2] * local[2],
+                self.position[2] + r[2][0] * local[0] + r[2][1] * local[1] + r[2][2] * local[2],
+            ];
+            let (min, max) = out.get_or_insert((p, p));
+            for a in 0..3 {
+                min[a] = min[a].min(p[a]);
+                max[a] = max[a].max(p[a]);
+            }
+        }
+        out
+    }
+
     /// The distance in the assembly's own frame, without the layer's placement.
     pub fn assembly_distance(&self, p: V3) -> Option<f64> {
         accumulate(&self.items, p)

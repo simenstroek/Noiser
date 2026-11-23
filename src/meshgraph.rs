@@ -22,11 +22,13 @@ pub struct LoadMeshParams {
     /// How many centimetres one unit of the file is (100: the file is in metres). Noise Graph nodes work in metres:
     /// their frequency and amplitude are scaled by this, so the same noise fits a mesh in metres or in centimetres.
     pub unit_cm: f32,
+    /// A Load SDF node: the same node, offering .sdf files.
+    pub sdf: bool,
 }
 
 impl Default for LoadMeshParams {
     fn default() -> Self {
-        LoadMeshParams { path: String::new(), resolution: 128, padding: 0.5, combine: Default::default(), unit_cm: 100.0 }
+        LoadMeshParams { path: String::new(), resolution: 128, padding: 0.5, combine: Default::default(), unit_cm: 100.0, sdf: false }
     }
 }
 

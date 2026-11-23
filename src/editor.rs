@@ -153,7 +153,7 @@ pub fn title(kind: &NodeKind) -> String {
         NodeKind::Noise(n) => n.kind.name().into(),
         NodeKind::OutDensity => "Density Output".into(),
         NodeKind::OutNormal => "Normal Output".into(),
-        NodeKind::LoadMesh(p) => std::path::Path::new(&p.path).file_stem().map_or("Load Mesh".into(), |s| s.to_string_lossy().into_owned()),
+        NodeKind::LoadMesh(p) => std::path::Path::new(&p.path).file_stem().filter(|_| !p.path.is_empty()).map_or(if p.sdf { "Load SDF" } else { "Load Mesh" }.into(), |s| s.to_string_lossy().into_owned()),
         NodeKind::NoiseGraph(p) => std::path::Path::new(&p.file).file_stem().map_or("Noise Graph".into(), |s| s.to_string_lossy().into_owned()),
         NodeKind::Remesh { .. } => "Remesh".into(),
         NodeKind::AutoUv(_) => "Auto UVs".into(),
@@ -263,6 +263,7 @@ fn palette() -> Vec<(&'static str, NodeKind)> {
         all.retain(|(_, k)| !matches!(k, NodeKind::OutDensity | NodeKind::OutNormal));
         all.extend([
             ("Load Mesh", NodeKind::LoadMesh(Default::default())),
+            ("Load SDF", NodeKind::LoadMesh(crate::meshgraph::LoadMeshParams { sdf: true, unit_cm: 1.0, ..Default::default() })),
             ("Noise Graph", NodeKind::NoiseGraph(Default::default())),
             ("Remesh", NodeKind::Remesh { triangles: 20_000, adaptivity: 1.0 }),
             ("Auto UVs", NodeKind::AutoUv(Default::default())),

@@ -43,9 +43,14 @@ pub fn props(ui: &mut egui::Ui, kind: &mut NodeKind) -> bool {
     let image = matches!(kind, NodeKind::OutImage(_));
     match kind {
         NodeKind::LoadMesh(p) => {
-            ui.weak("A mesh file as a field: its signed distance, negative inside, in the units of the file.");
-            ui.weak("A path of {batch} reads the mesh file of a headless batch run (--mesh-graph with --batch-dir).");
-            path_row(ui, "mesh path", &mut p.path, "mesh file or {batch}", Some(("Mesh", &["obj", "ply", "stl", "gltf", "glb", "fbx"])));
+            if p.sdf || p.path.to_lowercase().ends_with(".sdf") {
+                ui.weak("An SDF Modeler composition (made in the SDF Composer tab) as a field: its signed distance, negative inside. It is sampled on a grid and turned into a mesh first, Z up like SDF Modeler's exports, so the file's own detail is limited by the samples below.");
+                path_row(ui, "sdf path", &mut p.path, "a .sdf file", Some(("SDF Modeler file", &["sdf"])));
+            } else {
+                ui.weak("A mesh file as a field: its signed distance, negative inside, in the units of the file.");
+                ui.weak("A path of {batch} reads the mesh file of a headless batch run (--mesh-graph with --batch-dir).");
+                path_row(ui, "mesh path", &mut p.path, "mesh file or {batch}", Some(("Mesh", &["obj", "ply", "stl", "gltf", "glb", "fbx", "sdf"])));
+            }
             let d = crate::meshgraph::LoadMeshParams::default();
             crate::row(ui, &mut p.resolution, d.resolution, |ui, v| _ = ui.add(egui::DragValue::new(v).range(32..=512).suffix(" samples")).on_hover_text("Resolution of the distance grid the mesh is baked into."));
             crate::row(ui, &mut p.padding, d.padding, |ui, v| _ = ui.add(egui::DragValue::new(v).range(0.1..=4.0).speed(0.01).prefix("padding ")).on_hover_text("Room around the mesh in the grid, in units of the mesh's radius: displacement cannot reach past it."));

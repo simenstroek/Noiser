@@ -34,6 +34,7 @@ mod composer;
 mod composer_gpu;
 mod composer_render;
 mod sdf_file;
+mod sdf_mesh;
 mod sdf_model;
 #[cfg(test)]
 mod gpu_tests;
@@ -1090,7 +1091,7 @@ impl eframe::App for App {
                     }
                     ui.separator();
                     if ui.button("Import mesh (OBJ)…").clicked()
-                        && let Some(p) = rfd::FileDialog::new().add_filter("Mesh (OBJ, PLY, STL, glTF, FBX)", &["obj", "ply", "stl", "gltf", "glb", "fbx"]).pick_file() {
+                        && let Some(p) = rfd::FileDialog::new().add_filter("Mesh (OBJ, PLY, STL, glTF, FBX, SDF)", &["obj", "ply", "stl", "gltf", "glb", "fbx", "sdf"]).pick_file() {
                             self.start_mesh_load(p);
                         }
                     if ui.add_enabled(self.mesh.is_some(), egui::Button::new("Export displaced mesh…")).clicked() {
