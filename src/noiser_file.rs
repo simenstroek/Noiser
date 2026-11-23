@@ -70,7 +70,7 @@ pub fn ops(g: &Graph, seed: u32) -> Result<Value, String> {
             let mut op = match &g.nodes[&id].kind {
                 NodeKind::Position { .. } => json!({"op": "position"}), // a scaled one is refused above
                 NodeKind::Radial(_) | NodeKind::Random { .. } => unreachable!("refused above"),
-                NodeKind::LoadMesh(_) | NodeKind::NoiseGraph(_) | NodeKind::Remesh { .. } | NodeKind::AutoUv(_) | NodeKind::Bake(_) | NodeKind::OutMesh(_) | NodeKind::OutImage(_) | NodeKind::ImageSplit | NodeKind::ImageCombine | NodeKind::ImageLevels { .. } | NodeKind::TransferUv => json!({"op": "value", "value": 0.0}), // mesh graph nodes have no .noiser form
+                NodeKind::LoadMesh(_) | NodeKind::LoadSdf(_) | NodeKind::NoiseGraph(_) | NodeKind::Remesh { .. } | NodeKind::AutoUv(_) | NodeKind::Bake(_) | NodeKind::OutMesh(_) | NodeKind::OutImage(_) | NodeKind::ImageSplit | NodeKind::ImageCombine | NodeKind::ImageLevels { .. } | NodeKind::TransferUv => json!({"op": "value", "value": 0.0}), // mesh graph nodes have no .noiser form
                 // A passthrough, written as adding zero.
                 NodeKind::NamedReroute { .. } | NodeKind::NamedRerouteUse { .. } => unreachable!("readers look through named reroutes"),
                 NodeKind::Reroute => json!({"op": "math", "fn": "add", "a": input(id, 0), "b": 0.0}),

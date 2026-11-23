@@ -26,7 +26,7 @@ pub(crate) fn gpu() -> Option<Gpu> {
 }
 
 /// Evaluates the graph's density at each point.
-fn eval(gpu: &Gpu, graph: &Graph, points: &[[f32; 3]]) -> Vec<f32> {
+pub(crate) fn eval(gpu: &Gpu, graph: &Graph, points: &[[f32; 3]]) -> Vec<f32> {
     let c = codegen::compile(graph).unwrap();
     let pts: Vec<[f32; 4]> = points.iter().map(|p| [p[0], p[1], p[2], 0.0]).collect();
     eval_expr(gpu, &c, "graph_density(q.xyz)", &pts)

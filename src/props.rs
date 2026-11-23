@@ -399,6 +399,7 @@ pub(crate) fn node_props(ui: &mut egui::Ui, kind: &mut NodeKind, pins: &mut Vec<
             }
         }
         NodeKind::OutDensity | NodeKind::OutNormal => {}
+        NodeKind::LoadSdf(p) => crate::sdf_node::props(ui, p),
         NodeKind::LoadMesh(_) | NodeKind::NoiseGraph(_) | NodeKind::Remesh { .. } | NodeKind::AutoUv(_) | NodeKind::Bake(_) | NodeKind::OutMesh(_) | NodeKind::OutImage(_) | NodeKind::ImageSplit | NodeKind::ImageCombine | NodeKind::ImageLevels { .. } | NodeKind::TransferUv => _ = meshgraph_ui::props(ui, kind),
     }
 }

@@ -78,6 +78,8 @@ struct Gen<'a> {
     kinds: BTreeSet<NoiseKind>,
     mesh_slots: Vec<NodeId>,
     eps: f32,
+    /// Load SDF nodes whose interpreter the shader needs.
+    sdf_used: BTreeSet<NodeId>,
     out: String,
 }
 
@@ -165,6 +167,10 @@ fn compile_inner(g: &Graph, caches: &BTreeMap<NodeId, u32>, eps: f32, preview: b
                 p.softness,
                 p.iterations as f32,
             ]),
+            NodeKind::LoadSdf(p) => {
+                let loaded = crate::sdf_node::load(&p.file);
+                params.extend(p.shader_params(loaded.as_ref().as_ref().ok()));
+            }
             NodeKind::Noise(n) => params.extend([
                 n.scale,
                 if n.normalize { 1.0 } else { 0.0 },
@@ -182,7 +188,7 @@ fn compile_inner(g: &Graph, caches: &BTreeMap<NodeId, u32>, eps: f32, preview: b
     }
 
     let mesh_slots: Vec<NodeId> = g.nodes.iter().filter(|(_, n)| matches!(n.kind, NodeKind::LoadMesh(_))).map(|(id, _)| *id).collect();
-    let mut cg = Gen { g, caches, slots, types: BTreeMap::new(), done: BTreeSet::new(), building: BTreeSet::new(), kinds: BTreeSet::new(), mesh_slots: mesh_slots.clone(), eps, out: String::new() };
+    let mut cg = Gen { g, caches, slots, types: BTreeMap::new(), done: BTreeSet::new(), building: BTreeSet::new(), kinds: BTreeSet::new(), mesh_slots: mesh_slots.clone(), eps, sdf_used: BTreeSet::new(), out: String::new() };
     let density = g.find(|k| *k == NodeKind::OutDensity).and_then(|o| g.input_from(o, 0));
     let normal = g.find(|k| *k == NodeKind::OutNormal).and_then(|o| g.input_from(o, 0));
     // One output of a Separate node is a component of the vector its function returns.
@@ -234,6 +240,13 @@ fn compile_inner(g: &Graph, caches: &BTreeMap<NodeId, u32>, eps: f32, preview: b
         wgsl += WORLEY_GENERAL_LIB;
     }
     wgsl += &cg.kinds.iter().map(|&k| fbm_function(k, general_worley)).collect::<String>();
+    for id in &cg.sdf_used {
+        if let NodeKind::LoadSdf(p) = &g.nodes[id].kind
+            && let Ok(data) = crate::sdf_node::load(&p.file).as_ref()
+        {
+            wgsl += &crate::sdf_node::embed(&format!("sdf{id}_"), &data.scene);
+        }
+    }
     wgsl += &cg.out;
     Ok(Compiled { wgsl, params, mesh_slots })
 }
@@ -382,6 +395,18 @@ impl Gen<'_> {
             NodeKind::LoadMesh(_) => {
                 let slot = self.mesh_slots.iter().position(|&n| n == id).unwrap_or(0);
                 (Ty::F, format!("mesh_dist_{slot}({})", self.operand(id, 0, Ty::V, "p")))
+            }
+            // A composition: the shader gets its own copy of the interpreter and the shapes (see sdf_node.rs). An empty or
+            // unreadable file gives a far-away positive distance.
+            NodeKind::LoadSdf(p) => {
+                let q = self.operand(id, 0, Ty::V, "p");
+                match crate::sdf_node::load(&p.file).as_ref() {
+                    Ok(_) => {
+                        self.sdf_used.insert(id);
+                        (Ty::F, format!("sdf{id}_map(vec3f(P[{}], P[{}], P[{}]) + ({q} - vec3f(P[{s}], P[{}], P[{}])) / P[{}]) * P[{}]", s + 4, s + 5, s + 6, s + 1, s + 2, s + 3, s + 3))
+                    }
+                    Err(_) => (Ty::F, "1000.0".into()),
+                }
             }
             NodeKind::NoiseGraph(_) => return Err("a Noise Graph node must be lowered first (meshgraph::lowered_mesh)".into()),
             NodeKind::Remesh { .. } | NodeKind::AutoUv(_) | NodeKind::Bake(_) | NodeKind::OutMesh(_) | NodeKind::OutImage(_) | NodeKind::ImageSplit | NodeKind::ImageCombine | NodeKind::ImageLevels { .. } | NodeKind::TransferUv => return Err("this node does not produce a field".into()),

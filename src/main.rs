@@ -35,6 +35,7 @@ mod composer_gpu;
 mod composer_render;
 mod sdf_file;
 mod sdf_mesh;
+mod sdf_node;
 mod sdf_model;
 #[cfg(test)]
 mod gpu_tests;

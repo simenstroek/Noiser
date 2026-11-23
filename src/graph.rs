@@ -74,6 +74,8 @@ pub enum NodeKind {
     OutNormal,
     /// Mesh graph: a mesh file as a field (its signed distance). Input: position (defaults to world position).
     LoadMesh(crate::meshgraph::LoadMeshParams),
+    /// A composition from the SDF Composer as a field (its signed distance). Input: position (defaults to world position).
+    LoadSdf(crate::sdf_node::LoadSdfParams),
     /// Mesh graph: a noise graph as a node. Input: position (defaults to world position).
     NoiseGraph(crate::meshgraph::NoiseGraphParams),
     /// Mesh graph: the surface of a field as an adaptive triangle mesh of about `triangles` triangles.
@@ -144,7 +146,7 @@ impl NodeKind {
             NodeKind::Curve { .. } => 1,
             NodeKind::Noise(_) | NodeKind::Grid { .. } | NodeKind::Pattern(_) => 1 + self.param_pins().len(),
             NodeKind::Normal { .. } | NodeKind::Radial(_) | NodeKind::OutDensity | NodeKind::OutNormal => 1,
-            NodeKind::LoadMesh(_) | NodeKind::NoiseGraph(_) | NodeKind::Remesh { .. } | NodeKind::AutoUv(_) | NodeKind::OutMesh(_) | NodeKind::OutImage(_) | NodeKind::ImageSplit | NodeKind::ImageLevels { .. } => 1,
+            NodeKind::LoadMesh(_) | NodeKind::LoadSdf(_) | NodeKind::NoiseGraph(_) | NodeKind::Remesh { .. } | NodeKind::AutoUv(_) | NodeKind::OutMesh(_) | NodeKind::OutImage(_) | NodeKind::ImageSplit | NodeKind::ImageLevels { .. } => 1,
             NodeKind::Bake(s) => 2 + s.custom.len(),
             NodeKind::ImageCombine => 4,
             NodeKind::TransferUv => 2,
@@ -711,6 +713,7 @@ impl Graph {
         let t = match &self.nodes[&id].kind {
             NodeKind::Float(_) | NodeKind::Vec3(_) => Const,
             NodeKind::LoadMesh(_) => Broken("a loaded mesh does not tile".into()),
+            NodeKind::LoadSdf(_) => Broken("a loaded SDF does not tile".into()),
             NodeKind::NoiseGraph(_) | NodeKind::Remesh { .. } | NodeKind::AutoUv(_) | NodeKind::Bake(_) | NodeKind::OutMesh(_) | NodeKind::OutImage(_) | NodeKind::ImageSplit | NodeKind::ImageCombine | NodeKind::ImageLevels { .. } | NodeKind::TransferUv => Const,
             // Each axis times a whole number (a default, or a Value node's) is still a coordinate.
             NodeKind::Position { scale } => {
@@ -999,7 +1002,7 @@ impl Graph {
         let r = match &self.nodes[&id].kind {
             NodeKind::Float(v) => (*v, *v),
             NodeKind::Vec3(v) => (v.iter().cloned().fold(f32::MAX, f32::min), v.iter().cloned().fold(f32::MIN, f32::max)),
-            NodeKind::Position { .. } | NodeKind::Radial(_) | NodeKind::LoadMesh(_) | NodeKind::NoiseGraph(_) | NodeKind::Remesh { .. } | NodeKind::AutoUv(_) | NodeKind::Bake(_) | NodeKind::OutMesh(_) | NodeKind::OutImage(_) | NodeKind::ImageSplit | NodeKind::ImageCombine | NodeKind::ImageLevels { .. } | NodeKind::TransferUv => UNBOUNDED,
+            NodeKind::Position { .. } | NodeKind::Radial(_) | NodeKind::LoadMesh(_) | NodeKind::LoadSdf(_) | NodeKind::NoiseGraph(_) | NodeKind::Remesh { .. } | NodeKind::AutoUv(_) | NodeKind::Bake(_) | NodeKind::OutMesh(_) | NodeKind::OutImage(_) | NodeKind::ImageSplit | NodeKind::ImageCombine | NodeKind::ImageLevels { .. } | NodeKind::TransferUv => UNBOUNDED,
             NodeKind::Separate => match self.input(id, 0) {
                 Some(src) => self.range_of(src, stack),
                 None => (0.0, 0.0),
