@@ -214,7 +214,7 @@ pub(crate) fn cache_props(ui: &mut egui::Ui, graph: &mut Graph, id: graph::NodeI
         let mb = |b: u64| b as f64 / (1 << 20) as f64;
         ui.weak(format!("{:.0} MB for this cache · {:.0} MB for all", mb((res as u64).pow(3) * 4), mb(total_bytes)));
         if res >= 1024 {
-            ui.colored_label(editor::ORANGE, "⚠ 1024³ needs 4 GB of GPU memory");
+            ui.colored_label(editor::ORANGE, "Warning: 1024³ needs 4 GB of GPU memory");
         }
     }
     if let Err(why) = &eligible {

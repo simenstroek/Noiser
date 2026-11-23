@@ -176,11 +176,10 @@ mod tests {
                 continue;
             }
             for line in std::fs::read_to_string(&path).unwrap().lines() {
-                let trimmed = line.trim_start();
-                if trimmed.starts_with("//") {
+                if line.trim_start().starts_with("//") {
                     continue;
                 }
-                let code = line.split("//").next().unwrap_or(line);
+                let code = line.split("//").next().unwrap_or(line).replace("\\\"", "");
                 for (i, part) in code.split('"').enumerate() {
                     if i % 2 == 1 {
                         found.extend(part.chars().filter(|c| !c.is_ascii()));
@@ -188,13 +187,15 @@ mod tests {
                 }
             }
         }
+        assert!(!found.is_empty());
         let ctx = egui::Context::default();
         ctx.set_fonts(egui::FontDefinitions::default());
-        let text: String = found.iter().collect();
-        let mut output = ctx.run_ui(Default::default(), |ui| {
-            ui.label(text.clone());
-        });
+        let mut output = ctx.run_ui(Default::default(), |_| {});
         output.textures_delta.clear();
-        assert!(!found.is_empty());
+        let font = egui::FontId::proportional(14.0);
+        let has = |c: char| ctx.fonts_mut(|f| f.has_glyph(&font, c));
+        assert!(!has('\u{E123}'), "the check can tell a missing character from a present one");
+        let missing: Vec<char> = found.iter().copied().filter(|c| !has(*c)).collect();
+        assert!(missing.is_empty(), "no glyph in the proportional font for {missing:?}");
     }
 }

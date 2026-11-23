@@ -562,10 +562,10 @@ impl App {
             let dims = s.image_size().map_or(format!("{0}×{0}×{0} voxels", s.res), |(w, h)| format!("{w}×{h} px"));
             ui.label(format!("{dims}, about {:.1} MB", file as f64 / (1 << 20) as f64));
             for w in s.warnings() {
-                ui.colored_label(editor::ORANGE, format!("⚠ {w}"));
+                ui.colored_label(editor::ORANGE, format!("Warning: {w}"));
             }
             if let Some(why) = self.graph.tiling_problem_upstream() {
-                ui.colored_label(editor::ORANGE, format!("⚠ The result does not tile: {why}"));
+                ui.colored_label(editor::ORANGE, format!("The result does not tile: {why}"));
             }
             ui.separator();
             match &self.export_job {

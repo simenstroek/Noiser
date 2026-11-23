@@ -330,7 +330,7 @@ impl App {
                 ui.weak(format!("{nx}×{ny}×{nz} samples ({:.0} million)", grid.samples() as f64 / 1e6));
             }
             if s.remesh.is_none() && grid.samples() > 400_000_000 {
-                ui.colored_label(crate::editor::ORANGE, "⚠ This is a lot of samples: it will take a while and the result will be a huge mesh.");
+                ui.colored_label(crate::editor::ORANGE, "Warning: this is a lot of samples: it will take a while and the result will be a huge mesh.");
             }
             ui.weak(format!("Displacement {:.2} × the graph, tile size {:.2}, shape size {:.2}, seed {}: the same as the 3D view.", displace.amount, displace.tile_size, displace.prim_size, self.pv.seed));
             ui.separator();
