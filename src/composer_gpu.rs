@@ -30,6 +30,12 @@ pub struct Uniforms {
 }
 
 impl Uniforms {
+    /// Whether the shapes are drawn in their own colours (else all grey).
+    pub fn with_colors(mut self, on: bool) -> Uniforms {
+        self.counts[3] = on as u32;
+        self
+    }
+
     pub fn new(camera: &Camera, aspect: f32, scene: &GpuScene, show_selection: bool) -> Uniforms {
         let (forward, right, up) = camera.basis();
         let eye = camera.eye();

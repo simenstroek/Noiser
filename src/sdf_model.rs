@@ -492,6 +492,7 @@ struct Shape {
     repeat: Repeat,
     mirror: [bool; 3],
     mirror_blend: f64,
+    color: [f32; 3],
 }
 
 impl Shape {
@@ -588,6 +589,7 @@ fn compile_nodes(nodes: &[Node], has_unsupported: &mut bool) -> Vec<Item> {
                         node.flag("mirror_z").unwrap_or(false),
                     ],
                     mirror_blend: node.number("mirror_blend").unwrap_or(0.0),
+                    color: node.color.map(|c| c.clamp(0.0, 1.0) as f32),
                 }));
             }
             "group" => items.push(Item::Group(Group {
@@ -871,7 +873,7 @@ impl Flattener<'_> {
             b,
             [a_rep[0], a_rep[1], a_rep[2], 0.0],
             [b_rep[0], b_rep[1], b_rep[2], 0.0],
-            [if selected { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0],
+            [if selected { 1.0 } else { 0.0 }, shape.color[0], shape.color[1], shape.color[2]],
         ];
         self.scene.shapes.extend(records);
         self.scene.ops.push([0.0, index as f32, 0.0, 0.0]);

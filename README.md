@@ -94,7 +94,7 @@ work too: the side the normals face is outside, the other side is inside.
 
 **SDF Composer.** A third tab for building a shape from SDF primitives (sphere, cube, cylinder, prism, polygon) the way
 SDF Modeler does: add, subtract, intersect and blend shapes in a tree of groups, with rounding, bevel, thickness, taper,
-repeats and mirrors per shape. Every layer of the file is drawn at once in a ray-marched GPU viewport; click a shape to
+repeats and mirrors per shape. Every layer of the file is drawn at once in a ray-marched GPU viewport, in the colours stored in the file (the palette button in the toolbar switches them off); click a shape to
 select it, then move, rotate or scale it with the gizmo (snapping and a uniform-scale handle included). Drag rows in the
 hierarchy to reorder, move them into or out of groups, or drop one shape on another to group them. It reads and writes
 SDF Modeler's `.sdf` files (0.6.x, without splines) and keeps what it does not edit, and it exports the composition as an
@@ -153,5 +153,5 @@ quarter) and a march step limit; none of them affect exports.
 
 ## Roadmap
 
-Ideas: splines in the SDF Composer (files that use them show those parts missing), the colours of `.sdf` files in the viewport, more pattern nodes, Linux and macOS builds.
+Ideas: splines in the SDF Composer (files that use them show those parts missing), colours in the Load SDF node and in exported meshes, more pattern nodes, Linux and macOS builds.
 See `PLAN.md` for the details.

@@ -66,6 +66,20 @@ fn selected_distance(p: vec3f) -> f32 {
     return best;
 }
 
+// The colour of the shapes nearest to a point on the surface, blended by how close each is.
+fn surface_color(p: vec3f) -> vec3f {
+    var sum = vec3f(0.0);
+    var total = 0.0;
+    let count = u.counts.y;
+    for (var i = 0u; i < count; i++) {
+        let d = abs(shape_distance(i, p));
+        let w = 1.0 / (d * d * d * d + 1e-6);
+        sum += shapes[i * STRIDE + 11u].yzw * w;
+        total += w;
+    }
+    return sum / max(total, 1e-9);
+}
+
 @fragment
 fn fs(in: VsOut) -> @location(0) vec4f {
     let ndc = vec2f(in.uv.x * 2.0 - 1.0, 1.0 - in.uv.y * 2.0);
@@ -110,6 +124,9 @@ fn fs(in: VsOut) -> @location(0) vec4f {
     }
     let ao = clamp(1.0 - 0.9 * occlusion, 0.25, 1.0);
     var color = vec3f(0.74, 0.75, 0.78);
+    if (u.counts.w == 1u) {
+        color = surface_color(p) * 0.92;
+    }
     if (u.params.w > 0.5 && selected_distance(p) < 0.0025 * (1.0 + t)) {
         color = vec3f(0.98, 0.58, 0.18);
     }

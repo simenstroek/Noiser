@@ -305,6 +305,8 @@ pub struct Composer {
     tool: Tool,
     space: Space,
     snap: bool,
+    /// Draw the shapes in the colours stored in the file.
+    show_colors: bool,
     fields: Option<Arc<Vec<LayerField>>>,
     scene_cache: Option<((u64, Option<Vec<usize>>, usize), Arc<GpuScene>)>,
     scene_serial: u64,
@@ -338,6 +340,7 @@ impl Default for Composer {
             tool: Tool::Move,
             space: Space::Local,
             snap: false,
+            show_colors: true,
             fields: None,
             scene_cache: None,
             scene_serial: 0,
@@ -1425,7 +1428,7 @@ impl Composer {
         painter.rect_filled(rect, 0.0, egui::Color32::from_gray(30));
         let fits = scene.shape_count <= crate::composer_gpu::MAX_SHAPES && scene.ops.len() <= crate::composer_gpu::MAX_OPS;
         if fits {
-            let uniforms = Uniforms::new(&self.camera, size.x / size.y.max(1.0), &scene, self.selection.is_some() && !crate::library::capturing());
+            let uniforms = Uniforms::new(&self.camera, size.x / size.y.max(1.0), &scene, self.selection.is_some() && !crate::library::capturing()).with_colors(self.show_colors);
             painter.add(egui_wgpu::Callback::new_paint_callback(rect, ViewCallback { uniforms, scene: scene.clone(), version: self.scene_serial, format }));
         } else {
             painter.text(rect.center(), egui::Align2::CENTER_CENTER, "This composition is larger than the viewport can draw", egui::FontId::proportional(15.0), egui::Color32::from_rgb(230, 150, 90));
@@ -1813,6 +1816,9 @@ impl Composer {
                 }
                 if crate::icons::button(ui, "snap", "Snap", Some(self.snap), true).on_hover_text("Move and scale in steps of 0.05, rotate in steps of 15 degrees").clicked() {
                     self.snap = !self.snap;
+                }
+                if crate::icons::button(ui, "paint", "Colours", Some(self.show_colors), true).on_hover_text("Draw the shapes in the colours stored in the file").clicked() {
+                    self.show_colors = !self.show_colors;
                 }
                 ui.separator();
                 if crate::icons::button(ui, "frame", "Frame", None, true).on_hover_text("Fit the view to the scene (F)").clicked() {
