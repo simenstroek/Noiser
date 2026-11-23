@@ -15,6 +15,25 @@ pub enum Workspace {
     Mesh,
 }
 
+impl Workspace {
+    pub const ALL: [Workspace; 2] = [Workspace::Noise, Workspace::Mesh];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Workspace::Noise => "Noise graph",
+            Workspace::Mesh => "Mesh graph",
+        }
+    }
+
+    /// The colour of the tab and of the outline around the tab's contents.
+    pub fn color(self) -> egui::Color32 {
+        match self {
+            Workspace::Noise => egui::Color32::from_rgb(90, 190, 120),
+            Workspace::Mesh => egui::Color32::from_rgb(100, 150, 240),
+        }
+    }
+}
+
 /// A picture request for the ray marching worker: the graph (and what it was made from), the view and the size.
 struct RayRequest {
     graph: Graph,
@@ -696,6 +715,57 @@ impl crate::App {
     }
 
     /// The whole Mesh graph tab (the menu bar above it is the app's).
+    /// The tab strip under the menu bar, and a outline in the selected tab's colour around everything below it.
+    pub(crate) fn workspace_tabs(&mut self, ui: &mut egui::Ui) {
+        const TAB_CORNER: u8 = 7;
+        let mut selected_span = None;
+        let frame = egui::Frame::NONE.fill(ui.visuals().panel_fill).inner_margin(egui::Margin { left: 8, right: 8, top: 4, bottom: 0 });
+        egui::Panel::top("workspace tabs").frame(frame).show(ui, |ui| {
+            ui.spacing_mut().item_spacing.x = 3.0;
+            ui.horizontal(|ui| {
+                for workspace in Workspace::ALL {
+                    let is_selected = self.workspace == workspace;
+                    let color = workspace.color();
+                    let text_color = if is_selected { ui.visuals().strong_text_color() } else { ui.visuals().text_color() };
+                    let galley = ui.painter().layout_no_wrap(workspace.label().to_string(), egui::FontId::proportional(14.0), text_color);
+                    let (rect, response) = ui.allocate_exact_size(galley.size() + egui::vec2(28.0, 10.0), egui::Sense::click());
+                    let (fill, stroke) = if is_selected {
+                        (ui.visuals().panel_fill, egui::Stroke::new(2.0, color))
+                    } else if response.hovered() {
+                        (color.gamma_multiply(0.18), egui::Stroke::new(1.0, color.gamma_multiply(0.8)))
+                    } else {
+                        (ui.visuals().faint_bg_color, egui::Stroke::new(1.0, color.gamma_multiply(0.45)))
+                    };
+                    let corners = egui::CornerRadius { nw: TAB_CORNER, ne: TAB_CORNER, sw: 0, se: 0 };
+                    ui.painter().rect(rect, corners, fill, stroke, egui::StrokeKind::Inside);
+                    ui.painter().galley(rect.center() - galley.size() * 0.5, galley, text_color);
+                    if is_selected {
+                        selected_span = Some((rect.left() + 1.0, rect.right() - 1.0));
+                    } else if response.clicked() {
+                        self.workspace = workspace;
+                    }
+                }
+            });
+        });
+        // Drawn on its own layer so it covers whatever the workspace shows, and open under the selected tab so the tab
+        // and its contents read as one piece.
+        let content = ui.available_rect_before_wrap().shrink(1.0);
+        let layer = egui::LayerId::new(egui::Order::Background, egui::Id::new("workspace outline"));
+        let stroke = egui::Stroke::new(2.0, self.workspace.color());
+        let (gap_left, gap_right) = selected_span.unwrap_or((content.left(), content.left()));
+        ui.ctx().layer_painter(layer).add(egui::Shape::line(
+            vec![
+                egui::pos2(gap_right, content.top()),
+                content.right_top(),
+                content.right_bottom(),
+                content.left_bottom(),
+                content.left_top(),
+                egui::pos2(gap_left, content.top()),
+            ],
+            stroke,
+        ));
+    }
+
     pub(crate) fn mesh_workspace_ui(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
         // The worker's progress and result.

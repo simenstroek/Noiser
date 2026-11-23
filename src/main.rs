@@ -1134,12 +1134,10 @@ impl eframe::App for App {
                     }
                 });
                 ui.separator();
-                ui.selectable_value(&mut self.workspace, meshworkspace::Workspace::Noise, "Noise graph");
-                ui.selectable_value(&mut self.workspace, meshworkspace::Workspace::Mesh, "Mesh graph");
-                ui.separator();
                 ui.weak(&self.status);
             });
         });
+        self.workspace_tabs(ui);
         if self.workspace == meshworkspace::Workspace::Mesh {
             self.mesh_workspace_ui(ui);
             return;
