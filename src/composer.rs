@@ -283,6 +283,7 @@ pub struct Composer {
     camera: Camera,
     tool: Tool,
     space: Space,
+    snap: bool,
     fields: Option<Arc<Vec<LayerField>>>,
     scene_cache: Option<((u64, Option<Vec<usize>>, usize), Arc<GpuScene>)>,
     scene_serial: u64,
@@ -312,6 +313,7 @@ impl Default for Composer {
             camera: Camera::default(),
             tool: Tool::Move,
             space: Space::Local,
+            snap: false,
             fields: None,
             scene_cache: None,
             scene_serial: 0,
@@ -827,7 +829,29 @@ impl Composer {
 
     fn inspector(&mut self, ui: &mut egui::Ui) {
         let Some(path) = self.selection.clone() else {
-            ui.weak("Select a shape in the hierarchy or click one in the view.");
+            let mut edited = false;
+            if let Some(layer) = self.file.layers.get_mut(self.layer) {
+                ui.heading("Layer");
+                ui.weak("Where this layer sits in the scene. Select a shape in the hierarchy or click one in the view to edit it.");
+                ui.horizontal(|ui| {
+                    let name = ui.label("Name");
+                    edited |= ui.text_edit_singleline(&mut layer.name).labelled_by(name.id).changed();
+                });
+                edited |= vec3(ui, "Position", &mut layer.position, 0.01);
+                let mut degrees = layer.rotation.map(f64::to_degrees);
+                if vec3(ui, "Rotation", &mut degrees, 0.5) {
+                    layer.rotation = degrees.map(f64::to_radians);
+                    edited = true;
+                }
+                let mut uniform = layer.scale[0];
+                if number(ui, "Scale", &mut uniform, 0.01, Some(0.001..=1000.0)) {
+                    layer.scale = [uniform; 3];
+                    edited = true;
+                }
+            }
+            if edited {
+                self.touch();
+            }
             return;
         };
         let assembly = self.assembly_index();
@@ -1148,8 +1172,15 @@ impl Composer {
             (Some(g), Some(p), None) => self.hit_handle(&g, p - rect.min, size),
             _ => None,
         };
-        if response.drag_started_by(egui::PointerButton::Primary)
-            && let (Some(axis), Some(g), Some(start)) = (hovered_axis, geometry, response.interact_pointer_pos())
+        // A drag starts a few pixels after the button went down: the handle is the one under the press, and the
+        // drag is measured from there.
+        let press = ui.input(|i| i.pointer.press_origin());
+        let grabbed = match (geometry, press) {
+            (Some(g), Some(at)) if response.drag_started_by(egui::PointerButton::Primary) => self.hit_handle(&g, at - rect.min, size).map(|axis| (axis, at)),
+            _ => None,
+        };
+        if let Some((axis, start)) = grabbed
+            && let Some(g) = geometry
             && let Some(path) = &self.selection
             && let Some(node) = node_at(self.shapes(), path)
         {
@@ -1222,12 +1253,26 @@ impl Composer {
         if self.shapes().is_empty() {
             painter.text(rect.center(), egui::Align2::CENTER_CENTER, "Add a shape from the hierarchy panel", egui::FontId::proportional(15.0), egui::Color32::from_gray(150));
         }
+        self.draw_orientation(&painter, rect);
         let active = self.drag.as_ref().map(|d| d.axis);
         if let Some(g) = geometry {
             self.draw_gizmo(&painter, rect, &g, hovered_axis.or(active));
         }
         if hovered_axis.is_some() {
             ctx.set_cursor_icon(egui::CursorIcon::Grab);
+        }
+    }
+
+    /// Three short axes in the corner that show which way x, y and z point.
+    fn draw_orientation(&self, painter: &egui::Painter, rect: egui::Rect) {
+        let (_, right, up) = self.camera.basis();
+        let origin = rect.left_bottom() + egui::vec2(46.0, -46.0);
+        for (axis, label) in ["X", "Y", "Z"].into_iter().enumerate() {
+            let mut world = [0.0; 3];
+            world[axis] = 1.0;
+            let tip = origin + egui::vec2(dot(world, right) as f32, -dot(world, up) as f32) * 30.0;
+            painter.line_segment([origin, tip], egui::Stroke::new(2.0, axis_color(axis)));
+            painter.text(tip + (tip - origin).normalized() * 8.0, egui::Align2::CENTER_CENTER, label, egui::FontId::proportional(11.0), axis_color(axis));
         }
     }
 
@@ -1255,8 +1300,17 @@ impl Composer {
     fn hit_handle(&self, g: &GizmoGeometry, pointer: egui::Vec2, size: egui::Vec2) -> Option<usize> {
         let p = egui::pos2(pointer.x, pointer.y);
         let mut best: Option<(f32, usize)> = None;
-        for axis in 0..3 {
-            let distance = if self.tool == Tool::Rotate {
+        for axis in 0..4 {
+            let distance = if axis == 3 {
+                // The middle box of the scale gizmo scales all three axes together.
+                if self.tool != Tool::Scale {
+                    continue;
+                }
+                match self.camera.project(g.origin, [size.x, size.y]) {
+                    Some(c) => (p - egui::pos2(c[0], c[1])).length(),
+                    None => f32::MAX,
+                }
+            } else if self.tool == Tool::Rotate {
                 let points = self.ring_points(g, axis, size);
                 points.windows(2).map(|w| point_to_segment(p, w[0], w[1])).fold(f32::MAX, f32::min)
             } else {
@@ -1265,7 +1319,9 @@ impl Composer {
                     None => f32::MAX,
                 }
             };
-            if distance < 9.0 && best.is_none_or(|(d, _)| distance < d) {
+            // The middle handle wins only when the pointer is really on it, so the axes stay easy to grab.
+            let reach = if axis == 3 { 7.0 } else { 9.0 };
+            if distance < reach && best.is_none_or(|(d, _)| distance < d || axis == 3) {
                 best = Some((distance, axis));
             }
         }
@@ -1297,7 +1353,13 @@ impl Composer {
             }
         }
         if let Some(c) = self.camera.project(g.origin, [size.x, size.y]) {
-            painter.circle_filled(egui::pos2(c[0], c[1]) + rect.min.to_vec2(), 3.5, egui::Color32::WHITE);
+            let center = egui::pos2(c[0], c[1]) + rect.min.to_vec2();
+            if self.tool == Tool::Scale {
+                let lit = highlighted == Some(3);
+                painter.rect_filled(egui::Rect::from_center_size(center, egui::vec2(11.0, 11.0)), 2.0, if lit { egui::Color32::WHITE } else { egui::Color32::from_gray(210) });
+            } else {
+                painter.circle_filled(center, 3.5, egui::Color32::WHITE);
+            }
         }
     }
 
@@ -1309,6 +1371,21 @@ impl Composer {
         let assembly = self.assembly_index();
         let Some(node) = self.file.assemblies.get_mut(assembly).and_then(|a| node_at_mut(&mut a.shapes, &path)) else { return };
         let is_group = node.kind == "group";
+        let snap = self.snap;
+        let snapped = |value: f64, step: f64| if snap { (value / step).round() * step } else { value };
+        if drag.tool == Tool::Scale && drag.axis == 3 {
+            // Dragging right grows, left shrinks; 100 pixels is a factor of e.
+            let factor = ((pointer.x - drag.start_pointer.x) as f64 / 100.0).exp();
+            for axis in 0..3 {
+                node.scale[axis] = snapped((drag.start_scale[axis] * factor).max(0.001), 0.05).max(0.001);
+            }
+            if is_group {
+                let uniform = node.scale[0];
+                node.scale = [uniform; 3];
+            }
+            self.touch();
+            return;
+        }
         match drag.tool {
             Tool::Move | Tool::Scale => {
                 let tip = [0, 1, 2].map(|k| g.origin[k] + g.axes[drag.axis][k] * g.length);
@@ -1319,12 +1396,12 @@ impl Composer {
                 let parent_units = along / g.parent.s.max(1e-9);
                 if drag.tool == Tool::Move {
                     let direction = into_frame(&g.parent.r, g.axes[drag.axis]);
-                    node.position = [0, 1, 2].map(|k| drag.start_position[k] + direction[k] * parent_units);
+                    node.position = [0, 1, 2].map(|k| snapped(drag.start_position[k] + direction[k] * parent_units, 0.05));
                 } else if is_group {
                     let factor = (along / g.length).exp();
                     node.scale = drag.start_scale.map(|s| (s * factor).max(0.001));
                 } else {
-                    node.scale[drag.axis] = (drag.start_scale[drag.axis] + 2.0 * parent_units).max(0.001);
+                    node.scale[drag.axis] = snapped((drag.start_scale[drag.axis] + 2.0 * parent_units).max(0.001), 0.05).max(0.001);
                 }
             }
             Tool::Rotate => {
@@ -1340,6 +1417,7 @@ impl Composer {
                 }
                 let (forward, ..) = drag.view.basis();
                 let angle = if dot(g.axes[drag.axis], forward) < 0.0 { -delta } else { delta };
+                let angle = snapped(angle, 15f64.to_radians());
                 let rotated = mat_mul(&drag.start_rotation, &axis_rotation(drag.axis, angle));
                 node.rotation = euler_from_matrix(&rotated);
             }
@@ -1375,6 +1453,13 @@ impl Composer {
             }
             if delete {
                 self.delete_selected();
+            }
+            let (duplicate, group) = ctx.input(|i| (i.modifiers.command && i.key_pressed(egui::Key::D), i.modifiers.command && i.key_pressed(egui::Key::G)));
+            if duplicate {
+                self.duplicate_selected();
+            }
+            if group {
+                self.group_selected();
             }
             if frame {
                 self.frame_pending = true;
@@ -1458,6 +1543,7 @@ impl Composer {
                 ui.separator();
                 ui.selectable_value(&mut self.space, Space::Local, "Local");
                 ui.selectable_value(&mut self.space, Space::Global, "Global").on_hover_text("Move along the world's axes");
+                ui.checkbox(&mut self.snap, "Snap").on_hover_text("Move and scale in steps of 0.05, rotate in steps of 15 degrees");
                 ui.separator();
                 if ui.button("Frame").on_hover_text("Fit the view to the shape (F)").clicked() {
                     self.frame_pending = true;
@@ -1907,5 +1993,62 @@ mod ui_tests {
         press(&mut h, center, true);
         press(&mut h, center, false);
         assert!(h.state().selection.is_some(), "a shape sits at the middle of the framed view");
+    }
+
+    #[test]
+    fn snapping_rounds_a_dragged_position_to_the_grid() {
+        let mut h = harness();
+        h.run();
+        click(&mut h, "Cube");
+        h.state_mut().snap = true;
+        h.run();
+        let c = h.state();
+        let g = c.gizmo_geometry(c.last_view).unwrap();
+        let origin = view_projection(c, g.origin);
+        let tip = view_projection(c, [0, 1, 2].map(|k| g.origin[k] + g.axes[0][k] * g.length));
+        let grab = origin + (tip - origin) * 0.5;
+        drag(&mut h, grab, grab + (tip - origin) * 0.31);
+        let x = h.state().shapes()[0].position[0];
+        assert!(x > 0.05, "moved: {x}");
+        assert!(((x / 0.05).round() * 0.05 - x).abs() < 1e-9, "{x} is a multiple of 0.05");
+    }
+
+    #[test]
+    fn the_middle_box_of_the_scale_gizmo_scales_every_axis() {
+        let mut h = harness();
+        h.run();
+        click(&mut h, "Cube");
+        h.state_mut().tool = Tool::Scale;
+        h.run();
+        let c = h.state();
+        let g = c.gizmo_geometry(c.last_view).unwrap();
+        let middle = view_projection(c, g.origin);
+        drag(&mut h, middle, middle + egui::vec2(70.0, 0.0));
+        let scale = h.state().shapes()[0].scale;
+        assert!(scale[0] > 1.5 && (scale[0] - scale[1]).abs() < 1e-9 && (scale[1] - scale[2]).abs() < 1e-9, "{scale:?}");
+    }
+
+    #[test]
+    fn with_nothing_selected_the_inspector_edits_the_layer() {
+        use egui::accesskit::Role;
+        let mut h = harness();
+        h.run();
+        let fields: Vec<_> = h.get_all_by_role_and_label(Role::SpinButton, "Position").collect();
+        assert_eq!(fields.len(), 3);
+        let from = fields[1].rect().center();
+        drop(fields);
+        drag(&mut h, from, from + egui::vec2(40.0, 0.0));
+        assert!(h.state().file.layers[0].position[1] > 0.1, "{:?}", h.state().file.layers[0].position);
+        assert_eq!(h.state().file.layers[0].position[0], 0.0);
+    }
+
+    #[test]
+    fn control_d_duplicates_the_selected_shape() {
+        let mut h = harness();
+        h.run();
+        click(&mut h, "Sphere");
+        h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::D);
+        h.run();
+        assert_eq!(h.state().shapes().len(), 2);
     }
 }
