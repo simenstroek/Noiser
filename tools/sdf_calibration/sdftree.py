@@ -1,6 +1,6 @@
 """Reference evaluator for SDF Modeler 0.6 assemblies (no splines), calibrated against exported meshes."""
 import numpy as np
-from sdfcal import rot_xyz, sd_uberprim
+from sdfcal import rot_xyz, sd_uberprim, sd_cylinder, sd_ngon, sd_triprism
 
 # ---- blends (the shader's maths; a = the shape being added, b = what is accumulated so far) ---------------------
 
@@ -61,6 +61,7 @@ def blend(a, b, mode, k, r, chamfer):
     if mode == 'deboss':
         return S(S(b + r, a, k), b, k)
     if mode == 'shell':
+        r = r + 0.01
         return I(a, np.abs(b + r) - r, k)
     if mode == 'none':
         return b
@@ -77,50 +78,31 @@ def sd_ellipsoid(p, r, n=2.0):
 
 import os
 RV_MODE = os.environ.get('RV', 'max')
+MIRROR_BLEND = os.environ.get('MB', '1') == '1'
 CAP_RY = os.environ.get('CAP', '1') == '1'
 
 
-def cube_params(node, half):
+def cube_inputs(node, half):
+    """The uber primitive's inputs (W, Rv, ry, rz) for a cube; see docs/sdf-modeler-notes.md."""
     hxz = min(half[0], half[2])
     ry = node['round'] * half.min()
-    if RV_MODE == 'max':
-        rv = max(ry, node['bevel'] * hxz)
-    elif RV_MODE == 'lerp':
-        rv = ry + node['bevel'] * (hxz - ry)
-    else:
-        rv = node['bevel'] * hxz
-    hc = os.environ.get('HC', 'height')
-    if hc == 'height':
-        rz = -node['cone'] * hxz * (half[1] - ry) / half[1]
-    elif hc == 'plain':
-        rz = -node['cone'] * hxz
-    else:  # taper measured on the straight part only, then scaled to the full height
-        rz = -node['cone'] * hxz * (half[1] - ry) / half[1] * (1.0 + float(hc) * ry / half[1])
-    return rv, ry, rz
-
-
-def cube_wall(node, half):
-    """The uber primitive's `W`: half the wall thickness. Thickness 1 is solid."""
     t = node['thickness']
-    if t >= 0.999:
-        return 1e3
-    return 0.5 * min(half[0], half[2]) * (0.05 + 0.95 * t)
+    hollow = t < 0.999
+    wall = 0.5 * hxz * (0.05 + 0.95 * t)
+    if hollow:
+        ry = min(ry, wall)
+    rv = max(ry, node['bevel'] * hxz)
+    rz = -node['cone'] * max(hxz - ry, 0.0)
+    w = wall + abs(rz) if hollow else 1e3
+    return w, rv, ry, rz
 
 
 def prim_cube(p, node):
     half = np.array(node['scale']) / 2
-    rv, ry, rz = cube_params(node, half)
-    wall = cube_wall(node, half)
-    if wall < 1e2:
-        wall += abs(rz)
-    if CAP_RY:
-        ry_new = min(ry, wall)
-        if ry > 0:
-            rz = rz * (half[1] - ry_new) / (half[1] - ry) if half[1] > ry else rz
-        ry = ry_new
+    w, rv, ry, rz = cube_inputs(node, half)
     q = p.copy()
     q[:, 1] = -q[:, 1]
-    return sd_uberprim(q, [*half, wall], [rv, ry, rz])
+    return sd_uberprim(q, [*half, w], [rv, ry, rz])
 
 
 def prim_sphere(p, node):
@@ -128,10 +110,78 @@ def prim_sphere(p, node):
     return sd_ellipsoid(p, half)
 
 
-PRIMS = {'cube': prim_cube, 'sphere': prim_sphere}
+
+SWK = float(os.environ.get('SWK', '1.1'))
+RXK = float(os.environ.get('RXK', '1.0'))
+
+
+def round_bevel(node, half):
+    sw = half.min() * (0.01 + 0.99 * node['round'])
+    rx = max(sw, RXK * node['bevel'] * half.min())
+    return sw, rx
+
+
+def prim_cylinder(p, node):
+    half = np.array(node['scale']) / 2
+    sw, rx = round_bevel(node, half)
+    return sd_cylinder(p, half - sw) - sw
+
+
+def prim_prism(p, node):
+    half = np.array(node['scale']) / 2
+    sw, rx = round_bevel(node, half)
+    return sd_triprism(p, half - rx, max(rx - sw, 0.0), 0.0) - sw
+
+
+def prim_polygon(p, node):
+    half = np.array(node['scale']) / 2
+    sw, rx = round_bevel(node, half)
+    w = 1.0 - node['star']
+    return sd_ngon(p, np.array([half[0] - rx, half[1] - sw]), float(node['points']), w, max(rx - sw, 0.0), 0.0) - sw
+
+
+PRIMS = {'cube': prim_cube, 'sphere': prim_sphere, 'cylinder': prim_cylinder, 'prism': prim_prism, 'polygon': prim_polygon}
+
 
 
 # ---- tree ---------------------------------------------------------------------------------------------------------
+
+
+
+def smooth_abs(a, k):
+    a = np.abs(a)
+    if k <= 0:
+        return a
+    m = k
+    n = k * 0.25
+    k0 = 2.0 * n - m
+    k1 = 2.0 * m - 3.0 * n
+    t = np.minimum(a / m, 1.0)
+    return np.where(a > m, a, (k0 * t + k1) * t * t + n)
+
+
+def repeat_radial(p, radius, count, axis):
+    """Copies of the shape around a local axis; each point looks at the two nearest copies. Returns two frames."""
+    if axis == 'x':
+        r = p[:, [2, 1]]
+    elif axis == 'y':
+        r = p[:, [2, 0]]
+    else:
+        r = p[:, [1, 0]]
+    step = 2.0 * np.pi / count
+    ident = np.floor(np.arctan2(r[:, 1], r[:, 0]) / step)
+    frames = []
+    for a in (step * ident, step * (ident + 1.0)):
+        c, s = np.cos(a), np.sin(a)
+        r1 = np.stack([c * r[:, 0] + s * r[:, 1], -s * r[:, 0] + c * r[:, 1]], 1)
+        if axis == 'x':
+            q = np.stack([p[:, 0], r1[:, 1], r1[:, 0] - radius], 1)
+        elif axis == 'y':
+            q = np.stack([r1[:, 1], p[:, 1], r1[:, 0] - radius], 1)
+        else:
+            q = np.stack([r1[:, 1], r1[:, 0] - radius, p[:, 2]], 1)
+        frames.append(q)
+    return frames
 
 
 def repeat_linear(p, steps, counts):
@@ -149,10 +199,13 @@ def local_point(p, node, scale_to_local=1.0):
     return p
 
 
-def shape_distance(p, node, mirror_blend=0.0):
+def shape_distance(p, node):
     brush = node['brush']
     q = p - np.array(node['position'])
     q = q @ rot_xyz(np.array(node['rotation']))          # local = R^T (p - pos)
+    if node['repeat_mode'] == 'radial' and node['radial_repeats'] > 1:
+        a, b = repeat_radial(q, node['radius'], node['radial_repeats'], node['repeat_axis'])
+        return np.minimum(PRIMS[brush](a, node), PRIMS[brush](b, node))
     if node['repeat_mode'] == 'linear' and any(c > 1 for c in node['linear_repeats']):
         q = repeat_linear(q, node['steps'], node['linear_repeats'])
     return PRIMS[brush](q, node)
@@ -169,7 +222,7 @@ def eval_nodes(p, nodes, ctx):
             for axis, key in enumerate(('mirror_x', 'mirror_y', 'mirror_z')):
                 if node.get(key):
                     q = q.copy()
-                    q[:, axis] = np.abs(q[:, axis])
+                    q[:, axis] = smooth_abs(q[:, axis], node['mirror_blend']) if MIRROR_BLEND else np.abs(q[:, axis])
             d = shape_distance(q, node)
             k = node['blend']
             r = node['blend_strength']

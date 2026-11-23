@@ -66,3 +66,71 @@ def sd_uberprim(p, s, r):
     dd = np.minimum((diag ** 2).sum(1), np.minimum((h0 ** 2).sum(1), (h1 ** 2).sum(1)))
     sign = np.sign(np.maximum(pa @ np.array([-ba[1], ba[0]]), d[:, 1]))
     return np.sqrt(dd) * sign - r[1]
+
+
+def _glsl_mod(x, y):
+    return x - y * np.floor(x / y)
+
+
+def sd_ellipse(p, ab):
+    """Distance to an axis-aligned ellipse (5 Newton steps). p is (N, 2)."""
+    p = np.abs(p)
+    ab = np.asarray(ab, float)
+    q = ab * (p - ab)
+    cs = np.where((q[:, 0] < q[:, 1])[:, None], np.array([0.01, 1.0]), np.array([1.0, 0.01]))
+    cs = cs / np.linalg.norm(cs, axis=1, keepdims=True)
+    for _ in range(5):
+        u = ab * cs
+        v = ab * np.stack([-cs[:, 1], cs[:, 0]], 1)
+        a = ((p - u) * v).sum(1)
+        c = ((p - u) * u).sum(1) + (v * v).sum(1)
+        b = np.sqrt(np.maximum(c * c - a * a, 0))
+        cs = np.stack([cs[:, 0] * b - cs[:, 1] * a, cs[:, 1] * b + cs[:, 0] * a], 1) / c[:, None]
+    d = np.linalg.norm(p - ab * cs, axis=1)
+    return np.where(((p / ab) ** 2).sum(1) > 1.0, d, -d)
+
+
+def sd_cylinder(p, r):
+    d = sd_ellipse(p[:, [0, 2]], r[[0, 2]])
+    w = np.stack([d, np.abs(p[:, 1]) - r[1]], 1)
+    return np.minimum(np.maximum(w[:, 0], w[:, 1]), 0) + np.linalg.norm(np.maximum(w, 0), axis=1)
+
+
+def sd_ngon(p, r, n, w, bevel, thickness):
+    m = n + w * (2.0 - n)
+    an = np.pi / n
+    en = np.pi / m
+    racs = r[0] * np.array([np.cos(an), np.sin(an)])
+    ecs = np.array([np.cos(en), np.sin(en)])
+    x, y, z = np.abs(p[:, 0]), np.abs(p[:, 1]), p[:, 2]
+    bn = _glsl_mod(np.arctan2(x, z), 2 * an) - an
+    rad = np.hypot(x, z)
+    px = rad * np.cos(bn) - racs[0]
+    pz = rad * np.abs(np.sin(bn)) - racs[1]
+    t = np.clip(-(px * ecs[0] + pz * ecs[1]), 0, racs[1] / ecs[1])
+    px = px + ecs[0] * t
+    pz = pz + ecs[1] * t
+    d1 = np.hypot(px, pz) * np.sign(px) - bevel
+    if thickness != 0.0:
+        d1 = np.maximum(d1, np.abs(d1) - thickness)
+    d2 = y - r[1]
+    dd = np.stack([d1, d2], 1)
+    return np.minimum(np.maximum(dd[:, 0], dd[:, 1]), 0) + np.linalg.norm(np.maximum(dd, 0), axis=1)
+
+
+def sd_triprism(p, h, bevel, thickness):
+    x = np.abs(p[:, 0]) - h[0]
+    y = p[:, 1] + h[1]
+    z = p[:, 2]
+    end = np.array([-h[0], h[1] * 2.0])
+    t = np.clip((x * end[0] + y * end[1]) / (end @ end), 0, 1)
+    sx = x - end[0] * t
+    sy = y - end[1] * t
+    d1 = np.hypot(sx, sy)
+    d1 = np.where(np.maximum(sx, sy) < 0, -np.minimum(d1, y), d1)
+    d1 = d1 - bevel
+    if thickness != 0.0:
+        d1 = np.maximum(d1, np.abs(d1) - thickness)
+    d2 = np.abs(z) - h[2] - bevel
+    dd = np.stack([d1, d2], 1)
+    return np.linalg.norm(np.maximum(dd, 0), axis=1) + np.minimum(np.maximum(d1, d2), 0)
