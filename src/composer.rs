@@ -289,6 +289,8 @@ pub struct Composer {
     frame_pending: bool,
     drag: Option<Drag>,
     pending: Option<Pending>,
+    /// Where the viewport was drawn last (tests aim the pointer with it).
+    last_view: egui::Rect,
     pub status: String,
 }
 
@@ -316,6 +318,7 @@ impl Default for Composer {
             frame_pending: true,
             drag: None,
             pending: None,
+            last_view: egui::Rect::NOTHING,
             status: String::new(),
         }
     }
@@ -749,12 +752,13 @@ impl Composer {
 fn number(ui: &mut egui::Ui, label: &str, value: &mut f64, speed: f64, range: Option<std::ops::RangeInclusive<f64>>) -> bool {
     let mut changed = false;
     ui.horizontal(|ui| {
-        ui.label(label);
+        let name = ui.label(label);
         let mut widget = egui::DragValue::new(value).speed(speed);
         if let Some(range) = range {
             widget = widget.range(range);
         }
-        changed = ui.add(widget).changed();
+        let response = ui.add(widget).labelled_by(name.id);
+        changed = response.changed();
     });
     changed
 }
@@ -762,9 +766,9 @@ fn number(ui: &mut egui::Ui, label: &str, value: &mut f64, speed: f64, range: Op
 fn vec3(ui: &mut egui::Ui, label: &str, value: &mut [f64; 3], speed: f64) -> bool {
     let mut changed = false;
     ui.horizontal(|ui| {
-        ui.label(label);
+        let name = ui.label(label);
         for component in value.iter_mut() {
-            changed |= ui.add(egui::DragValue::new(component).speed(speed)).changed();
+            changed |= ui.add(egui::DragValue::new(component).speed(speed)).labelled_by(name.id).changed();
         }
     });
     changed
@@ -793,12 +797,12 @@ fn param_choice(ui: &mut egui::Ui, node: &mut Node, key: &str, label: &str, opti
     let shown = options.iter().find(|(id, _)| *id == current).map_or(current.as_str(), |(_, name)| name);
     let mut chosen = current.clone();
     ui.horizontal(|ui| {
-        ui.label(label);
+        let name = ui.label(label);
         egui::ComboBox::from_id_salt(("composer choice", key)).selected_text(shown).show_ui(ui, |ui| {
-            for (id, name) in options {
-                ui.selectable_value(&mut chosen, id.to_string(), *name);
+            for (id, option) in options {
+                ui.selectable_value(&mut chosen, id.to_string(), *option);
             }
-        });
+        }).response.labelled_by(name.id);
     });
     if chosen != current {
         node.set(key, Value::from(chosen));
@@ -839,8 +843,8 @@ impl Composer {
             return;
         }
         ui.horizontal(|ui| {
-            ui.label("Name");
-            edited |= ui.text_edit_singleline(&mut node.name).changed();
+            let name = ui.label("Name");
+            edited |= ui.text_edit_singleline(&mut node.name).labelled_by(name.id).changed();
         });
         if is_shape {
             edited |= param_choice(ui, node, "brush", "Form", &BRUSHES);
@@ -864,8 +868,8 @@ impl Composer {
         if is_shape {
             let mut color = node.color.map(|c| c as f32);
             ui.horizontal(|ui| {
-                ui.label("Color");
-                if ui.color_edit_button_rgb(&mut color).changed() {
+                let name = ui.label("Color");
+                if ui.color_edit_button_rgb(&mut color).labelled_by(name.id).changed() {
                     node.color = color.map(f64::from);
                     edited = true;
                 }
@@ -973,6 +977,7 @@ impl Composer {
     fn hierarchy(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             let names: Vec<String> = self.file.layers.iter().map(|l| l.name.clone()).collect();
+            let heading = ui.label("Layer");
             egui::ComboBox::from_id_salt("composer layer").selected_text(names.get(self.layer).cloned().unwrap_or_default()).show_ui(ui, |ui| {
                 for (i, name) in names.iter().enumerate() {
                     if ui.selectable_value(&mut self.layer, i, name).clicked() {
@@ -982,11 +987,11 @@ impl Composer {
                         self.frame_pending = true;
                     }
                 }
-            });
+            }).response.labelled_by(heading.id);
             let mut toggled = false;
             if let Some(layer) = self.file.layers.get_mut(self.layer) {
                 let mut visible = !layer.hidden;
-                if ui.checkbox(&mut visible, "").on_hover_text("Show this layer").changed() {
+                if ui.checkbox(&mut visible, "Visible").on_hover_text("Show this layer").changed() {
                     layer.hidden = !visible;
                     toggled = true;
                 }
@@ -994,16 +999,21 @@ impl Composer {
             if toggled {
                 self.touch();
             }
-            if ui.button("+").on_hover_text("Add a layer").clicked() {
+            if ui.button("Add layer").on_hover_text("Add a layer").clicked() {
                 self.add_layer();
             }
-            if ui.add_enabled(self.file.layers.len() > 1, egui::Button::new("Delete")).on_hover_text("Delete this layer").clicked() {
+            if ui.add_enabled(self.file.layers.len() > 1, egui::Button::new("Delete layer")).on_hover_text("Delete this layer").clicked() {
                 self.delete_layer();
             }
         });
-        if let Some(layer) = self.file.layers.get_mut(self.layer)
-            && ui.text_edit_singleline(&mut layer.name).changed()
-        {
+        let mut renamed = false;
+        if let Some(layer) = self.file.layers.get_mut(self.layer) {
+            ui.horizontal(|ui| {
+                let name = ui.label("Name");
+                renamed = ui.text_edit_singleline(&mut layer.name).labelled_by(name.id).changed();
+            });
+        }
+        if renamed {
             self.touch();
         }
         ui.separator();
@@ -1119,6 +1129,7 @@ impl Composer {
 
     fn viewport(&mut self, ui: &mut egui::Ui, format: wgpu::TextureFormat) {
         let rect = ui.available_rect_before_wrap();
+        self.last_view = rect;
         let response = ui.interact(rect, ui.scope_id().with("composer view"), egui::Sense::click_and_drag());
         let ctx = ui.ctx().clone();
         let size = rect.size();
@@ -1217,9 +1228,6 @@ impl Composer {
         }
         if hovered_axis.is_some() {
             ctx.set_cursor_icon(egui::CursorIcon::Grab);
-        }
-        if self.drag.is_some() {
-            ctx.request_repaint();
         }
     }
 
@@ -1705,5 +1713,199 @@ mod safety_tests {
         restored.restore(&json, (!path.is_empty()).then(|| PathBuf::from(path)), modified);
         assert_eq!(restored.shapes().len(), 2);
         assert!(restored.modified);
+    }
+}
+
+#[cfg(test)]
+mod ui_tests {
+    use super::*;
+    use egui_kittest::{Harness, kittest::Queryable};
+
+    fn harness() -> Harness<'static, Composer> {
+        Harness::builder().with_size(egui::Vec2::new(1200.0, 800.0)).with_step_dt(1.0 / 60.0).build_ui_state(
+            |ui, composer: &mut Composer| composer.show(ui, wgpu::TextureFormat::Rgba8Unorm),
+            Composer::default(),
+        )
+    }
+
+    /// The first widget with this label (a name can appear twice: a button and a combo's current value).
+    fn click(h: &mut Harness<'static, Composer>, label: &str) {
+        h.get_all_by_label(label).next().unwrap_or_else(|| panic!("no widget labelled {label}")).click();
+        h.run();
+    }
+
+    fn press(h: &mut Harness<'static, Composer>, pos: egui::Pos2, pressed: bool) {
+        h.event(egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: Default::default() });
+        h.run();
+    }
+
+    #[test]
+    fn the_add_buttons_add_shapes_and_a_row_selects_one() {
+        let mut h = harness();
+        h.run();
+        click(&mut h, "Cube");
+        click(&mut h, "Sphere");
+        assert_eq!(h.state().shapes().len(), 2);
+        assert_eq!(h.state().shapes()[0].text("brush"), Some("cube"));
+        assert_eq!(h.state().shapes()[1].text("brush"), Some("sphere"));
+        click(&mut h, "+ Cube");
+        assert_eq!(h.state().selection, Some(vec![0]));
+        // The inspector now shows the selected shape.
+        h.get_by_label("Shape");
+    }
+
+    #[test]
+    fn dragging_a_row_onto_another_makes_a_group() {
+        let mut h = harness();
+        h.run();
+        click(&mut h, "Cube");
+        click(&mut h, "Sphere");
+        let from = h.get_by_label("+ Cube").rect().center();
+        let to = h.get_by_label("+ Sphere").rect().center();
+        h.hover_at(from);
+        h.run();
+        press(&mut h, from, true);
+        for step in 1..=10 {
+            h.hover_at(from + (to - from) * step as f32 / 10.0);
+            h.run();
+        }
+        press(&mut h, to, false);
+        assert_eq!(h.state().shapes().len(), 1, "the two shapes are now one group: {:?}", h.state().shapes().iter().map(|n| &n.kind).collect::<Vec<_>>());
+        assert_eq!(h.state().shapes()[0].kind, "group");
+        assert_eq!(h.state().shapes()[0].children().len(), 2);
+    }
+
+    #[test]
+    fn undo_in_the_toolbar_takes_the_last_edit_back() {
+        let mut h = harness();
+        h.run();
+        click(&mut h, "Cube");
+        click(&mut h, "Sphere");
+        assert_eq!(h.state().shapes().len(), 2);
+        click(&mut h, "Undo");
+        assert_eq!(h.state().shapes().len(), 1);
+        click(&mut h, "Redo");
+        assert_eq!(h.state().shapes().len(), 2);
+    }
+
+    #[test]
+    fn duplicate_and_delete_work_on_the_selected_row() {
+        let mut h = harness();
+        h.run();
+        click(&mut h, "Polygon");
+        assert_eq!(h.state().shapes().len(), 1);
+        click(&mut h, "Duplicate");
+        assert_eq!(h.state().shapes().len(), 2);
+        click(&mut h, "Delete");
+        assert_eq!(h.state().shapes().len(), 1);
+    }
+
+    #[test]
+    fn dragging_a_position_value_in_the_inspector_moves_the_shape() {
+        use egui::accesskit::Role;
+        let mut h = harness();
+        h.run();
+        click(&mut h, "Cube");
+        let fields: Vec<_> = h.get_all_by_role_and_label(Role::SpinButton, "Position").collect();
+        assert_eq!(fields.len(), 3, "x, y and z");
+        let from = fields[0].rect().center();
+        drop(fields);
+        h.hover_at(from);
+        h.run();
+        press(&mut h, from, true);
+        for step in 1..=8 {
+            h.hover_at(from + egui::vec2(5.0 * step as f32, 0.0));
+            h.run();
+        }
+        press(&mut h, from + egui::vec2(40.0, 0.0), false);
+        let moved = h.state().shapes()[0].position[0];
+        assert!(moved > 0.1, "the shape's x moved to {moved}");
+        assert_eq!(h.state().shapes()[0].position[1], 0.0);
+        assert!(h.state().undo.len() == 2 || h.state().changed, "the move is an undo step (or about to become one)");
+    }
+
+    #[test]
+    fn the_mirror_checkboxes_set_the_shape_s_mirror_flags() {
+        let mut h = harness();
+        h.run();
+        click(&mut h, "Sphere");
+        assert_eq!(h.state().shapes()[0].flag("mirror_x"), Some(false));
+        click(&mut h, "X");
+        assert_eq!(h.state().shapes()[0].flag("mirror_x"), Some(true));
+        // A blend width appears once a mirror is on.
+        h.get_by_label("Mirror blend");
+    }
+
+    /// Drags from `from` to `to` with the primary button, in small steps.
+    fn drag(h: &mut Harness<'static, Composer>, from: egui::Pos2, to: egui::Pos2) {
+        h.hover_at(from);
+        h.run();
+        press(h, from, true);
+        for step in 1..=12 {
+            h.hover_at(from + (to - from) * step as f32 / 12.0);
+            h.run();
+        }
+        press(h, to, false);
+    }
+
+    fn view_projection(c: &Composer, p: V3) -> egui::Pos2 {
+        let rect = c.last_view;
+        let q = c.camera.project(p, [rect.width(), rect.height()]).expect("in front of the camera");
+        rect.min + egui::vec2(q[0], q[1])
+    }
+
+    #[test]
+    fn dragging_the_move_handle_in_the_viewport_moves_the_shape() {
+        let mut h = harness();
+        h.run();
+        click(&mut h, "Cube");
+        h.run();
+        let c = h.state();
+        let rect = c.last_view;
+        let g = c.gizmo_geometry(rect).expect("the new shape is selected");
+        // Grab the X handle halfway along, and drag it along its own screen direction.
+        let origin = view_projection(c, g.origin);
+        let tip = view_projection(c, [0, 1, 2].map(|k| g.origin[k] + g.axes[0][k] * g.length));
+        let grab = origin + (tip - origin) * 0.5;
+        let to = grab + (tip - origin) * 0.5;
+        drag(&mut h, grab, to);
+        let moved = h.state().shapes()[0].position;
+        assert!(moved[0] > 0.1, "x moved to {}", moved[0]);
+        assert!(moved[1].abs() < 1e-6 && moved[2].abs() < 1e-6, "only x moves: {moved:?}");
+    }
+
+    #[test]
+    fn dragging_empty_space_orbits_the_camera() {
+        let mut h = harness();
+        h.run();
+        click(&mut h, "Cube");
+        let before = h.state().camera;
+        let rect = h.state().last_view;
+        let from = rect.min + egui::vec2(rect.width() * 0.2, rect.height() * 0.8);
+        drag(&mut h, from, from + egui::vec2(80.0, 0.0));
+        let after = h.state().camera;
+        assert!((after.yaw - before.yaw).abs() > 0.3, "yaw {} -> {}", before.yaw, after.yaw);
+        assert_eq!(after.distance, before.distance);
+    }
+
+    #[test]
+    fn clicking_a_shape_in_the_viewport_selects_it() {
+        let mut h = harness();
+        h.run();
+        click(&mut h, "Sphere");
+        click(&mut h, "Cube");
+        h.run();
+        // Frame the view on the shapes, then click the middle of it.
+        h.state_mut().selection = None;
+        h.run();
+        h.run();
+        let rect = h.state().last_view;
+        let center = view_projection(h.state(), h.state().camera.target);
+        assert!(rect.contains(center));
+        h.hover_at(center);
+        h.run();
+        press(&mut h, center, true);
+        press(&mut h, center, false);
+        assert!(h.state().selection.is_some(), "a shape sits at the middle of the framed view");
     }
 }
