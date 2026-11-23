@@ -2445,4 +2445,42 @@ mod ui_tests {
         h.run();
         assert!(h.state().camera.pitch > 1.4);
     }
+
+    #[test]
+    fn the_outliner_dropdowns_change_the_operation_and_the_shape() {
+        let mut h = harness();
+        h.run();
+        click(&mut h, "Add cube");
+        h.state_mut().selection = None;
+        h.run();
+        click(&mut h, "Operation: Add");
+        click(&mut h, "Subtract");
+        assert_eq!(h.state().shapes()[0].text("mode"), Some("sub"));
+        click(&mut h, "Shape: cube");
+        click(&mut h, "Cylinder");
+        assert_eq!(h.state().shapes()[0].text("brush"), Some("cylinder"));
+    }
+
+    #[test]
+    fn inserting_a_file_adds_a_group_per_layer_with_its_placement() {
+        let path = std::env::temp_dir().join("noiser_insert_test.sdf");
+        let mut file = blank_file();
+        file.assemblies[0].shapes.push(new_shape("sphere"));
+        file.layers[0].name = "First".into();
+        let mut second = new_layer("Second", 0);
+        second.position = [4.0, 0.0, 0.0];
+        second.scale = [2.0; 3];
+        file.layers.push(second);
+        file.save(&path).unwrap();
+        let mut c = Composer::default();
+        c.insert_file(&path).unwrap();
+        let outer = &c.shapes()[0];
+        assert_eq!(outer.kind, "group");
+        assert_eq!(outer.name, "noiser_insert_test");
+        let layers = outer.children();
+        assert_eq!(layers.len(), 2);
+        assert_eq!((layers[0].name.as_str(), layers[0].position), ("First", [0.0; 3]));
+        assert_eq!((layers[1].name.as_str(), layers[1].position, layers[1].scale), ("Second", [4.0, 0.0, 0.0], [2.0; 3]));
+        assert_eq!(layers[1].children().len(), 1);
+    }
 }
