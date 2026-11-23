@@ -432,31 +432,25 @@ mod tests {
     }
 
     /// Writes a noise graph and a mesh graph that roughens a `.sdf` shape with it, for screenshots:
-    /// `NOISER_DEMO_DIR=dir NOISER_SDF=file.sdf cargo test write_demo_graphs -- --ignored`.
+    /// `NOISER_DEMO_DIR=dir cargo test write_demo_graphs -- --ignored` (the folder should hold Rocket.sdf).
     #[test]
     #[ignore]
     fn write_demo_graphs() {
         use crate::graph::{Graph, MathOp, NodeKind};
-        let (Ok(dir), Ok(sdf)) = (std::env::var("NOISER_DEMO_DIR"), std::env::var("NOISER_SDF")) else { return };
+        let Ok(dir) = std::env::var("NOISER_DEMO_DIR") else { return };
         let dir = std::path::PathBuf::from(dir);
         let noise_path = dir.join("Cells.noisegraph");
         let noise_json = Graph::template("Warped cells").to_json();
         std::fs::write(&noise_path, &noise_json).unwrap();
-        // The mesh graph needs a Load Mesh node to know where to look: a ball around the shape, and the shape cut out of it.
-        let ball = crate::mesh::shapes::icosphere(3.6, 3);
-        crate::surface::RawMesh { normals: ball.positions.clone(), positions: ball.positions, triangles: ball.triangles }.write_obj(&dir.join("Ball.obj")).unwrap();
+        // Paths are relative to the graph's own folder, so the files can be shared together.
         let mut g = Graph::default();
-        let mesh = g.add(NodeKind::LoadMesh(crate::meshgraph::LoadMeshParams { path: dir.join("Ball.obj").to_string_lossy().into_owned(), resolution: 96, ..Default::default() }), [0.0, 0.0]);
-        let shape = g.add(NodeKind::LoadSdf(LoadSdfParams { file: sdf, fit: false, ..Default::default() }), [0.0, 110.0]);
-        let inside = g.add(NodeKind::Math { op: MathOp::Max, a: 0.0, b: 0.0, c: 0.5 }, [220.0, 50.0]);
-        let noise = g.add(NodeKind::NoiseGraph(crate::meshgraph::NoiseGraphParams { file: noise_path.to_string_lossy().into_owned(), embedded: noise_json, frequency: 0.8, amplitude: 0.1, detached: false }), [220.0, 200.0]);
-        let add = g.add(NodeKind::Math { op: MathOp::Add, a: 0.0, b: 0.0, c: 0.5 }, [440.0, 100.0]);
-        let remesh = g.add(NodeKind::Remesh { triangles: 20_000, adaptivity: 1.0 }, [640.0, 100.0]);
-        let uv = g.add(NodeKind::AutoUv(Default::default()), [840.0, 100.0]);
-        let out = g.add(NodeKind::OutMesh(crate::meshgraph::OutParams { name: "rocket_rough".into(), ..Default::default() }), [1040.0, 100.0]);
-        g.connect(mesh, inside, 0);
-        g.connect(shape, inside, 1);
-        g.connect(inside, add, 0);
+        let shape = g.add(NodeKind::LoadSdf(LoadSdfParams { file: "Rocket.sdf".into(), fit: false, ..Default::default() }), [0.0, 0.0]);
+        let noise = g.add(NodeKind::NoiseGraph(crate::meshgraph::NoiseGraphParams { file: "Cells.noisegraph".into(), embedded: noise_json, frequency: 0.8, amplitude: 0.1, detached: false }), [0.0, 130.0]);
+        let add = g.add(NodeKind::Math { op: MathOp::Add, a: 0.0, b: 0.0, c: 0.5 }, [220.0, 60.0]);
+        let remesh = g.add(NodeKind::Remesh { triangles: 20_000, adaptivity: 1.0 }, [420.0, 60.0]);
+        let uv = g.add(NodeKind::AutoUv(Default::default()), [620.0, 60.0]);
+        let out = g.add(NodeKind::OutMesh(crate::meshgraph::OutParams { folder: "out".into(), name: "rocket_rough".into(), ..Default::default() }), [820.0, 60.0]);
+        g.connect(shape, add, 0);
         g.connect(noise, add, 1);
         g.connect(add, remesh, 0);
         g.connect(remesh, uv, 0);

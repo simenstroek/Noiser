@@ -23,7 +23,7 @@ The three tabs: the **SDF Composer** (build and edit shapes, with the library dr
 ## Running it
 
 Download `noiser-windows-x64.zip` from the latest release, unzip it and run `noiser.exe`. To open a
-graph straight away: `noiser.exe SimpleTestGraph.noisegraph` (an example is in the zip). The `examples` folder in the repository has a few shapes for the SDF Composer (`Rocket.sdf`, `Pawn.sdf`, `Gear.sdf`) and a noise graph (`Cells.noisegraph`).
+graph straight away: `noiser.exe SimpleTestGraph.noisegraph` (an example is in the zip). The `examples` folder in the repository has a few shapes for the SDF Composer (`Rocket.sdf`, `Pawn.sdf`, `Gear.sdf`) a noise graph (`Cells.noisegraph`) and a mesh graph that roughens the rocket with it (`Rough rocket.meshgraph`, open it in the Mesh graph tab; its paths are relative to the file, so keep the folder together).
 
 To build from source you need a recent stable Rust toolchain:
 
