@@ -1,0 +1,60 @@
+{
+  "nodes": {
+    "0": {
+      "kind": {
+        "Pattern": {
+          "kind": "Truchet",
+          "counts": [
+            6.0,
+            6.0,
+            1.0
+          ],
+          "mode2d": true,
+          "axis": 2,
+          "steps": 2,
+          "gap": 0.1,
+          "bevel": 0.1,
+          "output": "Shape",
+          "seed": null,
+          "variant": 0,
+          "radius": 0.9,
+          "profile": 0,
+          "dir": [
+            1.0,
+            0.0,
+            0.0
+          ],
+          "iterations": 3,
+          "width": 0.3,
+          "softness": 0.1,
+          "amount": 1.0
+        }
+      },
+      "pos": [
+        200.0,
+        0.0
+      ]
+    },
+    "1": {
+      "kind": "OutDensity",
+      "pos": [
+        420.0,
+        0.0
+      ]
+    },
+    "2": {
+      "kind": "OutNormal",
+      "pos": [
+        420.0,
+        120.0
+      ]
+    }
+  },
+  "edges": [
+    {
+      "from": 0,
+      "to": 1,
+      "port": 0
+    }
+  ]
+}

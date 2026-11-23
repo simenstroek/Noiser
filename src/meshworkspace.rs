@@ -543,6 +543,10 @@ impl MeshWorkspace {
         }
     }
 
+    pub fn has_preview(&self) -> bool {
+        self.preview.is_some()
+    }
+
     pub fn dirty(&self) -> bool {
         self.graph != self.saved
     }

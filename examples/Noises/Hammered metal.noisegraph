@@ -1,0 +1,126 @@
+{
+  "nodes": {
+    "0": {
+      "kind": {
+        "Pattern": {
+          "kind": "Dimples",
+          "counts": [
+            4.0,
+            4.0,
+            4.0
+          ],
+          "mode2d": false,
+          "axis": 2,
+          "steps": 2,
+          "gap": 0.1,
+          "bevel": 0.1,
+          "output": "Shape",
+          "seed": null,
+          "variant": 1,
+          "radius": 0.9,
+          "profile": 0,
+          "dir": [
+            1.0,
+            0.0,
+            0.0
+          ],
+          "iterations": 3,
+          "width": 0.5,
+          "softness": 0.1,
+          "amount": 1.0
+        }
+      },
+      "pos": [
+        200.0,
+        0.0
+      ]
+    },
+    "1": {
+      "kind": {
+        "Noise": {
+          "kind": "Simplex",
+          "feature": "F1",
+          "fractal": false,
+          "metric": "Euclidean",
+          "jitter": 1.0,
+          "scale": 24.0,
+          "normalize": false,
+          "octaves": 3,
+          "lacunarity": 2.0,
+          "roughness": 0.5,
+          "distortion": 0.0,
+          "seed": null,
+          "amount": 1.0
+        }
+      },
+      "pos": [
+        200.0,
+        200.0
+      ]
+    },
+    "2": {
+      "kind": {
+        "Math": {
+          "op": "Multiply",
+          "a": 0.0,
+          "b": 0.08,
+          "c": 0.5
+        }
+      },
+      "pos": [
+        400.0,
+        200.0
+      ]
+    },
+    "3": {
+      "kind": {
+        "Math": {
+          "op": "Add",
+          "a": 0.0,
+          "b": 0.0,
+          "c": 0.5
+        }
+      },
+      "pos": [
+        600.0,
+        80.0
+      ]
+    },
+    "4": {
+      "kind": "OutDensity",
+      "pos": [
+        820.0,
+        0.0
+      ]
+    },
+    "5": {
+      "kind": "OutNormal",
+      "pos": [
+        820.0,
+        120.0
+      ]
+    }
+  },
+  "edges": [
+    {
+      "from": 1,
+      "to": 2,
+      "port": 0
+    },
+    {
+      "from": 0,
+      "to": 3,
+      "port": 0
+    },
+    {
+      "from": 2,
+      "to": 3,
+      "port": 1
+    },
+    {
+      "from": 3,
+      "to": 4,
+      "port": 0
+    }
+  ]
+}

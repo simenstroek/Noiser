@@ -8,11 +8,12 @@ also displace low-polygon meshes (single files or whole batches, from the app or
 Everything is evaluated on the GPU (Rust, egui, wgpu). Resolution never limits the detail: the graph
 stays a function, and exports sample it at whatever resolution you ask for.
 
-The three tabs: the **SDF Composer** (build and edit shapes, with the library drawer along the bottom), the **Noise graph** (a Warped cells graph, with its 3D view and slice) and the **Mesh graph** (a rocket from the Composer roughened by a noise graph, shown as the ray-marched field and as the remeshed result; no mesh file is needed, the Load SDF node is the only input).
+The three tabs: the **SDF Composer** (build and edit shapes, with the library drawer along the bottom), the **Noise graph** (a Warped cells graph, with its 3D view and slice) and the **Mesh graph** (a vase from the Composer roughened by a noise graph, shown as the ray-marched field and as the remeshed result; no mesh file is needed, the Load SDF node is the only input).
 
-![The SDF Composer with the move gizmo on a fin, and the library drawer](docs/screenshots/composer.png)
+![The SDF Composer with the move gizmo on a robot's head, and the library drawer with the example shapes](docs/screenshots/composer.png)
 ![The Noise graph tab with a Warped cells graph](docs/screenshots/noise-graph.png)
 ![The Mesh graph tab: an SDF shape plus a noise graph, remeshed](docs/screenshots/mesh-graph.png)
+![The library drawer in the Noise graph tab, showing the example noises](docs/screenshots/library.png)
 
 ![A low-poly rock and the same rock displaced by a Noiser graph](docs/mesh-example.png)
 
@@ -23,7 +24,7 @@ The three tabs: the **SDF Composer** (build and edit shapes, with the library dr
 ## Running it
 
 Download `noiser-windows-x64.zip` from the latest release, unzip it and run `noiser.exe`. To open a
-graph straight away: `noiser.exe SimpleTestGraph.noisegraph` (an example is in the zip). The `examples` folder in the repository has a few shapes for the SDF Composer (`Rocket.sdf`, `Pawn.sdf`, `Gear.sdf`, `Painted cube.sdf`) a noise graph (`Cells.noisegraph`) and a mesh graph that roughens the rocket with it (`Rough rocket.meshgraph`, open it in the Mesh graph tab; its paths are relative to the file, so keep the folder together).
+graph straight away: `noiser.exe SimpleTestGraph.noisegraph` (an example is in the zip). The `examples` folder in the repository is a ready-made library: ten shapes for the SDF Composer (`SDFs`), ten noise graphs (`Noises`) and a mesh graph that roughens a vase with one of them (`Mesh Graphs`), each with the picture the drawer shows. Point Preferences > File paths at it (or copy it) and press Tab. The mesh graph's paths are relative, so keep the three folders together.
 
 To build from source you need a recent stable Rust toolchain:
 

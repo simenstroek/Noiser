@@ -1,0 +1,222 @@
+{
+  "nodes": {
+    "0": {
+      "kind": {
+        "Position": {
+          "scale": [
+            1.0,
+            1.0,
+            1.0
+          ]
+        }
+      },
+      "pos": [
+        0.0,
+        0.0
+      ]
+    },
+    "1": {
+      "kind": {
+        "Noise": {
+          "kind": "Perlin",
+          "feature": "F1",
+          "fractal": false,
+          "metric": "Euclidean",
+          "jitter": 1.0,
+          "scale": 2.0,
+          "normalize": false,
+          "octaves": 3,
+          "lacunarity": 2.0,
+          "roughness": 0.5,
+          "distortion": 0.0,
+          "seed": 30,
+          "amount": 1.0
+        }
+      },
+      "pos": [
+        200.0,
+        0.0
+      ]
+    },
+    "2": {
+      "kind": {
+        "Noise": {
+          "kind": "Perlin",
+          "feature": "F1",
+          "fractal": false,
+          "metric": "Euclidean",
+          "jitter": 1.0,
+          "scale": 2.0,
+          "normalize": false,
+          "octaves": 3,
+          "lacunarity": 2.0,
+          "roughness": 0.5,
+          "distortion": 0.0,
+          "seed": 31,
+          "amount": 1.0
+        }
+      },
+      "pos": [
+        200.0,
+        160.0
+      ]
+    },
+    "3": {
+      "kind": {
+        "Noise": {
+          "kind": "Perlin",
+          "feature": "F1",
+          "fractal": false,
+          "metric": "Euclidean",
+          "jitter": 1.0,
+          "scale": 2.0,
+          "normalize": false,
+          "octaves": 3,
+          "lacunarity": 2.0,
+          "roughness": 0.5,
+          "distortion": 0.0,
+          "seed": 32,
+          "amount": 1.0
+        }
+      },
+      "pos": [
+        200.0,
+        320.0
+      ]
+    },
+    "4": {
+      "kind": {
+        "Combine": {
+          "vals": [
+            0.0,
+            0.0,
+            0.0
+          ]
+        }
+      },
+      "pos": [
+        420.0,
+        160.0
+      ]
+    },
+    "5": {
+      "kind": {
+        "Math": {
+          "op": "Multiply",
+          "a": 0.0,
+          "b": 0.35,
+          "c": 0.5
+        }
+      },
+      "pos": [
+        600.0,
+        160.0
+      ]
+    },
+    "6": {
+      "kind": {
+        "Math": {
+          "op": "Add",
+          "a": 0.0,
+          "b": 0.0,
+          "c": 0.5
+        }
+      },
+      "pos": [
+        780.0,
+        80.0
+      ]
+    },
+    "7": {
+      "kind": {
+        "Pattern": {
+          "kind": "Stripes",
+          "counts": [
+            8.0,
+            1.0,
+            1.0
+          ],
+          "mode2d": false,
+          "axis": 2,
+          "steps": 2,
+          "gap": 0.1,
+          "bevel": 0.1,
+          "output": "Distance",
+          "seed": null,
+          "variant": 0,
+          "radius": 0.9,
+          "profile": 0,
+          "dir": [
+            3.0,
+            1.0,
+            0.0
+          ],
+          "iterations": 3,
+          "width": 0.5,
+          "softness": 0.1,
+          "amount": 1.0
+        }
+      },
+      "pos": [
+        960.0,
+        80.0
+      ]
+    },
+    "8": {
+      "kind": "OutDensity",
+      "pos": [
+        1180.0,
+        0.0
+      ]
+    },
+    "9": {
+      "kind": "OutNormal",
+      "pos": [
+        1180.0,
+        120.0
+      ]
+    }
+  },
+  "edges": [
+    {
+      "from": 1,
+      "to": 4,
+      "port": 0
+    },
+    {
+      "from": 2,
+      "to": 4,
+      "port": 1
+    },
+    {
+      "from": 3,
+      "to": 4,
+      "port": 2
+    },
+    {
+      "from": 4,
+      "to": 5,
+      "port": 0
+    },
+    {
+      "from": 0,
+      "to": 6,
+      "port": 0
+    },
+    {
+      "from": 5,
+      "to": 6,
+      "port": 1
+    },
+    {
+      "from": 6,
+      "to": 7,
+      "port": 0
+    },
+    {
+      "from": 7,
+      "to": 8,
+      "port": 0
+    }
+  ]
+}

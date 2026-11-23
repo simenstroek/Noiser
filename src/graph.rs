@@ -1648,3 +1648,65 @@ mod frame_tests {
         assert!(g.edges.is_empty());
     }
 }
+
+#[cfg(test)]
+mod example_writer {
+    use super::*;
+
+    /// Writes the example noise graphs for the library: `NOISER_DEMO_DIR=dir cargo test write_example_noises -- --ignored`.
+    #[test]
+    #[ignore]
+    fn write_example_noises() {
+        let Ok(dir) = std::env::var("NOISER_DEMO_DIR") else { return };
+        let dir = std::path::PathBuf::from(dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for name in Graph::TEMPLATES {
+            std::fs::write(dir.join(format!("{name}.noisegraph")), Graph::template(name).to_json()).unwrap();
+        }
+        let finish = |mut g: Graph, last: NodeId, name: &str| {
+            let x = g.nodes.values().map(|n| n.pos[0]).fold(0.0, f32::max) + 220.0;
+            let out = g.add(NodeKind::OutDensity, [x, 0.0]);
+            g.add(NodeKind::OutNormal, [x, 120.0]);
+            g.connect(last, out, 0);
+            std::fs::write(dir.join(format!("{name}.noisegraph")), g.to_json()).unwrap();
+        };
+        let perlin = |scale: f32, octaves: u32, seed: u32| NodeKind::Noise(NoiseParams { kind: NoiseKind::Perlin, scale, octaves, seed: Some(seed), ..NoiseParams::default() });
+
+        // Marble: sine stripes through a position that three noises push around.
+        let mut g = Graph::default();
+        let pos = g.add(NodeKind::position(), [0.0, 0.0]);
+        let warp: Vec<NodeId> = (0..3u32).map(|i| g.add(perlin(2.0, 3, 30 + i), [200.0, i as f32 * 160.0])).collect();
+        let combine = g.add(NodeKind::Combine { vals: [0.0; 3] }, [420.0, 160.0]);
+        for (port, n) in warp.iter().enumerate() {
+            g.connect(*n, combine, port);
+        }
+        let scaled = g.add(NodeKind::Math { op: MathOp::Multiply, a: 0.0, b: 0.35, c: 0.5 }, [600.0, 160.0]);
+        g.connect(combine, scaled, 0);
+        let moved = g.add(NodeKind::Math { op: MathOp::Add, a: 0.0, b: 0.0, c: 0.5 }, [780.0, 80.0]);
+        g.connect(pos, moved, 0);
+        g.connect(scaled, moved, 1);
+        let mut stripes = PatternParams::for_kind(PatternKind::Stripes);
+        stripes.dir = [3.0, 1.0, 0.0];
+        let veins = g.add(NodeKind::Pattern(stripes), [960.0, 80.0]);
+        g.connect(moved, veins, 0);
+        finish(g, veins, "Marble");
+
+        // Hammered metal: round dimples with a little fine grain on top.
+        let mut g = Graph::default();
+        let dimples = g.add(NodeKind::Pattern(PatternParams::for_kind(PatternKind::Dimples)), [200.0, 0.0]);
+        let grain = g.add(NodeKind::Noise(NoiseParams { kind: NoiseKind::Simplex, scale: 24.0, octaves: 3, ..NoiseParams::default() }), [200.0, 200.0]);
+        let faint = g.add(NodeKind::Math { op: MathOp::Multiply, a: 0.0, b: 0.08, c: 0.5 }, [400.0, 200.0]);
+        let sum = g.add(NodeKind::Math { op: MathOp::Add, a: 0.0, b: 0.0, c: 0.5 }, [600.0, 80.0]);
+        g.connect(grain, faint, 0);
+        g.connect(dimples, sum, 0);
+        g.connect(faint, sum, 1);
+        finish(g, sum, "Hammered metal");
+
+        // Honeycomb and Truchet tiles, as they come.
+        for (kind, name) in [(PatternKind::Honeycomb, "Honeycomb"), (PatternKind::Truchet, "Truchet maze")] {
+            let mut g = Graph::default();
+            let pattern = g.add(NodeKind::Pattern(PatternParams::for_kind(kind)), [200.0, 0.0]);
+            finish(g, pattern, name);
+        }
+    }
+}

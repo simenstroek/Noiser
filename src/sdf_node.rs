@@ -432,30 +432,28 @@ mod tests {
     }
 
     /// Writes a noise graph and a mesh graph that roughens a `.sdf` shape with it, for screenshots:
-    /// `NOISER_DEMO_DIR=dir cargo test write_demo_graphs -- --ignored` (the folder should hold Rocket.sdf).
+    /// `NOISER_DEMO_DIR=dir cargo test write_demo_graphs -- --ignored` (the folder is the library's Mesh Graphs folder, next to SDFs and Noises).
     #[test]
     #[ignore]
     fn write_demo_graphs() {
         use crate::graph::{Graph, MathOp, NodeKind};
         let Ok(dir) = std::env::var("NOISER_DEMO_DIR") else { return };
         let dir = std::path::PathBuf::from(dir);
-        let noise_path = dir.join("Cells.noisegraph");
         let noise_json = Graph::template("Warped cells").to_json();
-        std::fs::write(&noise_path, &noise_json).unwrap();
         // Paths are relative to the graph's own folder, so the files can be shared together.
         let mut g = Graph::default();
-        let shape = g.add(NodeKind::LoadSdf(LoadSdfParams { file: "Rocket.sdf".into(), fit: false, ..Default::default() }), [0.0, 0.0]);
-        let noise = g.add(NodeKind::NoiseGraph(crate::meshgraph::NoiseGraphParams { file: "Cells.noisegraph".into(), embedded: noise_json, frequency: 0.8, amplitude: 0.1, detached: false }), [0.0, 130.0]);
+        let shape = g.add(NodeKind::LoadSdf(LoadSdfParams { file: "../SDFs/Vase.sdf".into(), fit: false, ..Default::default() }), [0.0, 0.0]);
+        let noise = g.add(NodeKind::NoiseGraph(crate::meshgraph::NoiseGraphParams { file: "../Noises/Warped cells.noisegraph".into(), embedded: noise_json, frequency: 0.8, amplitude: 0.1, detached: false }), [0.0, 130.0]);
         let add = g.add(NodeKind::Math { op: MathOp::Add, a: 0.0, b: 0.0, c: 0.5 }, [220.0, 60.0]);
         let remesh = g.add(NodeKind::Remesh { triangles: 20_000, adaptivity: 1.0 }, [420.0, 60.0]);
         let uv = g.add(NodeKind::AutoUv(Default::default()), [620.0, 60.0]);
-        let out = g.add(NodeKind::OutMesh(crate::meshgraph::OutParams { folder: "out".into(), name: "rocket_rough".into(), ..Default::default() }), [820.0, 60.0]);
+        let out = g.add(NodeKind::OutMesh(crate::meshgraph::OutParams { folder: "out".into(), name: "vase_rough".into(), ..Default::default() }), [820.0, 60.0]);
         g.connect(shape, add, 0);
         g.connect(noise, add, 1);
         g.connect(add, remesh, 0);
         g.connect(remesh, uv, 0);
         g.connect(uv, out, 0);
-        std::fs::write(dir.join("Rough rocket.meshgraph"), g.to_json()).unwrap();
+        std::fs::write(dir.join("Rough vase.meshgraph"), g.to_json()).unwrap();
     }
 
     /// A Mesh graph run: a ball of radius 1 (a mesh file) with a sphere of radius 0.5 (a .sdf) carved out of it.

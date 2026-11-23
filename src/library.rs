@@ -240,6 +240,14 @@ fn load_texture(ctx: &egui::Context, path: &Path) -> Option<egui::TextureHandle>
 }
 
 impl Drawer {
+    pub fn tab(&self) -> Kind {
+        self.tab.unwrap_or(Kind::Sdf)
+    }
+
+    pub fn set_tab(&mut self, kind: Kind) {
+        self.tab = Some(kind);
+    }
+
     fn entries(&mut self, kind: Kind) -> Vec<Entry> {
         let stale = self.listings.get(&kind).is_none_or(|(at, _)| at.elapsed() > RESCAN);
         if stale {

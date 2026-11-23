@@ -3,7 +3,7 @@
     "0": {
       "kind": {
         "LoadSdf": {
-          "file": "Rocket.sdf",
+          "file": "../SDFs/Vase.sdf",
           "fit": false,
           "size": 0.8,
           "offset": [
@@ -21,7 +21,7 @@
     "1": {
       "kind": {
         "NoiseGraph": {
-          "file": "Cells.noisegraph",
+          "file": "../Noises/Warped cells.noisegraph",
           "embedded": "{\n  \"nodes\": {\n    \"0\": {\n      \"kind\": {\n        \"Position\": {\n          \"scale\": [\n            1.0,\n            1.0,\n            1.0\n          ]\n        }\n      },\n      \"pos\": [\n        0.0,\n        0.0\n      ]\n    },\n    \"1\": {\n      \"kind\": {\n        \"Noise\": {\n          \"kind\": \"Perlin\",\n          \"feature\": \"F1\",\n          \"fractal\": false,\n          \"metric\": \"Euclidean\",\n          \"jitter\": 1.0,\n          \"scale\": 2.0,\n          \"normalize\": false,\n          \"octaves\": 2,\n          \"lacunarity\": 2.0,\n          \"roughness\": 0.5,\n          \"distortion\": 0.0,\n          \"seed\": 10,\n          \"amount\": 1.0\n        }\n      },\n      \"pos\": [\n        200.0,\n        0.0\n      ]\n    },\n    \"2\": {\n      \"kind\": {\n        \"Noise\": {\n          \"kind\": \"Perlin\",\n          \"feature\": \"F1\",\n          \"fractal\": false,\n          \"metric\": \"Euclidean\",\n          \"jitter\": 1.0,\n          \"scale\": 2.0,\n          \"normalize\": false,\n          \"octaves\": 2,\n          \"lacunarity\": 2.0,\n          \"roughness\": 0.5,\n          \"distortion\": 0.0,\n          \"seed\": 11,\n          \"amount\": 1.0\n        }\n      },\n      \"pos\": [\n        200.0,\n        160.0\n      ]\n    },\n    \"3\": {\n      \"kind\": {\n        \"Noise\": {\n          \"kind\": \"Perlin\",\n          \"feature\": \"F1\",\n          \"fractal\": false,\n          \"metric\": \"Euclidean\",\n          \"jitter\": 1.0,\n          \"scale\": 2.0,\n          \"normalize\": false,\n          \"octaves\": 2,\n          \"lacunarity\": 2.0,\n          \"roughness\": 0.5,\n          \"distortion\": 0.0,\n          \"seed\": 12,\n          \"amount\": 1.0\n        }\n      },\n      \"pos\": [\n        200.0,\n        320.0\n      ]\n    },\n    \"4\": {\n      \"kind\": {\n        \"Combine\": {\n          \"vals\": [\n            0.0,\n            0.0,\n            0.0\n          ]\n        }\n      },\n      \"pos\": [\n        420.0,\n        160.0\n      ]\n    },\n    \"5\": {\n      \"kind\": {\n        \"Math\": {\n          \"op\": \"Multiply\",\n          \"a\": 0.0,\n          \"b\": 0.15,\n          \"c\": 0.5\n        }\n      },\n      \"pos\": [\n        600.0,\n        160.0\n      ]\n    },\n    \"6\": {\n      \"kind\": {\n        \"Math\": {\n          \"op\": \"Add\",\n          \"a\": 0.0,\n          \"b\": 0.0,\n          \"c\": 0.5\n        }\n      },\n      \"pos\": [\n        780.0,\n        80.0\n      ]\n    },\n    \"7\": {\n      \"kind\": {\n        \"Noise\": {\n          \"kind\": \"Worley\",\n          \"feature\": \"Edges\",\n          \"fractal\": false,\n          \"metric\": \"Euclidean\",\n          \"jitter\": 1.0,\n          \"scale\": 5.0,\n          \"normalize\": false,\n          \"octaves\": 4,\n          \"lacunarity\": 2.0,\n          \"roughness\": 0.5,\n          \"distortion\": 0.0,\n          \"seed\": null,\n          \"amount\": 1.0\n        }\n      },\n      \"pos\": [\n        960.0,\n        80.0\n      ]\n    },\n    \"8\": {\n      \"kind\": \"OutDensity\",\n      \"pos\": [\n        1180.0,\n        0.0\n      ]\n    },\n    \"9\": {\n      \"kind\": \"OutNormal\",\n      \"pos\": [\n        1180.0,\n        120.0\n      ]\n    }\n  },\n  \"edges\": [\n    {\n      \"from\": 1,\n      \"to\": 4,\n      \"port\": 0\n    },\n    {\n      \"from\": 2,\n      \"to\": 4,\n      \"port\": 1\n    },\n    {\n      \"from\": 3,\n      \"to\": 4,\n      \"port\": 2\n    },\n    {\n      \"from\": 4,\n      \"to\": 5,\n      \"port\": 0\n    },\n    {\n      \"from\": 0,\n      \"to\": 6,\n      \"port\": 0\n    },\n    {\n      \"from\": 5,\n      \"to\": 6,\n      \"port\": 1\n    },\n    {\n      \"from\": 6,\n      \"to\": 7,\n      \"port\": 0\n    },\n    {\n      \"from\": 7,\n      \"to\": 8,\n      \"port\": 0\n    }\n  ]\n}",
           "frequency": 0.8,
           "amplitude": 0.1,
@@ -81,7 +81,7 @@
       "kind": {
         "OutMesh": {
           "folder": "out",
-          "name": "rocket_rough",
+          "name": "vase_rough",
           "image": "Png16",
           "ply": false,
           "glb": false

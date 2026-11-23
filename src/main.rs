@@ -251,6 +251,7 @@ impl App {
         let mut mesh_tab = false;
         let mut library_root_arg: Option<String> = None;
         let mut show_library = false;
+        let mut library_tab: Option<library::Kind> = None;
         let mut thumbnail_arg: Option<std::path::PathBuf> = None;
         let mut show_prefs: Option<prefs::PrefsTab> = None;
         let mut auto_preview = false;
@@ -289,6 +290,13 @@ impl App {
             } else if a == "--thumbnail-of" {
                 // For checking the picture a save into the library would write: asks for it once the view is up.
                 thumbnail_arg = args.next().map(std::path::PathBuf::from);
+            } else if a == "--library-tab" {
+                library_tab = match args.next().unwrap_or_default().as_str() {
+                    "noises" => Some(library::Kind::Noise),
+                    "meshgraphs" => Some(library::Kind::MeshGraph),
+                    _ => None,
+                };
+                show_library = true;
             } else if a == "--library" {
                 show_library = true;
             } else if a == "--prefs" {
@@ -438,6 +446,9 @@ impl App {
         }
         let graph_from_arg = mesh_graph_arg.is_some();
         app.drawer.open = show_library;
+        if let Some(kind) = library_tab {
+            app.drawer.set_tab(kind);
+        }
         app.debug_thumbnail = thumbnail_arg;
         if let Some(tab) = show_prefs {
             app.prefs_open = true;
@@ -911,7 +922,8 @@ impl App {
     /// Writes the pictures asked for by files saved into the library, from screenshots of the window.
     fn collect_thumbnails(&mut self, ctx: &egui::Context) {
         if self.debug_thumbnail.is_some() {
-            if library::view_rect().is_some() && ctx.input(|i| i.time) > 4.0 {
+            let ready = self.workspace != meshworkspace::Workspace::Mesh || self.mesh_ws.has_preview();
+            if ready && library::view_rect().is_some() && ctx.input(|i| i.time) > 4.0 {
                 if let Some(file) = self.debug_thumbnail.take() {
                     library::request_thumbnail(&file);
                 }
@@ -922,7 +934,7 @@ impl App {
         for file in library::take_requests() {
             if let Some(rect) = library::view_rect() {
                 let (tx, rx) = std::sync::mpsc::channel();
-                self.thumbnails.push((file, rect, rx));
+                self.thumbnails.push((file, rect.shrink(2.5), rx));
                 library::set_capturing(true);
                 ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::ScreenshotCallback::new(move |image| {
                     let _ = tx.send(image);
@@ -961,10 +973,12 @@ impl App {
         if !self.drawer.open {
             return;
         }
-        let hint = match self.workspace {
-            Workspace::Composer => "Drag an SDF into the view to add it to the composition.",
-            Workspace::Noise => "Drag an SDF onto the view to use it as the mesh.",
-            Workspace::Mesh => "Drag a file into the graph to make a node from it.",
+        let hint = match (self.workspace, self.drawer.tab()) {
+            (Workspace::Composer, library::Kind::Sdf) => "Drag an SDF into the view to add it to the composition.",
+            (Workspace::Noise, library::Kind::Sdf) => "Drag an SDF onto the view to use it as the mesh.",
+            (Workspace::Mesh, library::Kind::MeshGraph) => "Double-click to open a mesh graph.",
+            (Workspace::Mesh, _) => "Drag a file into the graph to make a node from it.",
+            _ => "Double-click to open it.",
         };
         let outer = ui.max_rect();
         let action = self.drawer.show(ui, hint);

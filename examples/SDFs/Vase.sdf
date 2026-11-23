@@ -1,0 +1,432 @@
+{
+	"version": [
+		0,
+		6,
+		1
+	],
+	"environment": {
+		"use_lightmap": false,
+		"lightmap": "",
+		"lightmap_rotation": 0,
+		"luminance": 1,
+		"color": [
+			0.327,
+			0.333,
+			0.34
+		]
+	},
+	"assemblies": [
+		{
+			"resolution": 6,
+			"shapes": [
+				{
+					"name": "Foot",
+					"hidden": false,
+					"type": "shape",
+					"position": [
+						0,
+						-1.55,
+						0
+					],
+					"rotation": [
+						0,
+						0,
+						0
+					],
+					"scale": [
+						1.4,
+						0.25,
+						1.4
+					],
+					"color": [
+						0.1,
+						0.5,
+						0.55
+					],
+					"mode": "add",
+					"chamfer": false,
+					"blend": 0.02,
+					"blend_strength": 0.0,
+					"mirror_x": false,
+					"mirror_y": false,
+					"mirror_z": false,
+					"mirror_blend": 0,
+					"brush": "cylinder",
+					"bevel": 0.0,
+					"round": 0.1,
+					"thickness": 1,
+					"cone": 0,
+					"star": 0,
+					"points": 6,
+					"repeat_mode": "linear",
+					"linear_repeats": [
+						1,
+						1,
+						1
+					],
+					"steps": [
+						1.5,
+						1.5,
+						1.5
+					],
+					"radial_repeats": 1,
+					"radius": 1.5,
+					"repeat_axis": "x"
+				},
+				{
+					"name": "Belly",
+					"hidden": false,
+					"type": "shape",
+					"position": [
+						0,
+						-0.1,
+						0
+					],
+					"rotation": [
+						0,
+						0,
+						0
+					],
+					"scale": [
+						2.5,
+						2.8,
+						2.5
+					],
+					"color": [
+						0.1,
+						0.5,
+						0.55
+					],
+					"mode": "add",
+					"chamfer": false,
+					"blend": 0.3,
+					"blend_strength": 0.0,
+					"mirror_x": false,
+					"mirror_y": false,
+					"mirror_z": false,
+					"mirror_blend": 0,
+					"brush": "sphere",
+					"bevel": 0.0,
+					"round": 0.1,
+					"thickness": 1,
+					"cone": 0,
+					"star": 0,
+					"points": 6,
+					"repeat_mode": "linear",
+					"linear_repeats": [
+						1,
+						1,
+						1
+					],
+					"steps": [
+						1.5,
+						1.5,
+						1.5
+					],
+					"radial_repeats": 1,
+					"radius": 1.5,
+					"repeat_axis": "x"
+				},
+				{
+					"name": "Neck",
+					"hidden": false,
+					"type": "shape",
+					"position": [
+						0,
+						1.4,
+						0
+					],
+					"rotation": [
+						0,
+						0,
+						0
+					],
+					"scale": [
+						0.95,
+						1.6,
+						0.95
+					],
+					"color": [
+						0.1,
+						0.5,
+						0.55
+					],
+					"mode": "add",
+					"chamfer": false,
+					"blend": 0.35,
+					"blend_strength": 0.0,
+					"mirror_x": false,
+					"mirror_y": false,
+					"mirror_z": false,
+					"mirror_blend": 0,
+					"brush": "cylinder",
+					"bevel": 0.0,
+					"round": 0.2,
+					"thickness": 1,
+					"cone": 0,
+					"star": 0,
+					"points": 6,
+					"repeat_mode": "linear",
+					"linear_repeats": [
+						1,
+						1,
+						1
+					],
+					"steps": [
+						1.5,
+						1.5,
+						1.5
+					],
+					"radial_repeats": 1,
+					"radius": 1.5,
+					"repeat_axis": "x"
+				},
+				{
+					"name": "Rim",
+					"hidden": false,
+					"type": "shape",
+					"position": [
+						0,
+						2.2,
+						0
+					],
+					"rotation": [
+						0,
+						0,
+						0
+					],
+					"scale": [
+						1.35,
+						0.2,
+						1.35
+					],
+					"color": [
+						0.1,
+						0.5,
+						0.55
+					],
+					"mode": "add",
+					"chamfer": false,
+					"blend": 0.1,
+					"blend_strength": 0.0,
+					"mirror_x": false,
+					"mirror_y": false,
+					"mirror_z": false,
+					"mirror_blend": 0,
+					"brush": "cylinder",
+					"bevel": 0.0,
+					"round": 1.0,
+					"thickness": 1,
+					"cone": 0,
+					"star": 0,
+					"points": 6,
+					"repeat_mode": "linear",
+					"linear_repeats": [
+						1,
+						1,
+						1
+					],
+					"steps": [
+						1.5,
+						1.5,
+						1.5
+					],
+					"radial_repeats": 1,
+					"radius": 1.5,
+					"repeat_axis": "x"
+				},
+				{
+					"name": "Opening",
+					"hidden": false,
+					"type": "shape",
+					"position": [
+						0,
+						2.3,
+						0
+					],
+					"rotation": [
+						0,
+						0,
+						0
+					],
+					"scale": [
+						0.7,
+						1.4,
+						0.7
+					],
+					"color": [
+						0.05,
+						0.2,
+						0.22
+					],
+					"mode": "sub",
+					"chamfer": false,
+					"blend": 0.02,
+					"blend_strength": 0.0,
+					"mirror_x": false,
+					"mirror_y": false,
+					"mirror_z": false,
+					"mirror_blend": 0,
+					"brush": "cylinder",
+					"bevel": 0.0,
+					"round": 0.1,
+					"thickness": 1,
+					"cone": 0,
+					"star": 0,
+					"points": 6,
+					"repeat_mode": "linear",
+					"linear_repeats": [
+						1,
+						1,
+						1
+					],
+					"steps": [
+						1.5,
+						1.5,
+						1.5
+					],
+					"radial_repeats": 1,
+					"radius": 1.5,
+					"repeat_axis": "x"
+				},
+				{
+					"name": "Gold band",
+					"hidden": false,
+					"type": "shape",
+					"position": [
+						0,
+						-0.1,
+						0
+					],
+					"rotation": [
+						0,
+						0,
+						0
+					],
+					"scale": [
+						2.7,
+						0.18,
+						2.7
+					],
+					"color": [
+						0.9,
+						0.7,
+						0.2
+					],
+					"mode": "paint",
+					"chamfer": false,
+					"blend": 0.02,
+					"blend_strength": 0.0,
+					"mirror_x": false,
+					"mirror_y": false,
+					"mirror_z": false,
+					"mirror_blend": 0,
+					"brush": "cylinder",
+					"bevel": 0.0,
+					"round": 0.1,
+					"thickness": 1,
+					"cone": 0,
+					"star": 0,
+					"points": 6,
+					"repeat_mode": "linear",
+					"linear_repeats": [
+						1,
+						1,
+						1
+					],
+					"steps": [
+						1.5,
+						1.5,
+						1.5
+					],
+					"radial_repeats": 1,
+					"radius": 1.5,
+					"repeat_axis": "x"
+				},
+				{
+					"name": "Gold band",
+					"hidden": false,
+					"type": "shape",
+					"position": [
+						0,
+						0.5,
+						0
+					],
+					"rotation": [
+						0,
+						0,
+						0
+					],
+					"scale": [
+						2.5,
+						0.1,
+						2.5
+					],
+					"color": [
+						0.9,
+						0.7,
+						0.2
+					],
+					"mode": "paint",
+					"chamfer": false,
+					"blend": 0.02,
+					"blend_strength": 0.0,
+					"mirror_x": false,
+					"mirror_y": false,
+					"mirror_z": false,
+					"mirror_blend": 0,
+					"brush": "cylinder",
+					"bevel": 0.0,
+					"round": 0.1,
+					"thickness": 1,
+					"cone": 0,
+					"star": 0,
+					"points": 6,
+					"repeat_mode": "linear",
+					"linear_repeats": [
+						1,
+						1,
+						1
+					],
+					"steps": [
+						1.5,
+						1.5,
+						1.5
+					],
+					"radial_repeats": 1,
+					"radius": 1.5,
+					"repeat_axis": "x"
+				}
+			]
+		}
+	],
+	"layers": [
+		{
+			"name": "Layer",
+			"assembly": 0,
+			"hidden": false,
+			"position": [
+				0,
+				0,
+				0
+			],
+			"rotation": [
+				0,
+				0,
+				0
+			],
+			"scale": [
+				1,
+				1,
+				1
+			],
+			"image": "",
+			"roughness": 0.3,
+			"metallic": 0,
+			"emissive": 0,
+			"ior": 1,
+			"transparency": 0,
+			"image_opacity": 1
+		}
+	]
+}

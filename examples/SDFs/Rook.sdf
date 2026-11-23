@@ -20,12 +20,12 @@
 			"resolution": 6,
 			"shapes": [
 				{
-					"name": "Body",
+					"name": "Base",
 					"hidden": false,
 					"type": "shape",
 					"position": [
 						0,
-						0,
+						-1.5,
 						0
 					],
 					"rotation": [
@@ -34,14 +34,14 @@
 						0
 					],
 					"scale": [
-						1.0,
-						3.0,
-						1.0
+						2.2,
+						0.4,
+						2.2
 					],
 					"color": [
-						0.92,
-						0.92,
-						0.94
+						0.62,
+						0.6,
+						0.58
 					],
 					"mode": "add",
 					"chamfer": false,
@@ -53,7 +53,7 @@
 					"mirror_blend": 0,
 					"brush": "cylinder",
 					"bevel": 0.0,
-					"round": 0.25,
+					"round": 0.5,
 					"thickness": 1,
 					"cone": 0,
 					"star": 0,
@@ -74,12 +74,12 @@
 					"repeat_axis": "x"
 				},
 				{
-					"name": "Nose",
+					"name": "Tower",
 					"hidden": false,
 					"type": "shape",
 					"position": [
 						0,
-						1.9,
+						-0.4,
 						0
 					],
 					"rotation": [
@@ -88,14 +88,68 @@
 						0
 					],
 					"scale": [
-						1.0,
-						1.6,
-						1.0
+						1.5,
+						2.0,
+						1.5
 					],
 					"color": [
-						0.85,
-						0.2,
-						0.15
+						0.7,
+						0.68,
+						0.65
+					],
+					"mode": "add",
+					"chamfer": false,
+					"blend": 0.15,
+					"blend_strength": 0.0,
+					"mirror_x": false,
+					"mirror_y": false,
+					"mirror_z": false,
+					"mirror_blend": 0,
+					"brush": "cylinder",
+					"bevel": 0.0,
+					"round": 0.15,
+					"thickness": 1,
+					"cone": 0,
+					"star": 0,
+					"points": 6,
+					"repeat_mode": "linear",
+					"linear_repeats": [
+						1,
+						1,
+						1
+					],
+					"steps": [
+						1.5,
+						1.5,
+						1.5
+					],
+					"radial_repeats": 1,
+					"radius": 1.5,
+					"repeat_axis": "x"
+				},
+				{
+					"name": "Crown",
+					"hidden": false,
+					"type": "shape",
+					"position": [
+						0,
+						0.75,
+						0
+					],
+					"rotation": [
+						0,
+						0,
+						0
+					],
+					"scale": [
+						2.0,
+						0.4,
+						2.0
+					],
+					"color": [
+						0.7,
+						0.68,
+						0.65
 					],
 					"mode": "add",
 					"chamfer": false,
@@ -105,7 +159,7 @@
 					"mirror_y": false,
 					"mirror_z": false,
 					"mirror_blend": 0,
-					"brush": "sphere",
+					"brush": "cylinder",
 					"bevel": 0.0,
 					"round": 0.1,
 					"thickness": 1,
@@ -128,40 +182,94 @@
 					"repeat_axis": "x"
 				},
 				{
-					"name": "Fin",
+					"name": "Battlements",
 					"hidden": false,
 					"type": "shape",
 					"position": [
-						0.75,
-						-1.1,
+						0,
+						1.15,
 						0
 					],
 					"rotation": [
 						0,
 						0,
-						0.35
+						0
 					],
 					"scale": [
-						0.9,
-						1.1,
-						0.12
+						2.0,
+						0.5,
+						2.0
 					],
 					"color": [
-						0.15,
-						0.35,
-						0.8
+						0.72,
+						0.7,
+						0.67
 					],
 					"mode": "add",
 					"chamfer": false,
-					"blend": 0.05,
+					"blend": 0.02,
 					"blend_strength": 0.0,
-					"mirror_x": true,
+					"mirror_x": false,
 					"mirror_y": false,
-					"mirror_z": true,
+					"mirror_z": false,
+					"mirror_blend": 0,
+					"brush": "cylinder",
+					"bevel": 0.0,
+					"round": 0.05,
+					"thickness": 1,
+					"cone": 0,
+					"star": 0,
+					"points": 6,
+					"repeat_mode": "linear",
+					"linear_repeats": [
+						1,
+						1,
+						1
+					],
+					"steps": [
+						1.5,
+						1.5,
+						1.5
+					],
+					"radial_repeats": 1,
+					"radius": 1.5,
+					"repeat_axis": "x"
+				},
+				{
+					"name": "Notch",
+					"hidden": false,
+					"type": "shape",
+					"position": [
+						0,
+						1.4,
+						0
+					],
+					"rotation": [
+						0,
+						0,
+						0
+					],
+					"scale": [
+						0.55,
+						0.7,
+						2.4
+					],
+					"color": [
+						0.4,
+						0.4,
+						0.42
+					],
+					"mode": "sub",
+					"chamfer": false,
+					"blend": 0.02,
+					"blend_strength": 0.0,
+					"mirror_x": false,
+					"mirror_y": false,
+					"mirror_z": false,
 					"mirror_blend": 0,
 					"brush": "cube",
 					"bevel": 0.0,
-					"round": 0.2,
+					"round": 0.02,
 					"thickness": 1,
 					"cone": 0,
 					"star": 0,
@@ -182,12 +290,12 @@
 					"repeat_axis": "x"
 				},
 				{
-					"name": "Engine",
+					"name": "Notch",
 					"hidden": false,
 					"type": "shape",
 					"position": [
 						0,
-						-1.7,
+						1.4,
 						0
 					],
 					"rotation": [
@@ -196,68 +304,14 @@
 						0
 					],
 					"scale": [
+						2.4,
 						0.7,
-						0.5,
-						0.7
+						0.55
 					],
 					"color": [
-						0.35,
-						0.35,
-						0.4
-					],
-					"mode": "add",
-					"chamfer": false,
-					"blend": 0.08,
-					"blend_strength": 0.0,
-					"mirror_x": false,
-					"mirror_y": false,
-					"mirror_z": false,
-					"mirror_blend": 0,
-					"brush": "cylinder",
-					"bevel": 0.0,
-					"round": 0.1,
-					"thickness": 1,
-					"cone": 0,
-					"star": 0,
-					"points": 6,
-					"repeat_mode": "linear",
-					"linear_repeats": [
-						1,
-						1,
-						1
-					],
-					"steps": [
-						1.5,
-						1.5,
-						1.5
-					],
-					"radial_repeats": 1,
-					"radius": 1.5,
-					"repeat_axis": "x"
-				},
-				{
-					"name": "Nozzle",
-					"hidden": false,
-					"type": "shape",
-					"position": [
-						0,
-						-2.0,
-						0
-					],
-					"rotation": [
-						0,
-						0,
-						0
-					],
-					"scale": [
-						0.45,
 						0.4,
-						0.45
-					],
-					"color": [
-						0.2,
-						0.2,
-						0.22
+						0.4,
+						0.42
 					],
 					"mode": "sub",
 					"chamfer": false,
@@ -267,9 +321,9 @@
 					"mirror_y": false,
 					"mirror_z": false,
 					"mirror_blend": 0,
-					"brush": "cylinder",
+					"brush": "cube",
 					"bevel": 0.0,
-					"round": 0.1,
+					"round": 0.02,
 					"thickness": 1,
 					"cone": 0,
 					"star": 0,
@@ -290,13 +344,13 @@
 					"repeat_axis": "x"
 				},
 				{
-					"name": "Porthole",
+					"name": "Window",
 					"hidden": false,
 					"type": "shape",
 					"position": [
 						0,
-						0.5,
-						0.45
+						0.0,
+						0.76
 					],
 					"rotation": [
 						0,
@@ -304,14 +358,14 @@
 						0
 					],
 					"scale": [
-						0.4,
-						0.4,
-						0.4
-					],
-					"color": [
 						0.3,
 						0.7,
-						0.9
+						0.2
+					],
+					"color": [
+						0.15,
+						0.15,
+						0.18
 					],
 					"mode": "sub",
 					"chamfer": false,
@@ -321,9 +375,9 @@
 					"mirror_y": false,
 					"mirror_z": false,
 					"mirror_blend": 0,
-					"brush": "sphere",
+					"brush": "cube",
 					"bevel": 0.0,
-					"round": 0.1,
+					"round": 0.05,
 					"thickness": 1,
 					"cone": 0,
 					"star": 0,

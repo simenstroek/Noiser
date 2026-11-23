@@ -1,0 +1,324 @@
+{
+	"version": [
+		0,
+		6,
+		1
+	],
+	"environment": {
+		"use_lightmap": false,
+		"lightmap": "",
+		"lightmap_rotation": 0,
+		"luminance": 1,
+		"color": [
+			0.327,
+			0.333,
+			0.34
+		]
+	},
+	"assemblies": [
+		{
+			"resolution": 6,
+			"shapes": [
+				{
+					"name": "Body",
+					"hidden": false,
+					"type": "shape",
+					"position": [
+						0,
+						0,
+						0
+					],
+					"rotation": [
+						0,
+						0,
+						0
+					],
+					"scale": [
+						1.7,
+						1.9,
+						1.7
+					],
+					"color": [
+						0.2,
+						0.4,
+						0.75
+					],
+					"mode": "add",
+					"chamfer": false,
+					"blend": 0.02,
+					"blend_strength": 0.0,
+					"mirror_x": false,
+					"mirror_y": false,
+					"mirror_z": false,
+					"mirror_blend": 0,
+					"brush": "cylinder",
+					"bevel": 0.0,
+					"round": 0.12,
+					"thickness": 1,
+					"cone": 0,
+					"star": 0,
+					"points": 6,
+					"repeat_mode": "linear",
+					"linear_repeats": [
+						1,
+						1,
+						1
+					],
+					"steps": [
+						1.5,
+						1.5,
+						1.5
+					],
+					"radial_repeats": 1,
+					"radius": 1.5,
+					"repeat_axis": "x"
+				},
+				{
+					"name": "Inside",
+					"hidden": false,
+					"type": "shape",
+					"position": [
+						0,
+						0.25,
+						0
+					],
+					"rotation": [
+						0,
+						0,
+						0
+					],
+					"scale": [
+						1.45,
+						1.8,
+						1.45
+					],
+					"color": [
+						0.9,
+						0.9,
+						0.92
+					],
+					"mode": "sub",
+					"chamfer": false,
+					"blend": 0.02,
+					"blend_strength": 0.0,
+					"mirror_x": false,
+					"mirror_y": false,
+					"mirror_z": false,
+					"mirror_blend": 0,
+					"brush": "cylinder",
+					"bevel": 0.0,
+					"round": 0.1,
+					"thickness": 1,
+					"cone": 0,
+					"star": 0,
+					"points": 6,
+					"repeat_mode": "linear",
+					"linear_repeats": [
+						1,
+						1,
+						1
+					],
+					"steps": [
+						1.5,
+						1.5,
+						1.5
+					],
+					"radial_repeats": 1,
+					"radius": 1.5,
+					"repeat_axis": "x"
+				},
+				{
+					"name": "Handle",
+					"hidden": false,
+					"type": "shape",
+					"position": [
+						1.0,
+						0.1,
+						0
+					],
+					"rotation": [
+						0,
+						0,
+						0
+					],
+					"scale": [
+						0.55,
+						1.1,
+						0.3
+					],
+					"color": [
+						0.2,
+						0.4,
+						0.75
+					],
+					"mode": "add",
+					"chamfer": false,
+					"blend": 0.05,
+					"blend_strength": 0.0,
+					"mirror_x": false,
+					"mirror_y": false,
+					"mirror_z": false,
+					"mirror_blend": 0,
+					"brush": "cube",
+					"bevel": 0.0,
+					"round": 0.12,
+					"thickness": 1,
+					"cone": 0,
+					"star": 0,
+					"points": 6,
+					"repeat_mode": "linear",
+					"linear_repeats": [
+						1,
+						1,
+						1
+					],
+					"steps": [
+						1.5,
+						1.5,
+						1.5
+					],
+					"radial_repeats": 1,
+					"radius": 1.5,
+					"repeat_axis": "x"
+				},
+				{
+					"name": "Handle hole",
+					"hidden": false,
+					"type": "shape",
+					"position": [
+						1.02,
+						0.1,
+						0
+					],
+					"rotation": [
+						0,
+						0,
+						0
+					],
+					"scale": [
+						0.32,
+						0.62,
+						0.5
+					],
+					"color": [
+						0.2,
+						0.4,
+						0.75
+					],
+					"mode": "sub",
+					"chamfer": false,
+					"blend": 0.02,
+					"blend_strength": 0.0,
+					"mirror_x": false,
+					"mirror_y": false,
+					"mirror_z": false,
+					"mirror_blend": 0,
+					"brush": "cube",
+					"bevel": 0.0,
+					"round": 0.1,
+					"thickness": 1,
+					"cone": 0,
+					"star": 0,
+					"points": 6,
+					"repeat_mode": "linear",
+					"linear_repeats": [
+						1,
+						1,
+						1
+					],
+					"steps": [
+						1.5,
+						1.5,
+						1.5
+					],
+					"radial_repeats": 1,
+					"radius": 1.5,
+					"repeat_axis": "x"
+				},
+				{
+					"name": "Stripe",
+					"hidden": false,
+					"type": "shape",
+					"position": [
+						0,
+						0.2,
+						0
+					],
+					"rotation": [
+						0,
+						0,
+						0
+					],
+					"scale": [
+						1.74,
+						0.5,
+						1.74
+					],
+					"color": [
+						0.95,
+						0.95,
+						0.95
+					],
+					"mode": "paint",
+					"chamfer": false,
+					"blend": 0.02,
+					"blend_strength": 0.0,
+					"mirror_x": false,
+					"mirror_y": false,
+					"mirror_z": false,
+					"mirror_blend": 0,
+					"brush": "cylinder",
+					"bevel": 0.0,
+					"round": 0.1,
+					"thickness": 1,
+					"cone": 0,
+					"star": 0,
+					"points": 6,
+					"repeat_mode": "linear",
+					"linear_repeats": [
+						1,
+						1,
+						1
+					],
+					"steps": [
+						1.5,
+						1.5,
+						1.5
+					],
+					"radial_repeats": 1,
+					"radius": 1.5,
+					"repeat_axis": "x"
+				}
+			]
+		}
+	],
+	"layers": [
+		{
+			"name": "Layer",
+			"assembly": 0,
+			"hidden": false,
+			"position": [
+				0,
+				0,
+				0
+			],
+			"rotation": [
+				0,
+				0,
+				0
+			],
+			"scale": [
+				1,
+				1,
+				1
+			],
+			"image": "",
+			"roughness": 0.3,
+			"metallic": 0,
+			"emissive": 0,
+			"ior": 1,
+			"transparency": 0,
+			"image_opacity": 1
+		}
+	]
+}
