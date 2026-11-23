@@ -98,10 +98,21 @@ fn fs(in: VsOut) -> @location(0) vec4f {
     let n = normal_at(p, t);
     let diffuse = max(dot(n, u.light.xyz), 0.0);
     let rim = pow(1.0 - max(dot(n, -direction), 0.0), 3.0) * 0.15;
+    // Ambient occlusion: how much the distance field closes in along the normal, five steps out to a few percent of
+    // the scene's size.
+    let reach = length(u.box_hi.xyz - u.box_lo.xyz) * 0.05;
+    var occlusion = 0.0;
+    var weight = 1.0;
+    for (var i = 1; i <= 5; i++) {
+        let h = reach * f32(i) / 5.0;
+        occlusion += max(h - map(p + n * h), 0.0) / reach * weight;
+        weight *= 0.75;
+    }
+    let ao = clamp(1.0 - 0.9 * occlusion, 0.25, 1.0);
     var color = vec3f(0.74, 0.75, 0.78);
     if (u.params.w > 0.5 && selected_distance(p) < 0.0025 * (1.0 + t)) {
         color = vec3f(0.98, 0.58, 0.18);
     }
-    let light_amount = 0.28 + 0.72 * diffuse + rim;
+    let light_amount = 0.28 * ao + 0.72 * diffuse * (0.5 + 0.5 * ao) + rim;
     return vec4f(min(color * light_amount, vec3f(1.0)), 1.0);
 }

@@ -400,6 +400,13 @@ impl Composer {
         }
     }
 
+    /// Selects a node if it exists.
+    pub fn select(&mut self, path: Vec<usize>) {
+        if node_at(self.shapes(), &path).is_some() {
+            self.selection = Some(path);
+        }
+    }
+
     /// The file name and an asterisk for unsaved changes, for the window title.
     pub fn title(&self) -> String {
         let name = self.path.as_ref().and_then(|p| p.file_name()).map_or("untitled".to_string(), |n| n.to_string_lossy().into_owned());
@@ -1590,7 +1597,7 @@ impl Composer {
             ctx.request_repaint_after(std::time::Duration::from_millis(200));
         }
         egui::Panel::top("composer toolbar").show(ui, |ui| {
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 if ui.button("New").clicked() {
                     self.request(Pending::New);
                 }
