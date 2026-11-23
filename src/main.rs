@@ -923,6 +923,7 @@ impl App {
             if let Some(rect) = library::view_rect() {
                 let (tx, rx) = std::sync::mpsc::channel();
                 self.thumbnails.push((file, rect, rx));
+                library::set_capturing(true);
                 ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::ScreenshotCallback::new(move |image| {
                     let _ = tx.send(image);
                 })));
@@ -941,7 +942,9 @@ impl App {
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {}
             }
         }
-        if !waiting.is_empty() {
+        if waiting.is_empty() {
+            library::set_capturing(false);
+        } else {
             ctx.request_repaint_after(std::time::Duration::from_millis(50));
         }
         self.thumbnails = waiting;
@@ -1571,7 +1574,9 @@ value {v:.4} at ({tx:.3}, {ty:.3})");
                         Some([a, b]) => format!("GPU 3D {a:.2} ms · slice {b:.2} ms · CPU {:.2} ms\n{}×{} px", cpu_start.elapsed().as_secs_f32() * 1e3, px.x, px.y),
                         None => format!("GPU timing unavailable · CPU {:.2} ms", cpu_start.elapsed().as_secs_f32() * 1e3),
                     };
-                    painter.text(r3d.left_top() + egui::vec2(8.0, 6.0), egui::Align2::LEFT_TOP, timing, font, grey);
+                    if !library::capturing() {
+                        painter.text(r3d.left_top() + egui::vec2(8.0, 6.0), egui::Align2::LEFT_TOP, timing, font, grey);
+                    }
                 }
                 Err(e) => {
                     ui.painter().rect_filled(full, 0.0, egui::Color32::from_gray(30));

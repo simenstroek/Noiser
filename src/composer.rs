@@ -1425,7 +1425,7 @@ impl Composer {
         painter.rect_filled(rect, 0.0, egui::Color32::from_gray(30));
         let fits = scene.shape_count <= crate::composer_gpu::MAX_SHAPES && scene.ops.len() <= crate::composer_gpu::MAX_OPS;
         if fits {
-            let uniforms = Uniforms::new(&self.camera, size.x / size.y.max(1.0), &scene, self.selection.is_some());
+            let uniforms = Uniforms::new(&self.camera, size.x / size.y.max(1.0), &scene, self.selection.is_some() && !crate::library::capturing());
             painter.add(egui_wgpu::Callback::new_paint_callback(rect, ViewCallback { uniforms, scene: scene.clone(), version: self.scene_serial, format }));
         } else {
             painter.text(rect.center(), egui::Align2::CENTER_CENTER, "This composition is larger than the viewport can draw", egui::FontId::proportional(15.0), egui::Color32::from_rgb(230, 150, 90));
@@ -1433,16 +1433,19 @@ impl Composer {
         if self.shapes().is_empty() {
             painter.text(rect.center(), egui::Align2::CENTER_CENTER, "Add a shape from the hierarchy panel", egui::FontId::proportional(15.0), egui::Color32::from_gray(150));
         }
-        self.draw_orientation(&painter, rect);
+        let capturing = crate::library::capturing();
+        if !capturing {
+            self.draw_orientation(&painter, rect);
+        }
         painter.text(
             rect.right_bottom() + egui::vec2(-10.0, -8.0),
             egui::Align2::RIGHT_BOTTOM,
             "drag: orbit  ·  shift-drag / right-drag: pan  ·  wheel: zoom  ·  F: frame all  ·  C: frame selection  ·  W E R: tools",
             egui::FontId::proportional(11.0),
-            egui::Color32::from_gray(120),
+            if capturing { egui::Color32::TRANSPARENT } else { egui::Color32::from_gray(120) },
         );
         let active = self.drag.as_ref().map(|d| d.axis);
-        if let Some(g) = geometry {
+        if let Some(g) = geometry.filter(|_| !capturing) {
             self.draw_gizmo(&painter, rect, &g, hovered_axis.or(active));
         }
         if hovered_axis.is_some() {

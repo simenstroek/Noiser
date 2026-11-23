@@ -56,6 +56,16 @@ static ROOT: Mutex<Option<PathBuf>> = Mutex::new(None);
 static THUMBNAILS: Mutex<bool> = Mutex::new(true);
 static REQUESTS: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
 static VIEW: Mutex<Option<egui::Rect>> = Mutex::new(None);
+static CAPTURING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// True while a screenshot for a thumbnail is on its way: views leave their hints, gizmos and statistics out of it.
+pub fn capturing() -> bool {
+    CAPTURING.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+pub fn set_capturing(on: bool) {
+    CAPTURING.store(on, std::sync::atomic::Ordering::Relaxed);
+}
 
 pub fn set_root(root: Option<PathBuf>) {
     if let Ok(mut r) = ROOT.lock() {
