@@ -1123,7 +1123,7 @@ impl Composer {
                     match (&brush_name, node.name.as_str()) {
                         (Some(brush), "" | "Stroke") => brush.clone(),
                         (Some(brush), name) if name == brush => brush.clone(),
-                        (Some(brush), name) => format!("{brush}  \"{name}\""),
+                        (Some(_), name) => name.to_string(),
                         (None, "") => node.kind.clone(),
                         (None, name) => name.to_string(),
                     }

@@ -938,6 +938,8 @@ impl crate::App {
                 if crate::icons::tinted_button(ui, "stop", "Cancel", None, running, Some(egui::Color32::from_rgb(230, 110, 100))).on_hover_text("Stops the run before its next node (a node that is already working finishes first).").clicked() {
                     crate::meshgraph::CANCEL.store(true, std::sync::atomic::Ordering::Relaxed);
                 }
+            });
+            ui.horizontal(|ui| {
                 ui.add(egui::DragValue::new(&mut self.mesh_ws.seed).prefix("seed "));
                 egui::ComboBox::from_id_salt("batch seed mode").selected_text(match self.mesh_ws.seed_mode {
                     crate::meshexport::SeedMode::Same => "same seed",

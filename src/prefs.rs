@@ -162,7 +162,7 @@ pub fn show(prefs: &mut Prefs, tab: &mut PrefsTab, ui: &mut egui::Ui, shortcuts:
         }
         PrefsTab::Keybinds => {
             heading(ui, "Library drawer");
-            ui.horizontal(|ui| {
+            egui::Grid::new("prefs library key").num_columns(2).spacing([16.0, 6.0]).show(ui, |ui| {
                 let label = ui.label("Open the library with");
                 egui::ComboBox::from_id_salt("library key").selected_text(prefs.library_key.label()).show_ui(ui, |ui| {
                     for key in LibraryKey::ALL {
@@ -171,6 +171,7 @@ pub fn show(prefs: &mut Prefs, tab: &mut PrefsTab, ui: &mut egui::Ui, shortcuts:
                 })
                 .response
                 .labelled_by(label.id);
+                ui.end_row();
             });
             heading(ui, "All shortcuts");
             egui::Grid::new("prefs shortcuts").striped(true).show(ui, |ui| {
@@ -183,22 +184,29 @@ pub fn show(prefs: &mut Prefs, tab: &mut PrefsTab, ui: &mut egui::Ui, shortcuts:
         }
         PrefsTab::Performance => {
             heading(ui, "3D preview");
-            ui.horizontal(|ui| {
-                let label = ui.label("Starting render resolution");
-                for (scale, name) in [(1.0, "Full"), (0.5, "Half"), (0.25, "Quarter")] {
-                    ui.selectable_value(&mut prefs.render_scale, scale, name);
-                }
-                let _ = label;
+            egui::Grid::new("prefs preview").num_columns(2).spacing([16.0, 6.0]).show(ui, |ui| {
+                ui.label("Starting render resolution");
+                ui.horizontal(|ui| {
+                    for (scale, name) in [(1.0, "Full"), (0.5, "Half"), (0.25, "Quarter")] {
+                        ui.selectable_value(&mut prefs.render_scale, scale, name);
+                    }
+                });
+                ui.end_row();
+                let label = ui.label("Starting max march steps");
+                ui.add(egui::Slider::new(&mut prefs.max_steps, 32..=600).logarithmic(true)).labelled_by(label.id);
+                ui.end_row();
             });
-            let steps = ui.add(egui::Slider::new(&mut prefs.max_steps, 32..=600).logarithmic(true).text("Starting max march steps"));
-            steps.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Slider, true, "Starting max march steps"));
             ui.weak("These are the values the preview starts from; changing them here also changes the open preview.");
             heading(ui, "SDF files");
-            let resolution = ui.add(egui::Slider::new(&mut prefs.sdf_mesh_resolution, 32..=400).text("Mesh resolution"));
-            resolution.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Slider, true, "Mesh resolution"));
-            ui.weak("Samples along the longest side when a .sdf file is turned into a mesh. Higher is finer and slower.");
-            let samples = ui.add(egui::Slider::new(&mut prefs.export_samples, 48..=640).text("Composer export samples"));
-            samples.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Slider, true, "Composer export samples"));
+            egui::Grid::new("prefs sdf").num_columns(2).spacing([16.0, 6.0]).show(ui, |ui| {
+                let label = ui.label("Mesh resolution");
+                ui.add(egui::Slider::new(&mut prefs.sdf_mesh_resolution, 32..=400)).labelled_by(label.id);
+                ui.end_row();
+                let label = ui.label("Composer export samples");
+                ui.add(egui::Slider::new(&mut prefs.export_samples, 48..=640)).labelled_by(label.id);
+                ui.end_row();
+            });
+            ui.weak("Mesh resolution is the number of samples along the longest side when a .sdf file is turned into a mesh: higher is finer and slower.");
         }
         PrefsTab::FilePaths => {
             heading(ui, "Library folder");
@@ -242,27 +250,31 @@ pub fn show(prefs: &mut Prefs, tab: &mut PrefsTab, ui: &mut egui::Ui, shortcuts:
         }
         PrefsTab::Style => {
             heading(ui, "Interface");
-            let scale = ui.add(egui::Slider::new(&mut prefs.ui_scale, 0.75..=2.0).text("Interface scale"));
-            scale.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Slider, true, "Interface scale"));
-            // Applied on release: rescaling under the dragged slider would move it.
-            effects.scale_committed = scale.changed() && !scale.dragged() || scale.drag_stopped();
-            ui.horizontal(|ui| {
-                let label = ui.label("Theme");
-                for (theme, name) in [(Theme::System, "System"), (Theme::Dark, "Dark"), (Theme::Light, "Light")] {
-                    ui.selectable_value(&mut prefs.theme, theme, name);
-                }
-                let _ = label;
-            });
-            heading(ui, "Accent colour");
-            ui.horizontal(|ui| {
-                let mut color = prefs.accent.unwrap_or([0, 92, 128]);
-                let label = ui.label("Selections and highlights");
-                if ui.color_edit_button_srgb(&mut color).labelled_by(label.id).changed() {
-                    prefs.accent = Some(color);
-                }
-                if ui.add_enabled(prefs.accent.is_some(), egui::Button::new("Default")).clicked() {
-                    prefs.accent = None;
-                }
+            egui::Grid::new("prefs style").num_columns(2).spacing([16.0, 6.0]).show(ui, |ui| {
+                let label = ui.label("Interface scale");
+                let scale = ui.add(egui::Slider::new(&mut prefs.ui_scale, 0.75..=2.0));
+                scale.clone().labelled_by(label.id);
+                // Applied on release: rescaling under the dragged slider would move it.
+                effects.scale_committed = scale.changed() && !scale.dragged() || scale.drag_stopped();
+                ui.end_row();
+                ui.label("Theme");
+                ui.horizontal(|ui| {
+                    for (theme, name) in [(Theme::System, "System"), (Theme::Dark, "Dark"), (Theme::Light, "Light")] {
+                        ui.selectable_value(&mut prefs.theme, theme, name);
+                    }
+                });
+                ui.end_row();
+                let label = ui.label("Accent colour");
+                ui.horizontal(|ui| {
+                    let mut color = prefs.accent.unwrap_or([0, 92, 128]);
+                    if ui.color_edit_button_srgb(&mut color).labelled_by(label.id).changed() {
+                        prefs.accent = Some(color);
+                    }
+                    if ui.add_enabled(prefs.accent.is_some(), egui::Button::new("Default")).clicked() {
+                        prefs.accent = None;
+                    }
+                });
+                ui.end_row();
             });
         }
     });
