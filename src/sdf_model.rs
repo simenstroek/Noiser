@@ -10,12 +10,12 @@ use crate::sdf_file::{Layer, Node, SdfFile};
 use std::f64::consts::{PI, TAU};
 
 pub type V3 = [f64; 3];
-type M3 = [[f64; 3]; 3];
+pub type M3 = [[f64; 3]; 3];
 
 // ---- small maths ------------------------------------------------------------------------------------------------
 
 /// Rotation matrix for Euler angles in radians: `Rz · Ry · Rx`.
-fn euler_matrix(angles: V3) -> M3 {
+pub fn euler_matrix(angles: V3) -> M3 {
     let (sx, cx) = angles[0].sin_cos();
     let (sy, cy) = angles[1].sin_cos();
     let (sz, cz) = angles[2].sin_cos();
@@ -36,7 +36,7 @@ fn multiply(a: &M3, b: &M3) -> M3 {
 }
 
 /// `Mᵀ · v`: a world vector into the frame the rotation `M` describes.
-fn into_frame(m: &M3, v: V3) -> V3 {
+pub fn into_frame(m: &M3, v: V3) -> V3 {
     [
         m[0][0] * v[0] + m[1][0] * v[1] + m[2][0] * v[2],
         m[0][1] * v[0] + m[1][1] * v[1] + m[2][1] * v[2],
@@ -44,7 +44,7 @@ fn into_frame(m: &M3, v: V3) -> V3 {
     ]
 }
 
-fn sub(a: V3, b: V3) -> V3 {
+pub fn sub(a: V3, b: V3) -> V3 {
     [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
 }
 
@@ -457,18 +457,24 @@ struct Group {
 enum Item {
     Shape(Shape),
     Group(Group),
+    /// A hidden or unsupported node: it keeps its place so indices match the file's tree.
+    Skipped,
 }
+
+static SKIPPED_PLACEMENT: Placement = Placement { mode: Mode::None, blend: 0.0, strength: 0.0, chamfer: false };
 
 impl Item {
     fn placement(&self) -> &Placement {
         match self {
             Item::Shape(shape) => &shape.placement,
             Item::Group(group) => &group.placement,
+            Item::Skipped => &SKIPPED_PLACEMENT,
         }
     }
 
     fn distance(&self, p: V3) -> Option<f64> {
         match self {
+            Item::Skipped => None,
             Item::Shape(shape) => Some(shape.distance(p)),
             Item::Group(group) => {
                 let local = into_frame(&group.rotation, sub(p, group.position));
@@ -497,12 +503,14 @@ fn compile_nodes(nodes: &[Node], has_unsupported: &mut bool) -> Vec<Item> {
     let mut items = Vec::new();
     for node in nodes {
         if node.hidden {
+            items.push(Item::Skipped);
             continue;
         }
         match node.kind.as_str() {
             "shape" => {
                 let Some(brush) = Brush::from_node(node) else {
                     *has_unsupported = true;
+                    items.push(Item::Skipped);
                     continue;
                 };
                 items.push(Item::Shape(Shape {
@@ -526,7 +534,10 @@ fn compile_nodes(nodes: &[Node], has_unsupported: &mut bool) -> Vec<Item> {
                 scale: if node.scale[0] == 0.0 { 1.0 } else { node.scale[0] },
                 children: compile_nodes(node.children(), has_unsupported),
             })),
-            _ => *has_unsupported = true,
+            _ => {
+                *has_unsupported = true;
+                items.push(Item::Skipped);
+            }
         }
     }
     items
@@ -555,9 +566,63 @@ impl LayerField {
         accumulate(&self.items, local).map(|d| d * self.scale[0].abs())
     }
 
+    /// The distance of one node alone (its subtree, for a group) at `p` in the assembly's frame, group frames along
+    /// `path` applied. `path` indexes the file's tree; `None` for a hidden or unsupported node.
+    pub fn node_distance(&self, path: &[usize], p: V3) -> Option<f64> {
+        let mut items = &self.items;
+        let mut p = p;
+        let mut scale = 1.0;
+        for (depth, &index) in path.iter().enumerate() {
+            let item = items.get(index)?;
+            if depth + 1 == path.len() {
+                return item.distance(p).map(|d| d * scale);
+            }
+            let Item::Group(group) = item else { return None };
+            let local = into_frame(&group.rotation, sub(p, group.position));
+            p = [local[0] / group.scale, local[1] / group.scale, local[2] / group.scale];
+            scale *= group.scale.abs();
+            items = &group.children;
+        }
+        None
+    }
+
+    /// The tree paths of every drawable shape.
+    pub fn leaf_paths(&self) -> Vec<Vec<usize>> {
+        fn walk(items: &[Item], prefix: &mut Vec<usize>, out: &mut Vec<Vec<usize>>) {
+            for (index, item) in items.iter().enumerate() {
+                prefix.push(index);
+                match item {
+                    Item::Shape(_) => out.push(prefix.clone()),
+                    Item::Group(group) => walk(&group.children, prefix, out),
+                    Item::Skipped => {}
+                }
+                prefix.pop();
+            }
+        }
+        let mut out = Vec::new();
+        walk(&self.items, &mut Vec::new(), &mut out);
+        out
+    }
+
     /// The distance in the assembly's own frame, without the layer's placement.
     pub fn assembly_distance(&self, p: V3) -> Option<f64> {
         accumulate(&self.items, p)
+    }
+
+    /// An assembly on its own, without any layer's placement.
+    pub fn for_assembly(file: &SdfFile, assembly: usize) -> Option<LayerField> {
+        let assembly = file.assemblies.get(assembly)?;
+        let mut has_unsupported = false;
+        let items = compile_nodes(&assembly.shapes, &mut has_unsupported);
+        Some(LayerField {
+            name: String::new(),
+            hidden: false,
+            has_unsupported,
+            position: [0.0; 3],
+            rotation: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+            scale: [1.0; 3],
+            items,
+        })
     }
 
     fn new(file: &SdfFile, layer: &Layer) -> Option<LayerField> {

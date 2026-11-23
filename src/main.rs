@@ -30,6 +30,8 @@ mod shaderexport;
 mod surface;
 mod noiser_file;
 mod props;
+mod composer;
+mod composer_render;
 mod sdf_file;
 mod sdf_model;
 #[cfg(test)]
@@ -150,6 +152,7 @@ struct App {
     /// Which graph the window shows, and the mesh graph's state.
     workspace: meshworkspace::Workspace,
     mesh_ws: meshworkspace::MeshWorkspace,
+    composer: composer::Composer,
     /// File the graph was last opened from / saved to.
     path: Option<std::path::PathBuf>,
     status: String,
@@ -236,6 +239,7 @@ impl App {
         let mut uv_view = false;
         let mut map_view = false;
         let (mut mesh_graph_arg, mut run_mesh_graph): (Option<std::path::PathBuf>, bool) = (None, false);
+        let mut sdf_arg: Option<std::path::PathBuf> = None;
         let (mut batch_dir, mut batch_files): (Option<std::path::PathBuf>, Vec<std::path::PathBuf>) = (None, Vec::new());
         let mut mask_terms = Vec::new();
         let mut show_mask = false;
@@ -284,6 +288,9 @@ impl App {
                 batch_dir = args.next().map(std::path::PathBuf::from);
             } else if a == "--batch-file" {
                 batch_files.extend(args.next().map(std::path::PathBuf::from));
+            } else if a.to_lowercase().ends_with(".sdf") {
+                // An SDF Modeler file given as a plain file name opens in the SDF Composer tab.
+                sdf_arg = Some(std::path::PathBuf::from(a));
             } else if a.to_lowercase().ends_with(".meshgraph") {
                 // A mesh graph given as a plain file name ("open with") opens in the Mesh graph tab.
                 mesh_graph_arg = Some(std::path::PathBuf::from(a));
@@ -333,6 +340,7 @@ impl App {
             editor,
             workspace: Default::default(),
             mesh_ws: Default::default(),
+            composer: Default::default(),
             path,
             status,
             built: None,
@@ -378,6 +386,10 @@ impl App {
             close_ok: false,
             recent: cc.storage.and_then(|s| s.get_string(RECENT_KEY)).and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default(),
         };
+        if let Some(p) = sdf_arg {
+            app.composer.open_path(p);
+            app.workspace = meshworkspace::Workspace::Composer;
+        }
         let graph_from_arg = mesh_graph_arg.is_some();
         if mesh_tab || mesh_graph_arg.is_some() {
             app.workspace = meshworkspace::Workspace::Mesh;
@@ -877,7 +889,9 @@ impl eframe::App for App {
         // Files dropped on the window: .obj becomes the mesh, anything else is opened as a graph.
         for f in ctx.input(|i| i.raw.dropped_files.clone()) {
             { let p = f.path().to_path_buf();
-                if self.workspace == meshworkspace::Workspace::Mesh {
+                if self.workspace == meshworkspace::Workspace::Composer {
+                    // The composer takes .sdf files from the window itself.
+                } else if self.workspace == meshworkspace::Workspace::Mesh {
                     self.mesh_ws.drop_file(p);
                 } else if meshformats::is_mesh_file(&p) {
                     self.start_mesh_load(p);
@@ -1015,8 +1029,8 @@ impl eframe::App for App {
             }
         // File shortcuts work even with a text field focused (Ctrl+S would otherwise do nothing there).
         let (ctrl_s, ctrl_o, ctrl_shift) = ui.input(|i| (i.modifiers.command && i.key_pressed(egui::Key::S), i.modifiers.command && i.key_pressed(egui::Key::O), i.modifiers.shift));
-        if self.workspace == meshworkspace::Workspace::Mesh {
-            // The mesh graph tab handles its own keys.
+        if self.workspace != meshworkspace::Workspace::Noise {
+            // The mesh graph and composer tabs handle their own keys.
         } else if ctrl_s {
             self.save(ctrl_shift);
         } else if ctrl_o {
@@ -1140,9 +1154,16 @@ impl eframe::App for App {
             });
         });
         self.workspace_tabs(ui);
-        if self.workspace == meshworkspace::Workspace::Mesh {
-            self.mesh_workspace_ui(ui);
-            return;
+        match self.workspace {
+            meshworkspace::Workspace::Mesh => {
+                self.mesh_workspace_ui(ui);
+                return;
+            }
+            meshworkspace::Workspace::Composer => {
+                self.composer.show(ui);
+                return;
+            }
+            meshworkspace::Workspace::Noise => {}
         }
         // The side panel: viewport settings in tabs on top, the selected node's settings in the bottom half.
         egui::Panel::right("props").default_size(320.0).show(ui, |ui| {

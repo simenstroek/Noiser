@@ -13,15 +13,17 @@ pub enum Workspace {
     #[default]
     Noise,
     Mesh,
+    Composer,
 }
 
 impl Workspace {
-    pub const ALL: [Workspace; 2] = [Workspace::Noise, Workspace::Mesh];
+    pub const ALL: [Workspace; 3] = [Workspace::Noise, Workspace::Mesh, Workspace::Composer];
 
     pub fn label(self) -> &'static str {
         match self {
             Workspace::Noise => "Noise graph",
             Workspace::Mesh => "Mesh graph",
+            Workspace::Composer => "SDF Composer",
         }
     }
 
@@ -30,6 +32,7 @@ impl Workspace {
         match self {
             Workspace::Noise => egui::Color32::from_rgb(90, 190, 120),
             Workspace::Mesh => egui::Color32::from_rgb(100, 150, 240),
+            Workspace::Composer => egui::Color32::from_rgb(235, 150, 70),
         }
     }
 }
