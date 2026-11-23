@@ -8,18 +8,13 @@ also displace low-polygon meshes (single files or whole batches, from the app or
 Everything is evaluated on the GPU (Rust, egui, wgpu). Resolution never limits the detail: the graph
 stays a function, and exports sample it at whatever resolution you ask for.
 
-![A low-poly rock and the same rock displaced by a Noiser graph](docs/mesh-example.png)
-
-![Eroded rock graph with a baked warp and named reroutes, on a sphere](docs/screenshots/rock-sphere.png)
-![Sponge graph on a box](docs/screenshots/sponge-box.png)
-![Clouds in cloud mode](docs/screenshots/clouds-cloud.png)
-![Coral graph displacing a monkey mesh](docs/screenshots/coral-monkey.png)
-
 The three tabs: the **SDF Composer** (build and edit shapes, with the library drawer along the bottom), the **Noise graph** (a Warped cells graph, with its 3D view and slice) and the **Mesh graph** (a rocket from the Composer roughened by a noise graph, shown as the ray-marched field and as the remeshed result).
 
 ![The SDF Composer with the move gizmo on a fin, and the library drawer](docs/screenshots/composer.png)
 ![The Noise graph tab with a Warped cells graph](docs/screenshots/noise-graph.png)
 ![The Mesh graph tab: an SDF shape plus a noise graph, remeshed](docs/screenshots/mesh-graph.png)
+
+![A low-poly rock and the same rock displaced by a Noiser graph](docs/mesh-example.png)
 
 > **Status: early and moving fast.** Windows only for now (a Vulkan or DX12 GPU is required).
 > Releases are builds of whatever state the project is in at the time; see
