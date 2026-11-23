@@ -106,7 +106,7 @@ for the position it is given: a live field, evaluated in the graph's shader, wit
 into the unit tile (its longest side is `size`, its centre at `offset`); switch *Fit to the tile* off to keep the file's own
 units and origin. A shape does not tile, so the node gets the usual warning. The file is read again when it changes. A
 `.sdf` also loads as a mesh anywhere meshes do (the Load Mesh node, the Mesh shape in the Noise graph, drag and drop): it is
-sampled on a grid and extracted with surface nets, Z up like SDF Modeler's exports.
+sampled on a grid and extracted with surface nets (the resolution is in Preferences > Performance); it keeps the file's own axes, Y up, which is how the graphs' views show it (the Composer's OBJ and PLY export is Z up, like SDF Modeler's). A relative path in the node is looked for in the folder of the graph file, so a graph and its shapes can be shared together. In the Mesh graph a lone Load SDF node is enough to tell Remesh where to look (no Load Mesh node is needed); the shape's box, plus a margin, is the domain.
 
 **Batch.** Once a graph and settings look right on one mesh, *Batch displace meshes* applies them to many mesh
 files (OBJ, PLY, STL, glTF, FBX) at once: pick the files and an output folder, choose the same seed for all, the global seed plus one per
