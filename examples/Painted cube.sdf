@@ -1,0 +1,270 @@
+{
+	"version": [
+		0,
+		6,
+		1
+	],
+	"environment": {
+		"use_lightmap": false,
+		"lightmap": "",
+		"lightmap_rotation": 0,
+		"luminance": 1,
+		"color": [
+			0.327,
+			0.333,
+			0.34
+		]
+	},
+	"assemblies": [
+		{
+			"resolution": 6,
+			"shapes": [
+				{
+					"name": "Cube",
+					"hidden": false,
+					"type": "shape",
+					"position": [
+						0,
+						0,
+						0
+					],
+					"rotation": [
+						0,
+						0,
+						0
+					],
+					"scale": [
+						2.0,
+						2.0,
+						2.0
+					],
+					"color": [
+						0.92,
+						0.92,
+						0.9
+					],
+					"mode": "add",
+					"chamfer": false,
+					"blend": 0.02,
+					"blend_strength": 0.0,
+					"mirror_x": false,
+					"mirror_y": false,
+					"mirror_z": false,
+					"mirror_blend": 0,
+					"brush": "cube",
+					"bevel": 0.0,
+					"round": 0.15,
+					"thickness": 1,
+					"cone": 0,
+					"star": 0,
+					"points": 6,
+					"repeat_mode": "linear",
+					"linear_repeats": [
+						1,
+						1,
+						1
+					],
+					"steps": [
+						1.5,
+						1.5,
+						1.5
+					],
+					"radial_repeats": 1,
+					"radius": 1.5,
+					"repeat_axis": "x"
+				},
+				{
+					"name": "Red paint",
+					"hidden": false,
+					"type": "shape",
+					"position": [
+						0.9,
+						0.9,
+						0.9
+					],
+					"rotation": [
+						0,
+						0,
+						0
+					],
+					"scale": [
+						1.8,
+						1.8,
+						1.8
+					],
+					"color": [
+						0.85,
+						0.15,
+						0.1
+					],
+					"mode": "paint",
+					"chamfer": false,
+					"blend": 0.05,
+					"blend_strength": 0.0,
+					"mirror_x": false,
+					"mirror_y": false,
+					"mirror_z": false,
+					"mirror_blend": 0,
+					"brush": "sphere",
+					"bevel": 0.0,
+					"round": 0.1,
+					"thickness": 1,
+					"cone": 0,
+					"star": 0,
+					"points": 6,
+					"repeat_mode": "linear",
+					"linear_repeats": [
+						1,
+						1,
+						1
+					],
+					"steps": [
+						1.5,
+						1.5,
+						1.5
+					],
+					"radial_repeats": 1,
+					"radius": 1.5,
+					"repeat_axis": "x"
+				},
+				{
+					"name": "Blue stripe",
+					"hidden": false,
+					"type": "shape",
+					"position": [
+						0,
+						-0.2,
+						0
+					],
+					"rotation": [
+						0,
+						0,
+						0
+					],
+					"scale": [
+						2.4,
+						0.35,
+						2.4
+					],
+					"color": [
+						0.15,
+						0.35,
+						0.85
+					],
+					"mode": "paint",
+					"chamfer": false,
+					"blend": 0.02,
+					"blend_strength": 0.0,
+					"mirror_x": false,
+					"mirror_y": false,
+					"mirror_z": false,
+					"mirror_blend": 0,
+					"brush": "cube",
+					"bevel": 0.0,
+					"round": 0.1,
+					"thickness": 1,
+					"cone": 0,
+					"star": 0,
+					"points": 6,
+					"repeat_mode": "linear",
+					"linear_repeats": [
+						1,
+						1,
+						1
+					],
+					"steps": [
+						1.5,
+						1.5,
+						1.5
+					],
+					"radial_repeats": 1,
+					"radius": 1.5,
+					"repeat_axis": "x"
+				},
+				{
+					"name": "Hole",
+					"hidden": false,
+					"type": "shape",
+					"position": [
+						0,
+						0,
+						0
+					],
+					"rotation": [
+						1.5708,
+						0,
+						0
+					],
+					"scale": [
+						0.8,
+						3.0,
+						0.8
+					],
+					"color": [
+						0.25,
+						0.25,
+						0.3
+					],
+					"mode": "sub",
+					"chamfer": false,
+					"blend": 0.02,
+					"blend_strength": 0.0,
+					"mirror_x": false,
+					"mirror_y": false,
+					"mirror_z": false,
+					"mirror_blend": 0,
+					"brush": "cylinder",
+					"bevel": 0.0,
+					"round": 0.1,
+					"thickness": 1,
+					"cone": 0,
+					"star": 0,
+					"points": 6,
+					"repeat_mode": "linear",
+					"linear_repeats": [
+						1,
+						1,
+						1
+					],
+					"steps": [
+						1.5,
+						1.5,
+						1.5
+					],
+					"radial_repeats": 1,
+					"radius": 1.5,
+					"repeat_axis": "x"
+				}
+			]
+		}
+	],
+	"layers": [
+		{
+			"name": "Layer",
+			"assembly": 0,
+			"hidden": false,
+			"position": [
+				0,
+				0,
+				0
+			],
+			"rotation": [
+				0,
+				0,
+				0
+			],
+			"scale": [
+				1,
+				1,
+				1
+			],
+			"image": "",
+			"roughness": 0.3,
+			"metallic": 0,
+			"emissive": 0,
+			"ior": 1,
+			"transparency": 0,
+			"image_opacity": 1
+		}
+	]
+}

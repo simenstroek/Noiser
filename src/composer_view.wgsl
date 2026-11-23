@@ -66,18 +66,47 @@ fn selected_distance(p: vec3f) -> f32 {
     return best;
 }
 
-// The colour of the shapes nearest to a point on the surface, blended by how close each is.
+// The colour of the surface at a point. The operation list is walked like `map` does, with a colour next to every
+// distance: an operation takes the colour of whichever operand the combined distance is closest to (so a cut shows the
+// colour of the shape that cut it), and paint colours what is inside its brush.
 fn surface_color(p: vec3f) -> vec3f {
-    var sum = vec3f(0.0);
-    var total = 0.0;
-    let count = u.counts.y;
+    let count = sdf_op_count();
+    var stack: array<f32, 32>;
+    var colors: array<vec3f, 32>;
+    var top = 0;
     for (var i = 0u; i < count; i++) {
-        let d = abs(shape_distance(i, p));
-        let w = 1.0 / (d * d * d * d + 1e-6);
-        sum += shapes[i * STRIDE + 11u].yzw * w;
-        total += w;
+        let op = ops[i];
+        let kind = u32(op.x);
+        if (kind == 0u) {
+            let index = u32(op.y);
+            stack[top] = shape_distance(index, p);
+            colors[top] = shapes[index * STRIDE + 11u].yzw;
+            top++;
+        } else if (kind == 3u) {
+            stack[top - 1] = stack[top - 1] * op.y;
+        } else {
+            let a = stack[top - 1];
+            let b = stack[top - 2];
+            let ca = colors[top - 1];
+            let cb = colors[top - 2];
+            top--;
+            let mode = u32(op.y);
+            let d = combine(mode, a, b, op.z, op.w, kind == 2u);
+            stack[top - 1] = d;
+            if (mode == 9u) {
+                colors[top - 1] = cb;
+            } else if (mode == 3u) {
+                let soft = max(op.z, 0.01);
+                colors[top - 1] = mix(cb, ca, clamp(0.5 - 0.5 * a / soft, 0.0, 1.0));
+            } else {
+                let da = select(a, -a, mode == 1u);
+                let wa = 1.0 / ((d - da) * (d - da) + 1e-6);
+                let wb = 1.0 / ((d - b) * (d - b) + 1e-6);
+                colors[top - 1] = (ca * wa + cb * wb) / (wa + wb);
+            }
+        }
     }
-    return sum / max(total, 1e-9);
+    return colors[0];
 }
 
 @fragment
