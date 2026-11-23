@@ -160,3 +160,41 @@ pub fn brush_icon(brush: &str) -> &'static str {
         _ => "shape_sphere",
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use eframe::egui;
+
+    /// Every non-ASCII character that appears inside a string literal in the sources has a glyph in the fonts the app
+    /// loads, so none of them shows up as a missing-character box.
+    #[test]
+    fn the_fonts_cover_every_character_in_the_interface_strings() {
+        let mut found = std::collections::BTreeSet::new();
+        for entry in std::fs::read_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/src")).unwrap().flatten() {
+            let path = entry.path();
+            if path.extension().is_none_or(|e| e != "rs") {
+                continue;
+            }
+            for line in std::fs::read_to_string(&path).unwrap().lines() {
+                let trimmed = line.trim_start();
+                if trimmed.starts_with("//") {
+                    continue;
+                }
+                let code = line.split("//").next().unwrap_or(line);
+                for (i, part) in code.split('"').enumerate() {
+                    if i % 2 == 1 {
+                        found.extend(part.chars().filter(|c| !c.is_ascii()));
+                    }
+                }
+            }
+        }
+        let ctx = egui::Context::default();
+        ctx.set_fonts(egui::FontDefinitions::default());
+        let text: String = found.iter().collect();
+        let mut output = ctx.run_ui(Default::default(), |ui| {
+            ui.label(text.clone());
+        });
+        output.textures_delta.clear();
+        assert!(!found.is_empty());
+    }
+}
