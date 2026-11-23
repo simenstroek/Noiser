@@ -898,7 +898,7 @@ fn icon_choice(ui: &mut egui::Ui, current: &str, options: &[(&str, &str)], icon_
     let mut picked = None;
     ui.horizontal_wrapped(|ui| {
         for (id, label) in options {
-            if crate::icons::button(ui, icon_of(id), label, Some(current == *id), true).clicked() {
+            if crate::icons::button(ui, icon_of(id), label, Some(current == *id), true).on_hover_text(*label).clicked() {
                 picked = Some(id.to_string());
             }
         }
@@ -1113,10 +1113,10 @@ impl Composer {
             if toggled {
                 self.touch();
             }
-            if crate::icons::button(ui, "add_layer", "Add layer", None, true).clicked() {
+            if crate::icons::button(ui, "add_layer", "Add layer", None, true).on_hover_text("Add a layer").clicked() {
                 self.add_layer();
             }
-            if crate::icons::button(ui, "delete_layer", "Delete layer", None, self.file.layers.len() > 1).clicked() {
+            if crate::icons::button(ui, "delete_layer", "Delete layer", None, self.file.layers.len() > 1).on_hover_text("Delete this layer").clicked() {
                 self.delete_layer();
             }
         });
@@ -1133,11 +1133,11 @@ impl Composer {
         ui.separator();
         ui.horizontal_wrapped(|ui| {
             for (brush, name) in BRUSHES {
-                if crate::icons::button(ui, crate::icons::brush_icon(brush), &format!("Add {}", name.to_lowercase()), None, true).clicked() {
+                if crate::icons::button(ui, crate::icons::brush_icon(brush), &format!("Add {}", name.to_lowercase()), None, true).on_hover_text(format!("Add a {}", name.to_lowercase())).clicked() {
                     self.add_node(new_shape(brush));
                 }
             }
-            if crate::icons::button(ui, "group_row", "Add group", None, true).clicked() {
+            if crate::icons::button(ui, "group_row", "Add group", None, true).on_hover_text("Add an empty group").clicked() {
                 self.add_node(new_group());
             }
             ui.separator();
@@ -1170,7 +1170,7 @@ impl Composer {
                     ui.add_space(row.depth as f32 * 14.0);
                     if row.is_group {
                         let open = !self.collapsed.contains(&row.path);
-                        if crate::icons::button(ui, if open { "expanded" } else { "collapsed" }, if open { "Collapse" } else { "Expand" }, None, true).clicked() {
+                        if crate::icons::button(ui, if open { "expanded" } else { "collapsed" }, if open { "Collapse" } else { "Expand" }, None, true).on_hover_text(if open { "Collapse the group" } else { "Expand the group" }).clicked() {
                             actions.push(Action::ToggleCollapsed(row.path.clone()));
                         }
                     } else {
@@ -1183,7 +1183,7 @@ impl Composer {
                         actions.push(Action::ToggleHidden(row.path.clone()));
                     }
                     let mode_label = MODES.iter().find(|(id, _)| *id == row.mode).map_or("Add", |(_, label)| label);
-                    let mode_button = crate::icons::button(ui, crate::icons::mode_icon(&row.mode), &format!("Operation: {mode_label}"), None, row.supported);
+                    let mode_button = crate::icons::button(ui, crate::icons::mode_icon(&row.mode), &format!("Operation: {mode_label}"), None, row.supported).on_hover_text(format!("Operation: {mode_label}. Click to change it."));
                     egui::Popup::menu(&mode_button).id(ui.id().with(("composer mode menu", &row.path))).show(|ui| {
                         for (id, label) in MODES {
                             let item = egui::Button::image_and_text(crate::icons::image(crate::icons::mode_icon(id), 16.0, ui.visuals().text_color()), label).selected(row.mode == id);
@@ -1193,7 +1193,7 @@ impl Composer {
                         }
                     });
                     if let Some(brush) = &row.brush {
-                        let shape_button = crate::icons::button(ui, crate::icons::brush_icon(brush), &format!("Shape: {brush}"), None, true);
+                        let shape_button = crate::icons::button(ui, crate::icons::brush_icon(brush), &format!("Shape: {brush}"), None, true).on_hover_text(format!("Shape: {brush}. Click to change it."));
                         egui::Popup::menu(&shape_button).id(ui.id().with(("composer shape menu", &row.path))).show(|ui| {
                             for (id, label) in BRUSHES {
                                 let item = egui::Button::image_and_text(crate::icons::image(crate::icons::brush_icon(id), 16.0, ui.visuals().text_color()), label).selected(brush == id);
@@ -1298,6 +1298,10 @@ impl Composer {
             (Some(g), Some(at)) if response.drag_started_by(egui::PointerButton::Primary) => self.hit_handle(&g, at - rect.min, size).map(|axis| (axis, at)),
             _ => None,
         };
+        if grabbed.is_some() && ui.input(|i| i.modifiers.alt) {
+            // Alt-drag leaves the original where it was and drags a copy.
+            self.duplicate_selected();
+        }
         if let Some((axis, start)) = grabbed
             && let Some(g) = geometry
             && let Some(path) = &self.selection
@@ -2184,6 +2188,27 @@ mod ui_tests {
         let moved = h.state().shapes()[0].position;
         assert!(moved[0] > 0.1 && moved[1] > 0.1, "x and y both moved: {moved:?}");
         assert!(moved[2].abs() < 1e-6, "z stays: {moved:?}");
+    }
+
+    #[test]
+    fn alt_dragging_a_handle_moves_a_copy() {
+        let mut h = harness();
+        h.run();
+        click(&mut h, "Add cube");
+        h.run();
+        let c = h.state();
+        let g = c.gizmo_geometry(c.last_view).expect("the new shape is selected");
+        let origin = view_projection(c, g.origin);
+        let tip = view_projection(c, [0, 1, 2].map(|k| g.origin[k] + g.axes[0][k] * g.length));
+        let grab = origin + (tip - origin) * 0.5;
+        let to = grab + (tip - origin) * 0.5;
+        h.event(egui::Event::ModifiersChanged(egui::Modifiers::ALT));
+        h.run();
+        drag(&mut h, grab, to);
+        let shapes = h.state().shapes();
+        assert_eq!(shapes.len(), 2, "a copy was made");
+        assert!(shapes[0].position[0].abs() < 1e-6, "the original stays: {:?}", shapes[0].position);
+        assert!(shapes[1].position[0] > 0.1, "the copy moved: {:?}", shapes[1].position);
     }
 
     #[test]

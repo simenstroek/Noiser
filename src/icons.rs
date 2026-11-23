@@ -51,7 +51,7 @@ pub fn image(name: &str, size: f32, tint: egui::Color32) -> egui::Image<'static>
     egui::Image::new(source).fit_to_exact_size(egui::vec2(size, size)).tint(tint)
 }
 
-/// A square icon button whose accessible name and tooltip are `label`. `selected` makes it a toggle.
+/// A square icon button whose accessible name is `label`; the caller adds the tooltip. `selected` makes it a toggle.
 pub fn button(ui: &mut egui::Ui, name: &str, label: &str, selected: Option<bool>, enabled: bool) -> egui::Response {
     let tint = if enabled { ui.visuals().widgets.inactive.fg_stroke.color } else { ui.visuals().weak_text_color() };
     let mut button = egui::Button::image(image(name, 16.0, tint)).min_size(egui::vec2(24.0, 24.0));
@@ -60,7 +60,7 @@ pub fn button(ui: &mut egui::Ui, name: &str, label: &str, selected: Option<bool>
     }
     let response = ui.add_enabled(enabled, button);
     response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, enabled, label));
-    response.on_hover_text(label)
+    response
 }
 
 pub fn mode_icon(mode: &str) -> &'static str {

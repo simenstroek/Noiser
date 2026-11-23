@@ -38,15 +38,16 @@ pub struct SdfData {
 }
 
 impl LoadSdfParams {
-    /// The six numbers the shader reads: offset (3), tile units per file unit, and the point of the shape's own
-    /// coordinates that lands on the offset (3). Seven floats in all.
+    /// The seven numbers the shader reads: offset (3), tile units per file unit, and the point of the shape's own
+    /// coordinates (turned Z up) that lands on the offset (3). Seven floats in all.
     pub fn shader_params(&self, data: Option<&SdfData>) -> [f32; 7] {
         let bounds = data.and_then(|d| d.scene.bounds);
         match (self.fit, bounds) {
             (true, Some((lo, hi))) => {
                 let longest = (0..3).map(|a| hi[a] - lo[a]).fold(0.0, f64::max).max(1e-9);
+                // The graphs are Z up and the file is Y up, so the centre is turned the same way as the shape.
                 let center = [0, 1, 2].map(|a| ((lo[a] + hi[a]) * 0.5) as f32);
-                [self.offset[0], self.offset[1], self.offset[2], (self.size as f64 / longest) as f32, center[0], center[1], center[2]]
+                [self.offset[0], self.offset[1], self.offset[2], (self.size as f64 / longest) as f32, center[0], -center[2], center[1]]
             }
             _ => [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
         }
@@ -188,6 +189,8 @@ pub fn embed(prefix: &str, scene: &GpuScene) -> String {
     write_array(&mut out, &format!("{prefix}shapes"), &scene.shapes);
     write_array(&mut out, &format!("{prefix}ops"), &scene.ops);
     let _ = writeln!(out, "fn {prefix}sdf_op_count() -> u32 {{ return {}u; }}", scene.ops.len());
+    // Graph space is Z up; a file is Y up: file (x, y, z) sits at graph (x, -z, y).
+    let _ = writeln!(out, "fn {prefix}from_z_up(r: vec3f) -> vec3f {{ return vec3f(r.x, r.z, -r.y); }}");
     out.push_str(&prefix_identifiers(SDF_LIBRARY, &names, prefix));
     out
 }
@@ -274,6 +277,13 @@ mod tests {
         assert_eq!(data.scene.shape_count, 1);
         let missing = load(&std::env::temp_dir().join("noiser_no_such_file.sdf").to_string_lossy());
         assert!(missing.as_ref().is_err());
+    }
+
+    #[test]
+    fn the_fitted_centre_is_turned_z_up() {
+        let scene = GpuScene { shapes: vec![], ops: vec![], bounds: Some(([0.0, 0.0, 0.0], [1.0, 2.0, 3.0])), shape_count: 0 };
+        let params = LoadSdfParams { fit: true, size: 1.0, offset: [0.0; 3], ..Default::default() }.shader_params(Some(&SdfData { scene }));
+        assert_eq!(params[4..7], [0.5, -1.5, 1.0], "file (x, y, z) is graph (x, -z, y)");
     }
 
     #[test]
