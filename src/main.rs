@@ -31,6 +31,7 @@ mod surface;
 mod noiser_file;
 mod props;
 mod sdf_file;
+mod sdf_model;
 #[cfg(test)]
 mod gpu_tests;
 mod vdb;
