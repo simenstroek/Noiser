@@ -1443,7 +1443,7 @@ impl Composer {
         painter.text(
             rect.right_bottom() + egui::vec2(-10.0, -8.0),
             egui::Align2::RIGHT_BOTTOM,
-            "drag: orbit  ·  shift-drag / right-drag: pan  ·  wheel: zoom  ·  F: frame all  ·  C: frame selection  ·  W E R: tools",
+            "drag: orbit  ·  shift-drag / right-drag: pan  ·  wheel: zoom  ·  F: frame all  ·  C: frame selection  ·  1 3 7: front, right, top  ·  W E R: tools",
             egui::FontId::proportional(11.0),
             if capturing { egui::Color32::TRANSPARENT } else { egui::Color32::from_gray(120) },
         );
@@ -1710,6 +1710,13 @@ impl Composer {
             }
             if frame {
                 self.frame_pending = true;
+            }
+            // Looking straight down an axis: 1 front, 3 right, 7 top.
+            for (key, yaw, pitch) in [(egui::Key::Num1, 0.0, 0.0), (egui::Key::Num3, std::f64::consts::FRAC_PI_2, 0.0), (egui::Key::Num7, self.camera.yaw, 1.5)] {
+                if ctx.input(|i| i.key_pressed(key) && !i.modifiers.command) {
+                    self.camera.yaw = yaw;
+                    self.camera.pitch = pitch;
+                }
             }
             if ctx.input(|i| i.key_pressed(egui::Key::C) && !i.modifiers.command) {
                 let rect = self.last_view;
@@ -2425,5 +2432,17 @@ mod ui_tests {
         h.state_mut().add_node(new_shape("sphere"));
         h.run();
         h.get_by_label_contains("uses splines");
+    }
+
+    #[test]
+    fn the_number_keys_look_down_an_axis() {
+        let mut h = harness();
+        h.run();
+        h.key_press(egui::Key::Num3);
+        h.run();
+        assert!((h.state().camera.yaw - std::f64::consts::FRAC_PI_2).abs() < 1e-9 && h.state().camera.pitch == 0.0);
+        h.key_press(egui::Key::Num7);
+        h.run();
+        assert!(h.state().camera.pitch > 1.4);
     }
 }
