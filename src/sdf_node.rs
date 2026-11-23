@@ -364,4 +364,53 @@ mod tests {
         let (Ok(out), Ok(sdf)) = (std::env::var("NOISER_WRITE_SDF_GRAPH"), std::env::var("NOISER_SDF")) else { return };
         std::fs::write(out, graph_with_sphere(&sdf, LoadSdfParams::default()).to_json()).unwrap();
     }
+
+    /// A Mesh graph run: a ball of radius 1 (a mesh file) with a sphere of radius 0.5 (a .sdf) carved out of it.
+    #[test]
+    fn a_load_sdf_node_carves_a_mesh_in_a_mesh_graph_run() {
+        use crate::graph::{Graph, MathOp, NodeKind};
+        let Some(gpu) = crate::gpu_tests::gpu() else {
+            eprintln!("no GPU adapter: skipped");
+            return;
+        };
+        let dir = std::env::temp_dir().join("noiser-loadsdf-meshgraph");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let ball = crate::mesh::shapes::icosphere(1.0, 3);
+        crate::surface::RawMesh { normals: ball.positions.clone(), positions: ball.positions, triangles: ball.triangles }.write_obj(&dir.join("ball.obj")).unwrap();
+        let sdf = dir.join("hole.sdf");
+        std::fs::write(&sdf, SPHERE.replace(r#""scale":[2,2,2]"#, r#""scale":[1,1,1]"#)).unwrap();
+
+        let mut g = Graph::default();
+        let mesh = g.add(NodeKind::LoadMesh(crate::meshgraph::LoadMeshParams { path: "ball.obj".into(), resolution: 64, ..Default::default() }), [0.0; 2]);
+        let hole = g.add(NodeKind::LoadSdf(LoadSdfParams { file: sdf.to_string_lossy().into_owned(), fit: false, ..Default::default() }), [0.0; 2]);
+        let negated = g.add(NodeKind::Math { op: MathOp::Multiply, a: 0.0, b: -1.0, c: 0.5 }, [0.0; 2]);
+        let carved = g.add(NodeKind::Math { op: MathOp::Max, a: 0.0, b: 0.0, c: 0.5 }, [0.0; 2]);
+        let remesh = g.add(NodeKind::Remesh { triangles: 4000, adaptivity: 1.0 }, [0.0; 2]);
+        let out = g.add(NodeKind::OutMesh(crate::meshgraph::OutParams { folder: "out".into(), name: "carved".into(), ..Default::default() }), [0.0; 2]);
+        g.connect(hole, negated, 0);
+        g.connect(mesh, carved, 0);
+        g.connect(negated, carved, 1);
+        g.connect(carved, remesh, 0);
+        g.connect(remesh, out, 0);
+        let mut cache = crate::meshgraph::MeshCache::default();
+        let mut log = Vec::new();
+        let mut note = |s: &str| log.push(s.to_string());
+        let written = crate::meshgraph::Runner { device: &gpu.device, queue: &gpu.queue, cache: &mut cache, base: dir.clone(), seed: 0, progress: Default::default(), log: &mut note, batch_file: None, max_triangles: None }
+            .run(&g)
+            .unwrap_or_else(|e| panic!("{e}
+{log:?}"));
+        assert_eq!(written.len(), 1);
+        let obj = std::fs::read_to_string(&written[0]).unwrap();
+        let radii: Vec<f32> = obj
+            .lines()
+            .filter(|l| l.starts_with("v "))
+            .map(|l| {
+                let p: Vec<f32> = l.split_whitespace().skip(1).map(|n| n.parse().unwrap()).collect();
+                (p[0] * p[0] + p[1] * p[1] + p[2] * p[2]).sqrt()
+            })
+            .collect();
+        let (lo, hi) = (radii.iter().cloned().fold(9.0, f32::min), radii.iter().cloned().fold(0.0, f32::max));
+        assert!((0.42..0.58).contains(&lo) && (0.9..1.1).contains(&hi), "the shell runs from {lo} to {hi}");
+    }
 }
