@@ -138,6 +138,19 @@ pub fn mode_icon(mode: &str) -> &'static str {
     }
 }
 
+/// A colour for each operation, so rows and buttons can be told apart at a glance.
+pub fn mode_color(mode: &str) -> egui::Color32 {
+    match mode {
+        "sub" => egui::Color32::from_rgb(235, 110, 100),
+        "intersect" => egui::Color32::from_rgb(235, 190, 80),
+        "paint" => egui::Color32::from_rgb(200, 130, 230),
+        "push" | "avoid" => egui::Color32::from_rgb(100, 170, 240),
+        "emboss" | "deboss" => egui::Color32::from_rgb(90, 200, 200),
+        "shell" => egui::Color32::from_rgb(240, 150, 90),
+        _ => egui::Color32::from_rgb(120, 205, 125),
+    }
+}
+
 pub fn brush_icon(brush: &str) -> &'static str {
     match brush {
         "cube" => "shape_cube",

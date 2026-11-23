@@ -126,6 +126,9 @@ Edit > Preferences holds the interface scale, snapping and the backup switch; He
 The preview has material settings (colour, specular, roughness, soft shadows), lighting presets with sun and sky controls, a render resolution (full, half,
 quarter) and a march step limit; none of them affect exports.
 
+**Library.** Set a library folder under Preferences > File paths (the Create the folders button makes `SDFs`, `Noises`, `Mesh Graphs`, `Bakes` and `UDIM Packs` in it). Open and Save dialogs then start in the matching folder, and bake, export and UDIM pack output defaults to `Bakes` and `UDIM Packs` (exporters can still be pointed elsewhere). A file saved into the library gets a small picture of the active view next to it (`name.sdf.png`), so the files themselves stay light. Press Tab (changeable in Preferences > Keybinds) in any tab for the library drawer: drag an SDF into the Composer to add it to the composition, onto the Noise graph view to use it as the mesh, or into the Mesh graph to make a node from it; double-click a card to open it.
+**Preferences** have tabs for General, Keybinds, Performance (starting preview resolution and march steps, the resolution of `.sdf` meshes, the Composer's export samples), File paths and Style (scale, theme, accent colour).
+
 ## Controls
 
 | | |

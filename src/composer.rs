@@ -937,11 +937,11 @@ fn param_choice(ui: &mut egui::Ui, node: &mut Node, key: &str, label: &str, opti
 }
 
 /// A row of icon toggles for a choice; returns the new id when one is picked.
-fn icon_choice(ui: &mut egui::Ui, current: &str, options: &[(&str, &str)], icon_of: fn(&str) -> &'static str) -> Option<String> {
+fn icon_choice(ui: &mut egui::Ui, current: &str, options: &[(&str, &str)], icon_of: fn(&str) -> &'static str, color_of: Option<fn(&str) -> egui::Color32>) -> Option<String> {
     let mut picked = None;
     ui.horizontal_wrapped(|ui| {
         for (id, label) in options {
-            if crate::icons::button(ui, icon_of(id), label, Some(current == *id), true).on_hover_text(*label).clicked() {
+            if crate::icons::tinted_button(ui, icon_of(id), label, Some(current == *id), true, color_of.map(|f| f(id))).on_hover_text(*label).clicked() {
                 picked = Some(id.to_string());
             }
         }
@@ -997,7 +997,7 @@ impl Composer {
         });
         if is_shape {
             ui.label("Form");
-            if let Some(brush) = icon_choice(ui, node.text("brush").unwrap_or("sphere"), &BRUSHES, crate::icons::brush_icon) {
+            if let Some(brush) = icon_choice(ui, node.text("brush").unwrap_or("sphere"), &BRUSHES, crate::icons::brush_icon, None) {
                 node.set("brush", Value::from(brush));
                 edited = true;
             }
@@ -1030,7 +1030,7 @@ impl Composer {
         }
         ui.separator();
         ui.label("Operation");
-        if let Some(mode) = icon_choice(ui, node.text("mode").unwrap_or("add"), &MODES, crate::icons::mode_icon) {
+        if let Some(mode) = icon_choice(ui, node.text("mode").unwrap_or("add"), &MODES, crate::icons::mode_icon, Some(crate::icons::mode_color)) {
             node.set("mode", Value::from(mode));
             edited = true;
         }
@@ -1226,10 +1226,10 @@ impl Composer {
                         actions.push(Action::ToggleHidden(row.path.clone()));
                     }
                     let mode_label = MODES.iter().find(|(id, _)| *id == row.mode).map_or("Add", |(_, label)| label);
-                    let mode_button = crate::icons::button(ui, crate::icons::mode_icon(&row.mode), &format!("Operation: {mode_label}"), None, row.supported).on_hover_text(format!("Operation: {mode_label}. Click to change it."));
+                    let mode_button = crate::icons::tinted_button(ui, crate::icons::mode_icon(&row.mode), &format!("Operation: {mode_label}"), None, row.supported, Some(crate::icons::mode_color(&row.mode))).on_hover_text(format!("Operation: {mode_label}. Click to change it."));
                     egui::Popup::menu(&mode_button).id(ui.id().with(("composer mode menu", &row.path))).show(|ui| {
                         for (id, label) in MODES {
-                            let item = egui::Button::image_and_text(crate::icons::image(crate::icons::mode_icon(id), 16.0, ui.visuals().text_color()), label).selected(row.mode == id);
+                            let item = egui::Button::image_and_text(crate::icons::image(crate::icons::mode_icon(id), 16.0, crate::icons::mode_color(id)), label).selected(row.mode == id);
                             if ui.add(item).clicked() {
                                 actions.push(Action::SetText { path: row.path.clone(), key: "mode", value: id.to_string() });
                             }
