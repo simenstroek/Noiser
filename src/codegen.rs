@@ -403,7 +403,7 @@ impl Gen<'_> {
                 match crate::sdf_node::load(&p.file).as_ref() {
                     Ok(_) => {
                         self.sdf_used.insert(id);
-                        (Ty::F, format!("sdf{id}_map(sdf{id}_from_z_up(vec3f(P[{}], P[{}], P[{}]) + ({q} - vec3f(P[{s}], P[{}], P[{}])) / P[{}])) * P[{}]", s + 4, s + 5, s + 6, s + 1, s + 2, s + 3, s + 3))
+                        (Ty::F, format!("sdf{id}_map(vec3f(P[{}], P[{}], P[{}]) + ({q} - vec3f(P[{s}], P[{}], P[{}])) / P[{}]) * P[{}]", s + 4, s + 5, s + 6, s + 1, s + 2, s + 3, s + 3))
                     }
                     Err(_) => (Ty::F, "1000.0".into()),
                 }

@@ -17,7 +17,7 @@ pub enum Workspace {
 }
 
 impl Workspace {
-    pub const ALL: [Workspace; 3] = [Workspace::Noise, Workspace::Mesh, Workspace::Composer];
+    pub const ALL: [Workspace; 3] = [Workspace::Composer, Workspace::Noise, Workspace::Mesh];
 
     pub fn label(self) -> &'static str {
         match self {

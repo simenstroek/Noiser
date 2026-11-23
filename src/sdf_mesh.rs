@@ -1,6 +1,7 @@
 //! An SDF Modeler composition as a mesh, so the Mesh graph's Load Mesh node (and everything else that reads meshes)
 //! can take a `.sdf` file. The visible layers are sampled on a grid and the surface is extracted with surface nets. The
-//! mesh is Z up, like the PLY files SDF Modeler exports: file `(x, y, z)` becomes `(x, -z, y)`.
+//! graphs' viewers are Y up like the file, so the mesh keeps the file's axes; the exported OBJ and PLY files are Z up,
+//! like the PLY files SDF Modeler exports: file `(x, y, z)` becomes `(x, -z, y)`.
 
 use crate::mesh::Mesh;
 use crate::sdf_file::SdfFile;
@@ -18,7 +19,8 @@ pub fn load(path: &Path) -> Result<Mesh, String> {
 
 pub fn mesh_from_file(file: &SdfFile, resolution: usize) -> Result<Mesh, String> {
     let raw = raw_mesh_from_file(file, resolution)?;
-    Ok(Mesh { positions: raw.positions, triangles: raw.triangles, colors: Vec::new(), uvs: Vec::new() })
+    let positions = raw.positions.iter().map(|p| [p[0], p[2], -p[1]]).collect();
+    Ok(Mesh { positions, triangles: raw.triangles, colors: Vec::new(), uvs: Vec::new() })
 }
 
 /// The same mesh with its normals, ready to be written as OBJ or PLY.
@@ -74,7 +76,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_sphere_becomes_a_round_mesh_standing_z_up() {
+    fn a_sphere_becomes_a_round_mesh_in_the_files_axes() {
         // A sphere of radius 1 centred at height 2 (file y), in a layer shifted by one unit along x.
         let json = r#"{"version":[0,6,1],"environment":{},
             "assemblies":[{"resolution":5,"shapes":[{"name":"","hidden":false,"type":"shape","position":[0,2,0],"rotation":[0,0,0],
@@ -85,8 +87,8 @@ mod tests {
         let mesh = mesh_from_file(&SdfFile::from_json(json).unwrap(), 64).unwrap();
         assert!(mesh.triangles.len() > 500);
         for p in &mesh.positions {
-            // The centre is file (1, 2, 0), which is (1, 0, 2) Z up.
-            let d = ((p[0] - 1.0).powi(2) + p[1].powi(2) + (p[2] - 2.0).powi(2)).sqrt();
+            // The centre is file (1, 2, 0).
+            let d = ((p[0] - 1.0).powi(2) + (p[1] - 2.0).powi(2) + p[2].powi(2)).sqrt();
             assert!((d - 1.0).abs() < 0.03, "vertex {p:?} is {d} from the centre");
         }
     }
