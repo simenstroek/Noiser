@@ -75,12 +75,52 @@ def sd_ellipsoid(p, r, n=2.0):
     return (k.sum(1) ** (1.0 / n) - 1.0) * r.min()
 
 
+import os
+RV_MODE = os.environ.get('RV', 'max')
+CAP_RY = os.environ.get('CAP', '1') == '1'
+
+
+def cube_params(node, half):
+    hxz = min(half[0], half[2])
+    ry = node['round'] * half.min()
+    if RV_MODE == 'max':
+        rv = max(ry, node['bevel'] * hxz)
+    elif RV_MODE == 'lerp':
+        rv = ry + node['bevel'] * (hxz - ry)
+    else:
+        rv = node['bevel'] * hxz
+    hc = os.environ.get('HC', 'height')
+    if hc == 'height':
+        rz = -node['cone'] * hxz * (half[1] - ry) / half[1]
+    elif hc == 'plain':
+        rz = -node['cone'] * hxz
+    else:  # taper measured on the straight part only, then scaled to the full height
+        rz = -node['cone'] * hxz * (half[1] - ry) / half[1] * (1.0 + float(hc) * ry / half[1])
+    return rv, ry, rz
+
+
+def cube_wall(node, half):
+    """The uber primitive's `W`: half the wall thickness. Thickness 1 is solid."""
+    t = node['thickness']
+    if t >= 0.999:
+        return 1e3
+    return 0.5 * min(half[0], half[2]) * (0.05 + 0.95 * t)
+
+
 def prim_cube(p, node):
     half = np.array(node['scale']) / 2
-    hxz = min(half[0], half[2])
+    rv, ry, rz = cube_params(node, half)
+    wall = cube_wall(node, half)
+    if wall < 1e2:
+        wall += abs(rz)
+    if CAP_RY:
+        ry_new = min(ry, wall)
+        if ry > 0:
+            rz = rz * (half[1] - ry_new) / (half[1] - ry) if half[1] > ry else rz
+        ry = ry_new
     q = p.copy()
     q[:, 1] = -q[:, 1]
-    return sd_uberprim(q, [*half, 1e3], [node['bevel'] * hxz, node['round'] * half.min(), -node['cone'] * hxz])
+    return sd_uberprim(q, [*half, wall], [rv, ry, rz])
 
 
 def prim_sphere(p, node):
