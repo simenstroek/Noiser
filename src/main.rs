@@ -220,6 +220,7 @@ struct App {
     drawer: library::Drawer,
     /// Thumbnails waiting for a screenshot: the file and the view to cut out of it.
     thumbnails: Vec<(std::path::PathBuf, egui::Rect, std::sync::mpsc::Receiver<std::sync::Arc<egui::ColorImage>>)>,
+    debug_thumbnail: Option<std::path::PathBuf>,
     /// Which tab of the side panel is showing.
     side_tab: SideTab,
     /// A New / Open that is waiting for the user to decide about unsaved changes.
@@ -250,6 +251,7 @@ impl App {
         let mut mesh_tab = false;
         let mut library_root_arg: Option<String> = None;
         let mut show_library = false;
+        let mut thumbnail_arg: Option<std::path::PathBuf> = None;
         let mut show_prefs: Option<prefs::PrefsTab> = None;
         let mut auto_preview = false;
         let mut uv_view = false;
@@ -284,6 +286,9 @@ impl App {
                 open_mesh_export = true;
             } else if a == "--library-root" {
                 library_root_arg = args.next();
+            } else if a == "--thumbnail-of" {
+                // For checking the picture a save into the library would write: asks for it once the view is up.
+                thumbnail_arg = args.next().map(std::path::PathBuf::from);
             } else if a == "--library" {
                 show_library = true;
             } else if a == "--prefs" {
@@ -412,6 +417,7 @@ impl App {
             prefs_tab: Default::default(),
             drawer: Default::default(),
             thumbnails: Vec::new(),
+            debug_thumbnail: None,
             side_tab: SideTab::default(),
             pending: None,
             about_open: false,
@@ -432,6 +438,7 @@ impl App {
         }
         let graph_from_arg = mesh_graph_arg.is_some();
         app.drawer.open = show_library;
+        app.debug_thumbnail = thumbnail_arg;
         if let Some(tab) = show_prefs {
             app.prefs_open = true;
             app.prefs_tab = tab;
@@ -903,6 +910,15 @@ impl App {
 
     /// Writes the pictures asked for by files saved into the library, from screenshots of the window.
     fn collect_thumbnails(&mut self, ctx: &egui::Context) {
+        if self.debug_thumbnail.is_some() {
+            if library::view_rect().is_some() && ctx.input(|i| i.time) > 4.0 {
+                if let Some(file) = self.debug_thumbnail.take() {
+                    library::request_thumbnail(&file);
+                }
+            } else {
+                ctx.request_repaint_after(std::time::Duration::from_millis(500));
+            }
+        }
         for file in library::take_requests() {
             if let Some(rect) = library::view_rect() {
                 let (tx, rx) = std::sync::mpsc::channel();

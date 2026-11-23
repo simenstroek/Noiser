@@ -350,13 +350,16 @@ impl Drawer {
     }
 }
 
+/// The library folder is global, so tests that set it take turns.
+#[cfg(test)]
+pub(crate) static TURN: Mutex<()> = Mutex::new(());
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use egui_kittest::{Harness, kittest::Queryable};
 
-    /// The library folder is global, so tests that set it take turns.
-    static TURN: Mutex<()> = Mutex::new(());
+    use super::TURN;
 
     #[test]
     fn thumbnails_sit_next_to_the_file() {

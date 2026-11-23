@@ -2374,4 +2374,22 @@ mod ui_tests {
         c.add_node(new_shape("cube"));
         assert_eq!(c.title(), "untitled *");
     }
+
+    #[test]
+    fn saving_into_the_library_asks_for_a_picture() {
+        let _turn = crate::library::TURN.lock().unwrap_or_else(|e| e.into_inner());
+        let root = std::env::temp_dir().join("noiser_composer_library");
+        crate::library::create_folders(&root).unwrap();
+        crate::library::set_root(Some(root.clone()));
+        crate::library::set_thumbnails(true);
+        crate::library::take_requests();
+        let mut c = Composer::default();
+        c.add_node(new_shape("sphere"));
+        c.path = Some(root.join("SDFs").join("ball.sdf"));
+        c.save(false);
+        let asked = crate::library::take_requests();
+        crate::library::set_root(None);
+        assert_eq!(asked, vec![root.join("SDFs").join("ball.sdf")]);
+        assert!(root.join("SDFs").join("ball.sdf").is_file());
+    }
 }
