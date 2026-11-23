@@ -291,6 +291,7 @@ fn run_mesh_graph(args: &[String], log: &mut Log) -> Result<usize, String> {
     let seed = args.iter().position(|a| a == "--seed").and_then(|i| args.get(i + 1)).map_or(Ok(0), |v| v.parse::<u32>().map_err(|_| format!("--seed {v}: not a whole number")))?;
     let text = std::fs::read_to_string(&file).map_err(|e| format!("{}: {e}", file.display()))?;
     let graph = Graph::from_json(&text)?;
+    crate::sdf_node::set_base(crate::sdf_node::MESH_GRAPH_BASE, file.parent());
     let (device, queue) = crate::meshgraph::headless_gpu()?;
     let mut cache = crate::meshgraph::MeshCache::default();
     let base = file.parent().map_or(PathBuf::from("."), |p| p.to_path_buf());
@@ -346,6 +347,7 @@ fn run(args: &[String], log: &mut Log) -> Result<usize, String> {
     let mut sets = o.sets.clone();
     sets.extend(resolve_params(&text, &o.params)?);
     let graph = Graph::from_json(&apply_sets(&text, &sets)?)?;
+    crate::sdf_node::set_base(crate::sdf_node::NOISE_GRAPH_BASE, o.graph.parent());
     if let Some(path) = &o.export_shader {
         let lang = path.extension().and_then(|e| e.to_str()).and_then(crate::shaderexport::Lang::from_extension).ok_or("--export-shader needs a .hlsl, .glsl or .wgsl file name")?;
         std::fs::write(path, crate::shaderexport::export(&graph, o.seed, lang)?).map_err(|e| format!("{}: {e}", path.display()))?;

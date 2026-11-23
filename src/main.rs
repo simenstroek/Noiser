@@ -1076,6 +1076,8 @@ impl eframe::App for App {
             }
         }
         self.editor.snap = self.prefs.snap_nodes;
+        sdf_node::set_base(sdf_node::NOISE_GRAPH_BASE, self.path.as_deref().and_then(|p| p.parent()));
+        sdf_node::set_base(sdf_node::MESH_GRAPH_BASE, self.mesh_ws.path.as_deref().and_then(|p| p.parent()));
         // The first time Noiser runs, the getting-started window opens by itself.
         if !self.prefs.seen_about {
             self.prefs.seen_about = true;

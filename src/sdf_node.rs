@@ -79,8 +79,33 @@ fn read(path: &str) -> Result<SdfData, String> {
     Ok(SdfData { scene })
 }
 
+/// The folders of the graph files that are open (one slot per tab): a relative path in a Load SDF node is looked for
+/// in each of them, so a graph and its shapes can be moved or shared together.
+static BASES: Mutex<[Option<std::path::PathBuf>; 2]> = Mutex::new([None, None]);
+
+pub const NOISE_GRAPH_BASE: usize = 0;
+pub const MESH_GRAPH_BASE: usize = 1;
+
+pub fn set_base(slot: usize, folder: Option<&std::path::Path>) {
+    if let Ok(mut bases) = BASES.lock() {
+        bases[slot] = folder.map(|f| f.to_path_buf());
+    }
+}
+
+/// `path` as it is on disk: a relative path is taken from the first graph folder that has the file.
+pub fn resolve(path: &str) -> String {
+    let given = std::path::Path::new(path);
+    if given.is_absolute() || path.is_empty() {
+        return path.to_string();
+    }
+    let bases = BASES.lock().map(|b| b.clone()).unwrap_or_default();
+    bases.iter().flatten().map(|base| base.join(given)).find(|candidate| candidate.is_file()).map_or_else(|| path.to_string(), |found| found.to_string_lossy().into_owned())
+}
+
 /// The composition in `path`, read again when the file changes. Cheap to call every frame.
 pub fn load(path: &str) -> Arc<Result<SdfData, String>> {
+    let resolved = resolve(path);
+    let path = resolved.as_str();
     let mut guard = CACHE.lock().unwrap_or_else(|e| e.into_inner());
     let cache = guard.get_or_insert_with(HashMap::new);
     if let Some(entry) = cache.get_mut(path)
@@ -102,8 +127,9 @@ pub fn load(path: &str) -> Arc<Result<SdfData, String>> {
 
 /// Forgets what is known about a file, so the next `load` reads it.
 pub fn reload(path: &str) {
+    let path = resolve(path);
     if let Some(cache) = CACHE.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
-        cache.remove(path);
+        cache.remove(&path);
     }
 }
 
@@ -274,6 +300,20 @@ mod tests {
         assert_eq!(data.scene.shape_count, 1);
         let missing = load(&std::env::temp_dir().join("noiser_no_such_file.sdf").to_string_lossy());
         assert!(missing.as_ref().is_err());
+    }
+
+    #[test]
+    fn a_relative_path_is_found_in_the_graph_folder() {
+        let dir = std::env::temp_dir().join("noiser_sdf_relative");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("ball.sdf"), SPHERE).unwrap();
+        set_base(NOISE_GRAPH_BASE, Some(&dir));
+        let found = resolve("ball.sdf");
+        let loaded = load("ball.sdf");
+        set_base(NOISE_GRAPH_BASE, None);
+        assert_eq!(std::path::PathBuf::from(&found), dir.join("ball.sdf"));
+        assert!(loaded.is_ok(), "the file loads through its relative name");
+        assert_eq!(resolve("ball.sdf"), "ball.sdf", "without a graph folder the name stays as it is");
     }
 
     #[test]
