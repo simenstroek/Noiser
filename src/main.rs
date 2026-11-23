@@ -31,6 +31,7 @@ mod surface;
 mod noiser_file;
 mod props;
 mod composer;
+mod icons;
 mod composer_gpu;
 mod composer_render;
 mod sdf_file;

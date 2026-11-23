@@ -1,0 +1,1 @@
+Icons in this folder are Material Symbols (Google) and Material Design Icons (ic:baseline-*), Apache License 2.0, fetched from Iconify (https://iconify.design).

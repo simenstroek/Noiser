@@ -76,7 +76,7 @@ fn new_shape(brush: &str) -> Node {
     }
     put("mirror_blend", 0.into());
     put("brush", brush.into());
-    put("bevel", (if brush == "cube" { 1.0 } else { 0.0 }).into());
+    put("bevel", 0.0.into());
     put("round", 0.1.into());
     put("thickness", 1.into());
     put("cone", 0.into());
@@ -222,6 +222,25 @@ struct Drag {
     view: Camera,
 }
 
+/// Where the two-axis move squares sit along their axes, as fractions of the gizmo length.
+const PLANE_NEAR: f64 = 0.3;
+const PLANE_FAR: f64 = 0.6;
+
+fn inside_quad(corners: &[egui::Pos2; 4], p: egui::Pos2) -> bool {
+    let mut sign = 0.0f32;
+    for k in 0..4 {
+        let (a, b) = (corners[k], corners[(k + 1) % 4]);
+        let cross = (b.x - a.x) * (p.y - a.y) - (b.y - a.y) * (p.x - a.x);
+        if cross != 0.0 {
+            if sign != 0.0 && cross.signum() != sign {
+                return false;
+            }
+            sign = cross.signum();
+        }
+    }
+    true
+}
+
 fn axis_color(axis: usize) -> egui::Color32 {
     [RED, GREEN, BLUE][axis]
 }
@@ -256,6 +275,7 @@ enum Action {
     ToggleCollapsed(Vec<usize>),
     /// Move a node next to, into, or (onto a shape) together with another; `None` means the end of the top level.
     Drop { from: Vec<usize>, onto: Option<Vec<usize>>, zone: DropZone },
+    SetText { path: Vec<usize>, key: &'static str, value: String },
 }
 
 struct Row {
@@ -263,6 +283,7 @@ struct Row {
     depth: usize,
     label: String,
     mode: String,
+    brush: Option<String>,
     hidden: bool,
     is_group: bool,
     supported: bool,
@@ -872,15 +893,17 @@ fn param_choice(ui: &mut egui::Ui, node: &mut Node, key: &str, label: &str, opti
     false
 }
 
-fn mode_symbol(mode: &str) -> &'static str {
-    match mode {
-        "sub" => "-",
-        "intersect" => "&",
-        "paint" => "~",
-        "push" | "avoid" | "shell" => "o",
-        "emboss" | "deboss" => "^",
-        _ => "+",
-    }
+/// A row of icon toggles for a choice; returns the new id when one is picked.
+fn icon_choice(ui: &mut egui::Ui, current: &str, options: &[(&str, &str)], icon_of: fn(&str) -> &'static str) -> Option<String> {
+    let mut picked = None;
+    ui.horizontal_wrapped(|ui| {
+        for (id, label) in options {
+            if crate::icons::button(ui, icon_of(id), label, Some(current == *id), true).clicked() {
+                picked = Some(id.to_string());
+            }
+        }
+    });
+    picked
 }
 
 impl Composer {
@@ -930,7 +953,11 @@ impl Composer {
             edited |= ui.text_edit_singleline(&mut node.name).labelled_by(name.id).changed();
         });
         if is_shape {
-            edited |= param_choice(ui, node, "brush", "Form", &BRUSHES);
+            ui.label("Form");
+            if let Some(brush) = icon_choice(ui, node.text("brush").unwrap_or("sphere"), &BRUSHES, crate::icons::brush_icon) {
+                node.set("brush", Value::from(brush));
+                edited = true;
+            }
         }
         ui.separator();
         edited |= vec3(ui, "Position", &mut node.position, 0.01);
@@ -959,7 +986,11 @@ impl Composer {
             });
         }
         ui.separator();
-        edited |= param_choice(ui, node, "mode", "Operation", &MODES);
+        ui.label("Operation");
+        if let Some(mode) = icon_choice(ui, node.text("mode").unwrap_or("add"), &MODES, crate::icons::mode_icon) {
+            node.set("mode", Value::from(mode));
+            edited = true;
+        }
         edited |= param_number(ui, node, "blend", "Blend", 0.02, 0.002, Some(0.0..=10.0));
         let mode = node.text("mode").unwrap_or("add").to_string();
         if matches!(mode.as_str(), "push" | "avoid" | "emboss" | "deboss" | "shell") {
@@ -1045,7 +1076,7 @@ impl Composer {
                         (None, name) => name.to_string(),
                     }
                 };
-                out.push(Row { path: path.clone(), depth: path.len() - 1, label, mode: node.text("mode").unwrap_or("add").to_string(), hidden: node.hidden, is_group, supported });
+                out.push(Row { path: path.clone(), depth: path.len() - 1, label, mode: node.text("mode").unwrap_or("add").to_string(), brush: if is_group { None } else { node.text("brush").map(str::to_string) }, hidden: node.hidden, is_group, supported });
                 if is_group && !collapsed.contains(path.as_slice()) {
                     walk(node.children(), collapsed, path, out);
                 }
@@ -1082,10 +1113,10 @@ impl Composer {
             if toggled {
                 self.touch();
             }
-            if ui.button("Add layer").on_hover_text("Add a layer").clicked() {
+            if crate::icons::button(ui, "add_layer", "Add layer", None, true).clicked() {
                 self.add_layer();
             }
-            if ui.add_enabled(self.file.layers.len() > 1, egui::Button::new("Delete layer")).on_hover_text("Delete this layer").clicked() {
+            if crate::icons::button(ui, "delete_layer", "Delete layer", None, self.file.layers.len() > 1).clicked() {
                 self.delete_layer();
             }
         });
@@ -1102,29 +1133,28 @@ impl Composer {
         ui.separator();
         ui.horizontal_wrapped(|ui| {
             for (brush, name) in BRUSHES {
-                if ui.button(name).on_hover_text(format!("Add a {}", name.to_lowercase())).clicked() {
+                if crate::icons::button(ui, crate::icons::brush_icon(brush), &format!("Add {}", name.to_lowercase()), None, true).clicked() {
                     self.add_node(new_shape(brush));
                 }
             }
-            if ui.button("Group").on_hover_text("Add an empty group").clicked() {
+            if crate::icons::button(ui, "group_row", "Add group", None, true).clicked() {
                 self.add_node(new_group());
             }
-        });
-        ui.horizontal_wrapped(|ui| {
+            ui.separator();
             let has = self.selection.is_some();
-            if ui.add_enabled(has, egui::Button::new("Duplicate")).clicked() {
+            if crate::icons::button(ui, "duplicate", "Duplicate", None, has).on_hover_text("Duplicate (Ctrl+D)").clicked() {
                 self.duplicate_selected();
             }
-            if ui.add_enabled(has, egui::Button::new("Delete")).clicked() {
+            if crate::icons::button(ui, "delete", "Delete", None, has).on_hover_text("Delete (Del)").clicked() {
                 self.delete_selected();
             }
-            if ui.add_enabled(has, egui::Button::new("Up")).on_hover_text("Earlier: applied before its neighbour").clicked() {
+            if crate::icons::button(ui, "up", "Up", None, has).on_hover_text("Earlier: applied before its neighbour").clicked() {
                 self.move_selected(false);
             }
-            if ui.add_enabled(has, egui::Button::new("Down")).on_hover_text("Later: applied after its neighbour").clicked() {
+            if crate::icons::button(ui, "down", "Down", None, has).on_hover_text("Later: applied after its neighbour").clicked() {
                 self.move_selected(true);
             }
-            if ui.add_enabled(has, egui::Button::new("Wrap in group")).clicked() {
+            if crate::icons::button(ui, "group", "Wrap in group", None, has).on_hover_text("Wrap in a group (Ctrl+G)").clicked() {
                 self.group_selected();
             }
         });
@@ -1140,11 +1170,11 @@ impl Composer {
                     ui.add_space(row.depth as f32 * 14.0);
                     if row.is_group {
                         let open = !self.collapsed.contains(&row.path);
-                        if ui.small_button(if open { "v" } else { ">" }).clicked() {
+                        if crate::icons::button(ui, if open { "expanded" } else { "collapsed" }, if open { "Collapse" } else { "Expand" }, None, true).clicked() {
                             actions.push(Action::ToggleCollapsed(row.path.clone()));
                         }
                     } else {
-                        ui.add_space(20.0);
+                        ui.add_space(28.0);
                     }
                     let mut visible = !row.hidden;
                     let toggle = ui.add(egui::Checkbox::without_text(&mut visible));
@@ -1152,8 +1182,29 @@ impl Composer {
                     if toggle.on_hover_text("Show or hide").changed() {
                         actions.push(Action::ToggleHidden(row.path.clone()));
                     }
+                    let mode_label = MODES.iter().find(|(id, _)| *id == row.mode).map_or("Add", |(_, label)| label);
+                    let mode_button = crate::icons::button(ui, crate::icons::mode_icon(&row.mode), &format!("Operation: {mode_label}"), None, row.supported);
+                    egui::Popup::menu(&mode_button).id(ui.id().with(("composer mode menu", &row.path))).show(|ui| {
+                        for (id, label) in MODES {
+                            let item = egui::Button::image_and_text(crate::icons::image(crate::icons::mode_icon(id), 16.0, ui.visuals().text_color()), label).selected(row.mode == id);
+                            if ui.add(item).clicked() {
+                                actions.push(Action::SetText { path: row.path.clone(), key: "mode", value: id.to_string() });
+                            }
+                        }
+                    });
+                    if let Some(brush) = &row.brush {
+                        let shape_button = crate::icons::button(ui, crate::icons::brush_icon(brush), &format!("Shape: {brush}"), None, true);
+                        egui::Popup::menu(&shape_button).id(ui.id().with(("composer shape menu", &row.path))).show(|ui| {
+                            for (id, label) in BRUSHES {
+                                let item = egui::Button::image_and_text(crate::icons::image(crate::icons::brush_icon(id), 16.0, ui.visuals().text_color()), label).selected(brush == id);
+                                if ui.add(item).clicked() {
+                                    actions.push(Action::SetText { path: row.path.clone(), key: "brush", value: id.to_string() });
+                                }
+                            }
+                        });
+                    }
                     let selected = self.selection.as_ref() == Some(&row.path);
-                    let text = format!("{} {}{}", mode_symbol(&row.mode), row.label, if row.supported { "" } else { " (not supported)" });
+                    let text = format!("{}{}", row.label, if row.supported { "" } else { " (not supported)" });
                     let mut label = egui::RichText::new(text);
                     if row.hidden || !row.supported {
                         label = label.weak();
@@ -1194,6 +1245,13 @@ impl Composer {
             match action {
                 Action::Drop { from, onto, zone } => self.move_node(&from, onto.as_deref(), zone),
                 Action::Select(path) => self.selection = Some(path),
+                Action::SetText { path, key, value } => {
+                    let assembly = self.assembly_index();
+                    if let Some(node) = self.file.assemblies.get_mut(assembly).and_then(|a| node_at_mut(&mut a.shapes, &path)) {
+                        node.set(key, Value::from(value));
+                        self.touch();
+                    }
+                }
                 Action::ToggleCollapsed(path) => {
                     if !self.collapsed.remove(&path) {
                         self.collapsed.insert(path);
@@ -1365,8 +1423,30 @@ impl Composer {
             .collect()
     }
 
+    /// The corners on screen of the small square that moves in the plane across `axis` (the other two axes).
+    fn plane_corners(&self, g: &GizmoGeometry, axis: usize, size: egui::Vec2) -> Option<[egui::Pos2; 4]> {
+        let (u, v) = (g.axes[(axis + 1) % 3], g.axes[(axis + 2) % 3]);
+        let (near, far) = (g.length * PLANE_NEAR, g.length * PLANE_FAR);
+        let mut corners = [egui::Pos2::ZERO; 4];
+        for (corner, (a, b)) in corners.iter_mut().zip([(near, near), (far, near), (far, far), (near, far)]) {
+            let world = [0, 1, 2].map(|k| g.origin[k] + u[k] * a + v[k] * b);
+            let at = self.camera.project(world, [size.x, size.y])?;
+            *corner = egui::pos2(at[0], at[1]);
+        }
+        Some(corners)
+    }
+
     fn hit_handle(&self, g: &GizmoGeometry, pointer: egui::Vec2, size: egui::Vec2) -> Option<usize> {
         let p = egui::pos2(pointer.x, pointer.y);
+        if self.tool == Tool::Move {
+            for axis in 0..3 {
+                if let Some(corners) = self.plane_corners(g, axis, size)
+                    && inside_quad(&corners, p)
+                {
+                    return Some(4 + axis);
+                }
+            }
+        }
         let mut best: Option<(f32, usize)> = None;
         for axis in 0..4 {
             let distance = if axis == 3 {
@@ -1398,6 +1478,18 @@ impl Composer {
 
     fn draw_gizmo(&self, painter: &egui::Painter, rect: egui::Rect, g: &GizmoGeometry, highlighted: Option<usize>) {
         let size = rect.size();
+        if self.tool == Tool::Move {
+            for axis in 0..3 {
+                if let Some(corners) = self.plane_corners(g, axis, size) {
+                    let lit = highlighted == Some(4 + axis);
+                    let alpha = if lit { 200 } else { 110 };
+                    let base = axis_color(axis);
+                    let fill = egui::Color32::from_rgba_unmultiplied(base.r(), base.g(), base.b(), alpha);
+                    let points: Vec<egui::Pos2> = corners.iter().map(|c| *c + rect.min.to_vec2()).collect();
+                    painter.add(egui::Shape::convex_polygon(points, fill, egui::Stroke::new(1.5, if lit { egui::Color32::WHITE } else { base })));
+                }
+            }
+        }
         for axis in 0..3 {
             let lit = highlighted == Some(axis);
             let color = if lit { egui::Color32::WHITE } else { axis_color(axis) };
@@ -1454,6 +1546,25 @@ impl Composer {
             self.touch();
             return;
         }
+        if drag.tool == Tool::Move && drag.axis >= 4 {
+            let normal = g.axes[drag.axis - 4];
+            let plane_hit = |at: egui::Pos2| -> Option<V3> {
+                let ndc = [2.0 * at.x as f64 / size.x as f64 - 1.0, 1.0 - 2.0 * at.y as f64 / size.y as f64];
+                let (from, direction) = drag.view.ray(ndc, size.x as f64 / size.y as f64);
+                let facing = dot(direction, normal);
+                if facing.abs() < 1e-6 {
+                    return None;
+                }
+                let t = dot([g.origin[0] - from[0], g.origin[1] - from[1], g.origin[2] - from[2]], normal) / facing;
+                Some([0, 1, 2].map(|k| from[k] + direction[k] * t))
+            };
+            let (Some(start), Some(now)) = (plane_hit(drag.start_pointer), plane_hit(pointer)) else { return };
+            let world = [0, 1, 2].map(|k| (now[k] - start[k]) / g.parent.s.max(1e-9));
+            let local = into_frame(&g.parent.r, world);
+            node.position = [0, 1, 2].map(|k| snapped(drag.start_position[k] + local[k], 0.05));
+            self.touch();
+            return;
+        }
         match drag.tool {
             Tool::Move | Tool::Scale => {
                 let tip = [0, 1, 2].map(|k| g.origin[k] + g.axes[drag.axis][k] * g.length);
@@ -1497,6 +1608,7 @@ impl Composer {
 
     pub fn show(&mut self, ui: &mut egui::Ui, format: wgpu::TextureFormat) {
         let ctx = ui.ctx().clone();
+        egui_extras::install_image_loaders(&ctx);
         if !ctx.egui_wants_keyboard_input() {
             ctx.input(|i| {
                 for (key, tool) in [(egui::Key::W, Tool::Move), (egui::Key::E, Tool::Rotate), (egui::Key::R, Tool::Scale)] {
@@ -1598,40 +1710,48 @@ impl Composer {
         }
         egui::Panel::top("composer toolbar").show(ui, |ui| {
             ui.horizontal_wrapped(|ui| {
-                if ui.button("New").clicked() {
+                if crate::icons::button(ui, "new", "New", None, true).on_hover_text("New (Ctrl+N)").clicked() {
                     self.request(Pending::New);
                 }
-                if ui.button("Open…").clicked() {
+                if crate::icons::button(ui, "open", "Open…", None, true).on_hover_text("Open… (Ctrl+O)").clicked() {
                     self.request(Pending::Open);
                 }
-                if ui.button("Save").clicked() {
+                if crate::icons::button(ui, "save", "Save", None, true).on_hover_text("Save (Ctrl+S)").clicked() {
                     self.save(false);
                 }
-                if ui.button("Save as…").clicked() {
+                if crate::icons::button(ui, "save_as", "Save as…", None, true).on_hover_text("Save as… (Ctrl+Shift+S)").clicked() {
                     self.save(true);
                 }
                 ui.separator();
-                if ui.add_enabled(self.export_job.is_none(), egui::Button::new("Export mesh…")).on_hover_text("Write the visible layers as an OBJ or PLY mesh").clicked() {
+                if crate::icons::button(ui, "export", "Export mesh…", None, self.export_job.is_none()).on_hover_text("Write the visible layers as an OBJ or PLY mesh").clicked() {
                     self.export_mesh();
                 }
                 ui.add(egui::DragValue::new(&mut self.export_samples).range(48..=640).speed(2.0).suffix(" samples")).on_hover_text("Samples along the longest side of the mesh extraction: more is finer and slower");
                 ui.separator();
-                if ui.add_enabled(!self.undo.is_empty(), egui::Button::new("Undo")).clicked() {
+                if crate::icons::button(ui, "undo", "Undo", None, !self.undo.is_empty()).on_hover_text("Undo (Ctrl+Z)").clicked() {
                     self.undo();
                 }
-                if ui.add_enabled(!self.redo.is_empty(), egui::Button::new("Redo")).clicked() {
+                if crate::icons::button(ui, "redo", "Redo", None, !self.redo.is_empty()).on_hover_text("Redo (Ctrl+Y)").clicked() {
                     self.redo();
                 }
                 ui.separator();
-                for (tool, name, hint) in [(Tool::Move, "Move", "W"), (Tool::Rotate, "Rotate", "E"), (Tool::Scale, "Scale", "R")] {
-                    ui.selectable_value(&mut self.tool, tool, name).on_hover_text(format!("Shortcut {hint}"));
+                for (tool, name, icon, hint) in [(Tool::Move, "Move", "move", "W"), (Tool::Rotate, "Rotate", "rotate", "E"), (Tool::Scale, "Scale", "scale", "R")] {
+                    if crate::icons::button(ui, icon, name, Some(self.tool == tool), true).on_hover_text(format!("{name} ({hint})")).clicked() {
+                        self.tool = tool;
+                    }
                 }
                 ui.separator();
-                ui.selectable_value(&mut self.space, Space::Local, "Local");
-                ui.selectable_value(&mut self.space, Space::Global, "Global").on_hover_text("Move along the world's axes");
-                ui.checkbox(&mut self.snap, "Snap").on_hover_text("Move and scale in steps of 0.05, rotate in steps of 15 degrees");
+                if crate::icons::button(ui, "local", "Local", Some(self.space == Space::Local), true).on_hover_text("Gizmo follows the shape's own axes").clicked() {
+                    self.space = Space::Local;
+                }
+                if crate::icons::button(ui, "global", "Global", Some(self.space == Space::Global), true).on_hover_text("Move along the world's axes").clicked() {
+                    self.space = Space::Global;
+                }
+                if crate::icons::button(ui, "snap", "Snap", Some(self.snap), true).on_hover_text("Move and scale in steps of 0.05, rotate in steps of 15 degrees").clicked() {
+                    self.snap = !self.snap;
+                }
                 ui.separator();
-                if ui.button("Frame").on_hover_text("Fit the view to the shape (F)").clicked() {
+                if crate::icons::button(ui, "frame", "Frame", None, true).on_hover_text("Fit the view to the scene (F)").clicked() {
                     self.frame_pending = true;
                 }
                 let title = self.path.as_ref().and_then(|p| p.file_name()).map_or("untitled".to_string(), |n| n.to_string_lossy().into_owned());
@@ -1915,12 +2035,12 @@ mod ui_tests {
     fn the_add_buttons_add_shapes_and_a_row_selects_one() {
         let mut h = harness();
         h.run();
-        click(&mut h, "Cube");
-        click(&mut h, "Sphere");
+        click(&mut h, "Add cube");
+        click(&mut h, "Add sphere");
         assert_eq!(h.state().shapes().len(), 2);
         assert_eq!(h.state().shapes()[0].text("brush"), Some("cube"));
         assert_eq!(h.state().shapes()[1].text("brush"), Some("sphere"));
-        click(&mut h, "+ Cube");
+        click(&mut h, "Cube");
         assert_eq!(h.state().selection, Some(vec![0]));
         // The inspector now shows the selected shape.
         h.get_by_label("Shape");
@@ -1930,10 +2050,10 @@ mod ui_tests {
     fn dragging_a_row_onto_another_makes_a_group() {
         let mut h = harness();
         h.run();
-        click(&mut h, "Cube");
-        click(&mut h, "Sphere");
-        let from = h.get_by_label("+ Cube").rect().center();
-        let to = h.get_by_label("+ Sphere").rect().center();
+        click(&mut h, "Add cube");
+        click(&mut h, "Add sphere");
+        let from = h.get_all_by_label("Cube").next().unwrap().rect().center();
+        let to = h.get_all_by_label("Sphere").next().unwrap().rect().center();
         h.hover_at(from);
         h.run();
         press(&mut h, from, true);
@@ -1951,8 +2071,8 @@ mod ui_tests {
     fn undo_in_the_toolbar_takes_the_last_edit_back() {
         let mut h = harness();
         h.run();
-        click(&mut h, "Cube");
-        click(&mut h, "Sphere");
+        click(&mut h, "Add cube");
+        click(&mut h, "Add sphere");
         assert_eq!(h.state().shapes().len(), 2);
         click(&mut h, "Undo");
         assert_eq!(h.state().shapes().len(), 1);
@@ -1964,7 +2084,7 @@ mod ui_tests {
     fn duplicate_and_delete_work_on_the_selected_row() {
         let mut h = harness();
         h.run();
-        click(&mut h, "Polygon");
+        click(&mut h, "Add polygon");
         assert_eq!(h.state().shapes().len(), 1);
         click(&mut h, "Duplicate");
         assert_eq!(h.state().shapes().len(), 2);
@@ -1977,7 +2097,7 @@ mod ui_tests {
         use egui::accesskit::Role;
         let mut h = harness();
         h.run();
-        click(&mut h, "Cube");
+        click(&mut h, "Add cube");
         let fields: Vec<_> = h.get_all_by_role_and_label(Role::SpinButton, "Position").collect();
         assert_eq!(fields.len(), 3, "x, y and z");
         let from = fields[0].rect().center();
@@ -2000,7 +2120,7 @@ mod ui_tests {
     fn the_mirror_checkboxes_set_the_shape_s_mirror_flags() {
         let mut h = harness();
         h.run();
-        click(&mut h, "Sphere");
+        click(&mut h, "Add sphere");
         assert_eq!(h.state().shapes()[0].flag("mirror_x"), Some(false));
         click(&mut h, "X");
         assert_eq!(h.state().shapes()[0].flag("mirror_x"), Some(true));
@@ -2030,7 +2150,7 @@ mod ui_tests {
     fn dragging_the_move_handle_in_the_viewport_moves_the_shape() {
         let mut h = harness();
         h.run();
-        click(&mut h, "Cube");
+        click(&mut h, "Add cube");
         h.run();
         let c = h.state();
         let rect = c.last_view;
@@ -2047,10 +2167,30 @@ mod ui_tests {
     }
 
     #[test]
+    fn dragging_a_plane_square_moves_the_shape_along_two_axes() {
+        let mut h = harness();
+        h.run();
+        click(&mut h, "Add cube");
+        h.run();
+        let c = h.state();
+        let rect = c.last_view;
+        let g = c.gizmo_geometry(rect).expect("the new shape is selected");
+        // The square across the Z axis spans X and Y.
+        let middle = (PLANE_NEAR + PLANE_FAR) * 0.5 * g.length;
+        let at = |a: f64, b: f64| view_projection(c, [0, 1, 2].map(|k| g.origin[k] + g.axes[0][k] * a + g.axes[1][k] * b));
+        let grab = at(middle, middle);
+        let to = at(middle + 0.5, middle + 0.5);
+        drag(&mut h, grab, to);
+        let moved = h.state().shapes()[0].position;
+        assert!(moved[0] > 0.1 && moved[1] > 0.1, "x and y both moved: {moved:?}");
+        assert!(moved[2].abs() < 1e-6, "z stays: {moved:?}");
+    }
+
+    #[test]
     fn dragging_empty_space_orbits_the_camera() {
         let mut h = harness();
         h.run();
-        click(&mut h, "Cube");
+        click(&mut h, "Add cube");
         let before = h.state().camera;
         let rect = h.state().last_view;
         let from = rect.min + egui::vec2(rect.width() * 0.2, rect.height() * 0.8);
@@ -2064,8 +2204,8 @@ mod ui_tests {
     fn clicking_a_shape_in_the_viewport_selects_it() {
         let mut h = harness();
         h.run();
-        click(&mut h, "Sphere");
-        click(&mut h, "Cube");
+        click(&mut h, "Add sphere");
+        click(&mut h, "Add cube");
         h.run();
         // Frame the view on the shapes, then click the middle of it.
         h.state_mut().selection = None;
@@ -2085,7 +2225,7 @@ mod ui_tests {
     fn snapping_rounds_a_dragged_position_to_the_grid() {
         let mut h = harness();
         h.run();
-        click(&mut h, "Cube");
+        click(&mut h, "Add cube");
         h.state_mut().snap = true;
         h.run();
         let c = h.state();
@@ -2103,7 +2243,7 @@ mod ui_tests {
     fn the_middle_box_of_the_scale_gizmo_scales_every_axis() {
         let mut h = harness();
         h.run();
-        click(&mut h, "Cube");
+        click(&mut h, "Add cube");
         h.state_mut().tool = Tool::Scale;
         h.run();
         let c = h.state();
@@ -2132,7 +2272,7 @@ mod ui_tests {
     fn control_d_duplicates_the_selected_shape() {
         let mut h = harness();
         h.run();
-        click(&mut h, "Sphere");
+        click(&mut h, "Add sphere");
         h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::D);
         h.run();
         assert_eq!(h.state().shapes().len(), 2);
@@ -2142,8 +2282,8 @@ mod ui_tests {
     fn the_visibility_checkbox_hides_a_shape_and_c_frames_the_selection() {
         let mut h = harness();
         h.run();
-        click(&mut h, "Cube");
-        click(&mut h, "Sphere");
+        click(&mut h, "Add cube");
+        click(&mut h, "Add sphere");
         assert!(!h.state().shapes()[0].hidden);
         click(&mut h, "Visible: Cube");
         assert!(h.state().shapes()[0].hidden, "the cube is hidden");
