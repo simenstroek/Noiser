@@ -495,8 +495,8 @@ impl App {
                 });
                 if s.format != Format::Exr32 && s.output == Output::Density {
                     row(ui, &mut s.levels, d.levels, |ui, v| {
-                        ui.selectable_value(v, Levels::GraphRange, "Graph range").on_hover_text("0â€“1 covers the graph's guaranteed range; the same for every export");
-                        ui.selectable_value(v, Levels::DataMinMax, "Data min/max").on_hover_text("0â€“1 covers this export's own values");
+                        ui.selectable_value(v, Levels::GraphRange, "Graph range").on_hover_text("0–1 covers the graph's guaranteed range; the same for every export");
+                        ui.selectable_value(v, Levels::DataMinMax, "Data min/max").on_hover_text("0–1 covers this export's own values");
                     });
                 }
             }
@@ -516,13 +516,13 @@ impl App {
                 ui.weak("EXR keeps raw signed values.");
             }
             let (file, _) = s.estimate();
-            let dims = s.image_size().map_or(format!("{0}Ã—{0}Ã—{0} voxels", s.res), |(w, h)| format!("{w}Ã—{h} px"));
+            let dims = s.image_size().map_or(format!("{0}×{0}×{0} voxels", s.res), |(w, h)| format!("{w}×{h} px"));
             ui.label(format!("{dims}, about {:.1} MB", file as f64 / (1 << 20) as f64));
             for w in s.warnings() {
-                ui.colored_label(editor::ORANGE, format!("âš  {w}"));
+                ui.colored_label(editor::ORANGE, format!("⚠ {w}"));
             }
             if let Some(why) = self.graph.tiling_problem_upstream() {
-                ui.colored_label(editor::ORANGE, format!("âš  The result does not tile: {why}"));
+                ui.colored_label(editor::ORANGE, format!("⚠ The result does not tile: {why}"));
             }
             ui.separator();
             match &self.export_job {
@@ -530,7 +530,7 @@ impl App {
                     let p = job.progress.load(std::sync::atomic::Ordering::Relaxed) as f32 / 1000.0;
                     ui.add(egui::ProgressBar::new(p).show_percentage());
                 }
-                None => start = ui.button("Exportâ€¦").clicked(),
+                None => start = ui.button("Export…").clicked(),
             }
         });
         self.export_open = open;
@@ -626,7 +626,7 @@ impl App {
         let up = cross(right, fwd);
         let pv = &self.pv;
         let aspect = |r: egui::Rect| r.width() / r.height().max(1.0);
-        // How far the surface can move: amount Ã— density range. Kept finite for the shader;
+        // How far the surface can move: amount × density range. Kept finite for the shader;
         // 1e6 effectively disables the shell skip for unbounded graphs.
         // The displacement mask only applies to a mesh.
         let mesh_on = pv.prim == meshapp::MESH_PRIM && self.mesh.is_some();
@@ -1012,7 +1012,7 @@ impl eframe::App for App {
                         Ok(v) => _ = ui.weak(v.to_string()),
                         Err(why) => _ = ui.colored_label(editor::ORANGE, why),
                     }
-                    if ui.small_button("Ã—").on_hover_text("Remove").clicked() {
+                    if ui.small_button("×").on_hover_text("Remove").clicked() {
                         remove = Some(i);
                     }
                 });
@@ -1030,11 +1030,11 @@ impl eframe::App for App {
             ui.label("A node editor for tiling 3D noise: build a graph of noises, patterns and math, watch it in 3D and as a slice, export it as textures, a volume, a math function, or use it to displace meshes.");
             ui.separator();
             ui.label("Getting started");
-            ui.label("â€¢ Right-click the graph to add nodes (type to search); drag from a pin to connect, or drop a wire on empty space.");
-            ui.label("â€¢ The eye on a node previews it; the cache button bakes everything upstream of it for speed.");
-            ui.label("â€¢ Orange outline: the node breaks tiling (the details panel says why).");
-            ui.label("â€¢ File > Import mesh shapes a low-poly OBJ, PLY or STL with the graph; Export displaced mesh writes the high-resolution result.");
-            ui.label("â€¢ Help > Keyboard shortcuts lists the keys. Source and releases: github.com/simenstroek/Noiser");
+            ui.label("• Right-click the graph to add nodes (type to search); drag from a pin to connect, or drop a wire on empty space.");
+            ui.label("• The eye on a node previews it; the cache button bakes everything upstream of it for speed.");
+            ui.label("• Orange outline: the node breaks tiling (the details panel says why).");
+            ui.label("• File > Import mesh shapes a low-poly OBJ, PLY or STL with the graph; Export displaced mesh writes the high-resolution result.");
+            ui.label("• Help > Keyboard shortcuts lists the keys. Source and releases: github.com/simenstroek/Noiser");
         });
         egui::Window::new("Preferences").open(&mut self.prefs_open).collapsible(false).resizable(false).show(&ctx, |ui| {
             let r = ui.add(egui::Slider::new(&mut self.prefs.ui_scale, 0.75..=2.0).text("Interface scale"));
@@ -1094,7 +1094,7 @@ impl eframe::App for App {
                             }
                         }
                     });
-                    if ui.add(egui::Button::new("Openâ€¦").shortcut_text("Ctrl+O")).clicked() {
+                    if ui.add(egui::Button::new("Open…").shortcut_text("Ctrl+O")).clicked() {
                         self.open();
                     }
                     ui.add_enabled_ui(!self.recent.is_empty(), |ui| {
@@ -1115,28 +1115,28 @@ impl eframe::App for App {
                     if ui.add(egui::Button::new("Save").shortcut_text("Ctrl+S")).clicked() {
                         self.save(false);
                     }
-                    if ui.add(egui::Button::new("Save Asâ€¦").shortcut_text("Ctrl+Shift+S")).clicked() {
+                    if ui.add(egui::Button::new("Save As…").shortcut_text("Ctrl+Shift+S")).clicked() {
                         self.save(true);
                     }
                     ui.separator();
-                    if ui.button("Import mesh (OBJ)â€¦").clicked()
+                    if ui.button("Import mesh (OBJ)…").clicked()
                         && let Some(p) = rfd::FileDialog::new().add_filter("Mesh (OBJ, PLY, STL, glTF, FBX, SDF)", &["obj", "ply", "stl", "gltf", "glb", "fbx", "sdf"]).pick_file() {
                             self.start_mesh_load(p);
                         }
-                    if ui.add_enabled(self.mesh.is_some(), egui::Button::new("Export displaced meshâ€¦")).clicked() {
+                    if ui.add_enabled(self.mesh.is_some(), egui::Button::new("Export displaced mesh…")).clicked() {
                         self.mesh_export_open = true;
                     }
-                    if ui.button("Batch displace meshesâ€¦").clicked() {
+                    if ui.button("Batch displace meshes…").clicked() {
                         self.batch_open = true;
                     }
                     ui.separator();
-                    if ui.button("Exportâ€¦").clicked() {
+                    if ui.button("Export…").clicked() {
                         self.export_open = true;
                     }
-                    if ui.add_enabled(self.export_job.is_none(), egui::Button::new("Export Math Function (.noiser)â€¦")).clicked() {
+                    if ui.add_enabled(self.export_job.is_none(), egui::Button::new("Export Math Function (.noiser)…")).clicked() {
                         self.export_function();
                     }
-                    if ui.button("Export shader code (HLSL, GLSL, WGSL)â€¦").clicked() {
+                    if ui.button("Export shader code (HLSL, GLSL, WGSL)…").clicked() {
                         let name = self.path.as_ref().and_then(|p| p.file_stem()).map_or("noise".into(), |n| n.to_string_lossy().into_owned());
                         if let Some(path) = rfd::FileDialog::new().add_filter("HLSL", &["hlsl"]).add_filter("GLSL", &["glsl"]).add_filter("WGSL", &["wgsl"]).set_file_name(format!("{name}.hlsl")).save_file() {
                             self.status = match path.extension().and_then(|e| e.to_str()).and_then(shaderexport::Lang::from_extension) {
@@ -1161,11 +1161,11 @@ impl eframe::App for App {
                         editor::arrange(&mut self.graph);
                         self.editor.frame_next = true;
                     }
-                    if ui.button("Exposed parametersâ€¦").clicked() {
+                    if ui.button("Exposed parameters…").clicked() {
                         self.exposed_open = true;
                         ui.close();
                     }
-                    if ui.button("Preferencesâ€¦").clicked() {
+                    if ui.button("Preferences…").clicked() {
                         self.prefs_open = true;
                         ui.close();
                     }
@@ -1222,8 +1222,8 @@ impl eframe::App for App {
                         }
                         let (lo, hi) = self.graph.node_range(*id);
                         if has_output_kind {
-                            let show = |x: f32| if x.is_finite() { format!("{x:.3}") } else if x < 0.0 { "-âˆž".into() } else { "âˆž".into() };
-                            ui.weak(format!("Output stays within {} â€¦ {}", show(lo), show(hi)));
+                            let show = |x: f32| if x.is_finite() { format!("{x:.3}") } else if x < 0.0 { "-∞".into() } else { "∞".into() };
+                            ui.weak(format!("Output stays within {} … {}", show(lo), show(hi)));
                         }
                         cache_props(ui, &mut self.graph, *id, &tiling, self.caches.bytes());
                     }
@@ -1343,8 +1343,8 @@ impl eframe::App for App {
                         painter.add(egui_wgpu::Callback::new_paint_callback(rslice, cbs));
                     }
                     let busy = match (self.compiling.is_some(), self.caches.pending) {
-                        (true, _) => Some("Compiling shaderâ€¦"),
-                        (false, true) => Some("Baking cacheâ€¦"),
+                        (true, _) => Some("Compiling shader…"),
+                        (false, true) => Some("Baking cache…"),
                         _ => None,
                     };
                     if let Some(msg) = busy {
@@ -1384,8 +1384,8 @@ value {v:.4} at ({tx:.3}, {ty:.3})");
                     // GPU times come back a few frames late; CPU time is this frame's UI + graph work.
                     let gpu_ms = self.rs.renderer.read().callback_resources.get::<view::Gpu>().and_then(|g| g.timer.as_ref().map(|t| t.ms));
                     let timing = match gpu_ms {
-                        Some([a, b]) => format!("GPU 3D {a:.2} ms Â· slice {b:.2} ms Â· CPU {:.2} ms\n{}Ã—{} px", cpu_start.elapsed().as_secs_f32() * 1e3, px.x, px.y),
-                        None => format!("GPU timing unavailable Â· CPU {:.2} ms", cpu_start.elapsed().as_secs_f32() * 1e3),
+                        Some([a, b]) => format!("GPU 3D {a:.2} ms · slice {b:.2} ms · CPU {:.2} ms\n{}×{} px", cpu_start.elapsed().as_secs_f32() * 1e3, px.x, px.y),
+                        None => format!("GPU timing unavailable · CPU {:.2} ms", cpu_start.elapsed().as_secs_f32() * 1e3),
                     };
                     painter.text(r3d.left_top() + egui::vec2(8.0, 6.0), egui::Align2::LEFT_TOP, timing, font, grey);
                 }
