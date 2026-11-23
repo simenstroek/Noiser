@@ -12,6 +12,9 @@ struct U {
     params: vec4f,
     // operation count, shape count, test point count, 0
     counts: vec4u,
+    // the box around the drawn shapes: rays that miss it are not marched
+    box_lo: vec4f,
+    box_hi: vec4f,
 }
 
 @group(0) @binding(0) var<uniform> u: U;
@@ -317,8 +320,15 @@ fn fs(in: VsOut) -> @location(0) vec4f {
     let hs = u.params.y;
     let direction = normalize(u.forward.xyz + u.right.xyz * (ndc.x * hs * u.params.x) + u.up.xyz * (ndc.y * hs));
     let origin = u.eye.xyz;
-    let far = u.params.z;
-    var t = 0.0;
+    let background = 0.20 + 0.10 * (1.0 - in.uv.y);
+    let inverse = 1.0 / select(direction, vec3f(1e-9), abs(direction) < vec3f(1e-9));
+    let t0 = (u.box_lo.xyz - origin) * inverse;
+    let t1 = (u.box_hi.xyz - origin) * inverse;
+    let near_t = max(max(min(t0.x, t1.x), min(t0.y, t1.y)), max(min(t0.z, t1.z), 0.0));
+    let far_t = min(min(max(t0.x, t1.x), max(t0.y, t1.y)), max(t0.z, t1.z));
+    if (near_t > far_t) { return vec4f(vec3f(background), 1.0); }
+    let far = min(u.params.z, far_t);
+    var t = near_t;
     var hit = false;
     for (var i = 0; i < 260; i++) {
         let d = map(origin + direction * t);
@@ -330,8 +340,7 @@ fn fs(in: VsOut) -> @location(0) vec4f {
         if (t > far) { break; }
     }
     if (!hit) {
-        let shade = 0.20 + 0.10 * (1.0 - in.uv.y);
-        return vec4f(vec3f(shade), 1.0);
+        return vec4f(vec3f(background), 1.0);
     }
     let p = origin + direction * t;
     let n = normal_at(p, t);

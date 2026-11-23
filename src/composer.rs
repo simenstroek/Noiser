@@ -856,12 +856,24 @@ impl Composer {
                 let is_group = node.kind == "group";
                 let supported = matches!(node.kind.as_str(), "shape" | "group");
                 let brush = node.text("brush").unwrap_or("");
-                let label = if !node.name.is_empty() {
-                    node.name.clone()
+                let brush_name = BRUSHES.iter().find(|(id, _)| *id == brush).map(|(_, name)| name.to_string());
+                let label = if !supported {
+                    let mut kind = node.kind.replace('_', " ");
+                    if let Some(first) = kind.get_mut(0..1) {
+                        first.make_ascii_uppercase();
+                    }
+                    kind
                 } else if is_group {
-                    "Group".to_string()
+                    if node.name.is_empty() { "Group".to_string() } else { node.name.clone() }
                 } else {
-                    BRUSHES.iter().find(|(id, _)| *id == brush).map_or(node.kind.clone(), |(_, name)| name.to_string())
+                    // A shape is named by what it is; a name given to it follows, greyed in the row's tooltip.
+                    match (&brush_name, node.name.as_str()) {
+                        (Some(brush), "" | "Stroke") => brush.clone(),
+                        (Some(brush), name) if name == brush => brush.clone(),
+                        (Some(brush), name) => format!("{brush}  \"{name}\""),
+                        (None, "") => node.kind.clone(),
+                        (None, name) => name.to_string(),
+                    }
                 };
                 out.push(Row { path: path.clone(), depth: path.len() - 1, label, mode: node.text("mode").unwrap_or("add").to_string(), hidden: node.hidden, is_group, supported });
                 if is_group && !collapsed.contains(path.as_slice()) {

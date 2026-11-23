@@ -22,6 +22,8 @@ pub struct Uniforms {
     light: [f32; 4],
     params: [f32; 4],
     counts: [u32; 4],
+    box_lo: [f32; 4],
+    box_hi: [f32; 4],
 }
 
 impl Uniforms {
@@ -38,7 +40,17 @@ impl Uniforms {
             let length = (l[0] * l[0] + l[1] * l[1] + l[2] * l[2]).sqrt().max(1e-9);
             [l[0] / length, l[1] / length, l[2] / length]
         };
+        // The scene's box, grown a little: smooth blends reach past the shapes' own extents. No box: nothing is drawn.
+        let (box_lo, box_hi) = match scene.bounds {
+            Some((lo, hi)) => {
+                let grow = [0, 1, 2].map(|a| (hi[a] - lo[a]) * 0.08 + 0.05);
+                ([0, 1, 2].map(|a| (lo[a] - grow[a]) as f32), [0, 1, 2].map(|a| (hi[a] + grow[a]) as f32))
+            }
+            None => ([1.0; 3], [-1.0; 3]),
+        };
         Uniforms {
+            box_lo: [box_lo[0], box_lo[1], box_lo[2], 0.0],
+            box_hi: [box_hi[0], box_hi[1], box_hi[2], 0.0],
             eye: f(eye),
             forward: f(forward),
             right: f(right),
