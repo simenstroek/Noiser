@@ -1132,8 +1132,9 @@ impl Composer {
     }
 
     fn hierarchy(&mut self, ui: &mut egui::Ui) {
+        let with_splines: Vec<bool> = self.fields().iter().map(|f| f.has_unsupported).collect();
         ui.horizontal(|ui| {
-            let names: Vec<String> = self.file.layers.iter().map(|l| l.name.clone()).collect();
+            let names: Vec<String> = self.file.layers.iter().enumerate().map(|(i, l)| if with_splines.get(i).copied().unwrap_or(false) { format!("{} (splines left out)", l.name) } else { l.name.clone() }).collect();
             let heading = ui.label("Layer");
             egui::ComboBox::from_id_salt("composer layer").selected_text(names.get(self.layer).cloned().unwrap_or_default()).show_ui(ui, |ui| {
                 for (i, name) in names.iter().enumerate() {
@@ -1163,6 +1164,9 @@ impl Composer {
                 self.delete_layer();
             }
         });
+        if with_splines.get(self.layer).copied().unwrap_or(false) {
+            ui.colored_label(crate::editor::ORANGE, "This layer uses splines, which are not supported yet. They are left out, so anything built on them (emboss, deboss, push, avoid, shell) can look wrong.");
+        }
         let mut renamed = false;
         if let Some(layer) = self.file.layers.get_mut(self.layer) {
             ui.horizontal(|ui| {
@@ -2391,5 +2395,17 @@ mod ui_tests {
         crate::library::set_root(None);
         assert_eq!(asked, vec![root.join("SDFs").join("ball.sdf")]);
         assert!(root.join("SDFs").join("ball.sdf").is_file());
+    }
+
+    #[test]
+    fn a_layer_with_splines_says_so() {
+        let mut h = harness();
+        h.run();
+        let mut spline = new_shape("sphere");
+        spline.kind = "spline".into();
+        h.state_mut().add_node(spline);
+        h.state_mut().add_node(new_shape("sphere"));
+        h.run();
+        h.get_by_label_contains("uses splines");
     }
 }
