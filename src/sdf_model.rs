@@ -92,6 +92,22 @@ pub enum Mode {
 }
 
 impl Mode {
+    /// The number the GPU interpreter switches on.
+    fn code(self) -> f32 {
+        match self {
+            Mode::Add => 0.0,
+            Mode::Sub => 1.0,
+            Mode::Intersect => 2.0,
+            Mode::Paint => 3.0,
+            Mode::Push => 4.0,
+            Mode::Avoid => 5.0,
+            Mode::Emboss => 6.0,
+            Mode::Deboss => 7.0,
+            Mode::Shell => 8.0,
+            Mode::None => 9.0,
+        }
+    }
+
     fn parse(text: Option<&str>) -> Mode {
         match text {
             Some("sub") => Mode::Sub,
@@ -305,6 +321,30 @@ impl Brush {
         })
     }
 
+    /// `(kind, half size, parameters)` as the GPU interpreter reads them. A solid cube's wall is a smaller number than
+    /// the CPU's, which keeps single precision accurate.
+    fn gpu(&self) -> (f32, V3, [f32; 4]) {
+        match self {
+            Brush::Sphere { radii } => (0.0, *radii, [0.0; 4]),
+            Brush::Cube { half, wall, vertical_radius, edge_radius, taper } => {
+                let wall = if *wall >= 1e2 { 4.0 * half[0].max(half[1]).max(half[2]).max(1.0) } else { *wall };
+                (1.0, *half, [wall as f32, *vertical_radius as f32, *edge_radius as f32, *taper as f32])
+            }
+            Brush::Cylinder { half, rounding } => (2.0, *half, [*rounding as f32, 0.0, 0.0, 0.0]),
+            Brush::Prism { half, rounding, inset } => (3.0, *half, [*rounding as f32, *inset as f32, 0.0, 0.0]),
+            Brush::Polygon { half, rounding, inset, points, star } => (4.0, *half, [*rounding as f32, *inset as f32, *points as f32, *star as f32]),
+        }
+    }
+
+    /// How far the shape reaches from its centre.
+    fn extent(&self) -> f64 {
+        let half = match self {
+            Brush::Sphere { radii } => *radii,
+            Brush::Cube { half, .. } | Brush::Cylinder { half, .. } | Brush::Prism { half, .. } | Brush::Polygon { half, .. } => *half,
+        };
+        (half[0] * half[0] + half[1] * half[1] + half[2] * half[2]).sqrt()
+    }
+
     fn distance(&self, p: V3) -> f64 {
         match self {
             Brush::Sphere { radii } => {
@@ -358,6 +398,24 @@ impl Repeat {
                 }
                 Repeat::Linear { steps: node.numbers::<3>("steps").unwrap_or([1.5; 3]), counts }
             }
+        }
+    }
+
+    /// `(kind, a, b)` for the GPU interpreter: linear steps and counts, or radius, count and axis.
+    fn gpu(&self) -> (f32, [f32; 3], [f32; 3]) {
+        match self {
+            Repeat::None => (0.0, [0.0; 3], [0.0; 3]),
+            Repeat::Linear { steps, counts } => (1.0, steps.map(|v| v as f32), counts.map(|v| v as f32)),
+            Repeat::Radial { radius, count, axis } => (2.0, [*radius as f32, *count as f32, *axis as f32], [0.0; 3]),
+        }
+    }
+
+    /// How far the copies spread from the shape's own place.
+    fn spread(&self) -> f64 {
+        match self {
+            Repeat::None => 0.0,
+            Repeat::Linear { steps, counts } => (0..3).map(|i| ((counts[i] - 1.0) * steps[i]).abs()).fold(0.0, f64::max),
+            Repeat::Radial { radius, .. } => radius.abs(),
         }
     }
 
@@ -645,6 +703,207 @@ impl LayerField {
 /// Every layer of a file as a distance field.
 pub fn layer_fields(file: &SdfFile) -> Vec<LayerField> {
     file.layers.iter().filter_map(|layer| LayerField::new(file, layer)).collect()
+}
+
+
+// ---- the GPU interpreter's input -------------------------------------------------------------------------------
+
+/// Vec4s per shape in `GpuScene::shapes`.
+pub const GPU_SHAPE_STRIDE: usize = 12;
+
+/// A shape tree flattened for the GPU: one record per shape and a postfix list of operations. The interpreter in
+/// `composer_view.wgsl` reads exactly this layout.
+#[derive(Clone, Debug, Default)]
+pub struct GpuScene {
+    pub shapes: Vec<[f32; 4]>,
+    /// `[type, a, b, c]`: type 0 pushes shape `a`, 1 blends (mode a, width b, radius c), 2 blends with a chamfer,
+    /// 3 multiplies the top by `a`.
+    pub ops: Vec<[f32; 4]>,
+    /// The box around the added shapes (spheres around each shape), when there are any.
+    pub bounds: Option<(V3, V3)>,
+    pub shape_count: usize,
+}
+
+/// Group frames from the world down: `p_local = rows · p + offset`.
+#[derive(Clone, Copy)]
+struct Down {
+    m: M3,
+    c: V3,
+}
+
+/// Group frames from the inside out: `p_world = t + r · (s · p_local)`.
+#[derive(Clone, Copy)]
+struct Up {
+    t: V3,
+    r: M3,
+    s: f64,
+}
+
+fn apply_up(up: &Up, p: V3) -> V3 {
+    let q = [p[0] * up.s, p[1] * up.s, p[2] * up.s];
+    let r = [
+        up.r[0][0] * q[0] + up.r[0][1] * q[1] + up.r[0][2] * q[2],
+        up.r[1][0] * q[0] + up.r[1][1] * q[1] + up.r[1][2] * q[2],
+        up.r[2][0] * q[0] + up.r[2][1] * q[1] + up.r[2][2] * q[2],
+    ];
+    [up.t[0] + r[0], up.t[1] + r[1], up.t[2] + r[2]]
+}
+
+fn transpose(m: &M3) -> M3 {
+    [[m[0][0], m[1][0], m[2][0]], [m[0][1], m[1][1], m[2][1]], [m[0][2], m[1][2], m[2][2]]]
+}
+
+fn row_vec4(row: V3, offset: f64) -> [f32; 4] {
+    [row[0] as f32, row[1] as f32, row[2] as f32, offset as f32]
+}
+
+struct Flattener<'a> {
+    scene: GpuScene,
+    selected: Option<&'a [usize]>,
+    added: Vec<(V3, f64)>,
+    everything: Vec<(V3, f64)>,
+}
+
+impl Flattener<'_> {
+    fn emit(&mut self, items: &[Item], down: Down, up: Up, path: &mut Vec<usize>, inside_selected: bool) -> bool {
+        let mut emitted_any = false;
+        for (index, item) in items.iter().enumerate() {
+            path.push(index);
+            let selected_here = inside_selected || self.selected.is_some_and(|s| s == path.as_slice());
+            let before = self.scene.ops.len();
+            let placement = match item {
+                Item::Skipped => None,
+                Item::Shape(shape) => {
+                    self.emit_shape(shape, down, up, selected_here);
+                    Some(&shape.placement)
+                }
+                Item::Group(group) => {
+                    let inverse = transpose(&group.rotation);
+                    let mut m = [[0.0; 3]; 3];
+                    for (i, row) in m.iter_mut().enumerate() {
+                        for (j, cell) in row.iter_mut().enumerate() {
+                            *cell = inverse[i][j] / group.scale;
+                        }
+                    }
+                    // The child's point is `M_g · (parent point − group position)`, and the parent's point is itself
+                    // `down.m · world + down.c`.
+                    let mut combined = [[0.0; 3]; 3];
+                    for i in 0..3 {
+                        for j in 0..3 {
+                            combined[i][j] = (0..3).map(|k| m[i][k] * down.m[k][j]).sum();
+                        }
+                    }
+                    let offset_in_parent = [down.c[0] - group.position[0], down.c[1] - group.position[1], down.c[2] - group.position[2]];
+                    let c = [
+                        m[0][0] * offset_in_parent[0] + m[0][1] * offset_in_parent[1] + m[0][2] * offset_in_parent[2],
+                        m[1][0] * offset_in_parent[0] + m[1][1] * offset_in_parent[1] + m[1][2] * offset_in_parent[2],
+                        m[2][0] * offset_in_parent[0] + m[2][1] * offset_in_parent[1] + m[2][2] * offset_in_parent[2],
+                    ];
+                    let inner_down = Down { m: combined, c };
+                    let inner_up = Up { t: apply_up(&up, group.position), r: multiply(&up.r, &group.rotation), s: up.s * group.scale };
+                    let any = self.emit(&group.children, inner_down, inner_up, path, selected_here);
+                    if any && (group.scale.abs() - 1.0).abs() > 1e-9 {
+                        self.scene.ops.push([3.0, group.scale.abs() as f32, 0.0, 0.0]);
+                    }
+                    any.then_some(&group.placement)
+                }
+            };
+            if let Some(placement) = placement
+                && self.scene.ops.len() > before
+            {
+                if emitted_any {
+                    self.scene.ops.push([if placement.chamfer { 2.0 } else { 1.0 }, placement.mode.code(), placement.blend as f32, placement.strength as f32]);
+                }
+                emitted_any = true;
+            }
+            path.pop();
+        }
+        emitted_any
+    }
+
+    fn emit_shape(&mut self, shape: &Shape, down: Down, up: Up, selected: bool) {
+        let index = self.scene.shape_count;
+        self.scene.shape_count += 1;
+        let (kind, half, b) = shape.brush.gpu();
+        let (repeat, a_rep, b_rep) = shape.repeat.gpu();
+        let rt = transpose(&shape.rotation);
+        let offset = [
+            -(rt[0][0] * shape.position[0] + rt[0][1] * shape.position[1] + rt[0][2] * shape.position[2]),
+            -(rt[1][0] * shape.position[0] + rt[1][1] * shape.position[1] + rt[1][2] * shape.position[2]),
+            -(rt[2][0] * shape.position[0] + rt[2][1] * shape.position[1] + rt[2][2] * shape.position[2]),
+        ];
+        let mirror_bits = (shape.mirror[0] as u32) | ((shape.mirror[1] as u32) << 1) | ((shape.mirror[2] as u32) << 2);
+        let records = [
+            row_vec4(down.m[0], down.c[0]),
+            row_vec4(down.m[1], down.c[1]),
+            row_vec4(down.m[2], down.c[2]),
+            row_vec4(rt[0], offset[0]),
+            row_vec4(rt[1], offset[1]),
+            row_vec4(rt[2], offset[2]),
+            [kind, mirror_bits as f32, shape.mirror_blend as f32, repeat],
+            [half[0] as f32, half[1] as f32, half[2] as f32, 0.0],
+            b,
+            [a_rep[0], a_rep[1], a_rep[2], 0.0],
+            [b_rep[0], b_rep[1], b_rep[2], 0.0],
+            [if selected { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0],
+        ];
+        self.scene.shapes.extend(records);
+        self.scene.ops.push([0.0, index as f32, 0.0, 0.0]);
+
+        // Bounds: a sphere around the shape (and its mirror image, and its copies).
+        let reach = (shape.brush.extent() + shape.repeat.spread()) * up.s.abs() * 1.05;
+        // Mirroring happens in the group's own frame.
+        let mut locals = vec![shape.position];
+        for axis in 0..3 {
+            if shape.mirror[axis] {
+                let flipped: Vec<V3> = locals
+                    .iter()
+                    .map(|l| {
+                        let mut m = *l;
+                        m[axis] = -m[axis];
+                        m
+                    })
+                    .collect();
+                locals.extend(flipped);
+            }
+        }
+        for local in locals {
+            let center = apply_up(&up, local);
+            self.everything.push((center, reach));
+            if shape.placement.mode == Mode::Add {
+                self.added.push((center, reach));
+            }
+        }
+    }
+}
+
+fn down_apply(down: &Down, p: V3) -> V3 {
+    [
+        down.m[0][0] * p[0] + down.m[0][1] * p[1] + down.m[0][2] * p[2] + down.c[0],
+        down.m[1][0] * p[0] + down.m[1][1] * p[1] + down.m[1][2] * p[2] + down.c[1],
+        down.m[2][0] * p[0] + down.m[2][1] * p[1] + down.m[2][2] * p[2] + down.c[2],
+    ]
+}
+
+impl LayerField {
+    /// The tree flattened for the GPU, with the shapes under `selected` marked. The layer's own placement is not
+    /// applied: the scene is in the assembly's frame.
+    pub fn gpu_scene(&self, selected: Option<&[usize]>) -> GpuScene {
+        let identity = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+        let mut flattener = Flattener { scene: GpuScene::default(), selected, added: Vec::new(), everything: Vec::new() };
+        flattener.emit(&self.items, Down { m: identity, c: [0.0; 3] }, Up { t: [0.0; 3], r: identity, s: 1.0 }, &mut Vec::new(), false);
+        let spheres = if flattener.added.is_empty() { &flattener.everything } else { &flattener.added };
+        let mut bounds: Option<(V3, V3)> = None;
+        for (center, radius) in spheres {
+            let (lo, hi) = bounds.get_or_insert(([f64::MAX; 3], [f64::MIN; 3]));
+            for axis in 0..3 {
+                lo[axis] = lo[axis].min(center[axis] - radius);
+                hi[axis] = hi[axis].max(center[axis] + radius);
+            }
+        }
+        flattener.scene.bounds = bounds;
+        flattener.scene
+    }
 }
 
 #[cfg(test)]

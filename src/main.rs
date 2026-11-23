@@ -31,6 +31,7 @@ mod surface;
 mod noiser_file;
 mod props;
 mod composer;
+mod composer_gpu;
 mod composer_render;
 mod sdf_file;
 mod sdf_model;
@@ -1160,7 +1161,7 @@ impl eframe::App for App {
                 return;
             }
             meshworkspace::Workspace::Composer => {
-                self.composer.show(ui);
+                self.composer.show(ui, self.rs.target_format);
                 return;
             }
             meshworkspace::Workspace::Noise => {}

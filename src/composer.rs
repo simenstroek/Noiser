@@ -1,10 +1,11 @@
 //! The SDF Composer tab: build a shape from SDF primitives the way SDF Modeler does, and save it as a `.sdf` file that
 //! the Noise graph and the Mesh graph can load. The document is an `SdfFile`, so what Noiser does not edit is kept.
 
-use crate::composer_render::{Camera, Renderer, pick};
+use crate::composer_gpu::{Uniforms, ViewCallback};
+use crate::composer_render::{Camera, pick};
 use crate::sdf_file::{Assembly, Layer, Node, SdfFile};
-use crate::sdf_model::{LayerField, M3, V3, euler_matrix, into_frame};
-use eframe::egui;
+use crate::sdf_model::{GpuScene, LayerField, M3, V3, euler_matrix, into_frame};
+use eframe::{egui, egui_wgpu, wgpu};
 use serde_json::{Map, Value};
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -26,7 +27,6 @@ const RED: egui::Color32 = egui::Color32::from_rgb(230, 80, 80);
 const GREEN: egui::Color32 = egui::Color32::from_rgb(90, 200, 100);
 const BLUE: egui::Color32 = egui::Color32::from_rgb(90, 140, 245);
 const MAX_UNDO: usize = 200;
-const MAX_VIEW_SIDE: f32 = 900.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Tool {
@@ -268,12 +268,9 @@ pub struct Composer {
     camera: Camera,
     tool: Tool,
     space: Space,
-    renderer: Option<Renderer>,
     field: Option<Arc<LayerField>>,
-    texture: Option<egui::TextureHandle>,
-    submitted: Option<(u64, Camera, [usize; 2], Option<Vec<usize>>)>,
-    submitted_generation: u64,
-    rendering: bool,
+    scene_cache: Option<((u64, Option<Vec<usize>>), Arc<GpuScene>)>,
+    scene_serial: u64,
     frame_pending: bool,
     drag: Option<Drag>,
     pub status: String,
@@ -297,12 +294,9 @@ impl Default for Composer {
             camera: Camera::default(),
             tool: Tool::Move,
             space: Space::Local,
-            renderer: None,
             field: None,
-            texture: None,
-            submitted: None,
-            submitted_generation: 0,
-            rendering: false,
+            scene_cache: None,
+            scene_serial: 0,
             frame_pending: true,
             drag: None,
             status: String::new(),
@@ -620,6 +614,21 @@ impl Composer {
             self.field = Some(Arc::new(built));
         }
         self.field.clone().unwrap()
+    }
+
+    /// The shape tree flattened for the GPU, rebuilt when the document or the selection changed.
+    fn scene(&mut self) -> Arc<GpuScene> {
+        let key = (self.version, self.selection.clone());
+        if let Some((cached, scene)) = &self.scene_cache
+            && *cached == key
+        {
+            return scene.clone();
+        }
+        let field = self.field();
+        let scene = Arc::new(field.gpu_scene(self.selection.as_deref()));
+        self.scene_serial += 1;
+        self.scene_cache = Some((key, scene.clone()));
+        scene
     }
 
     fn parent_frame(&self, path: &[usize]) -> Xf {
@@ -1002,31 +1011,17 @@ impl Composer {
 
     // ---- viewport ----
 
-    fn viewport(&mut self, ui: &mut egui::Ui) {
+    fn viewport(&mut self, ui: &mut egui::Ui, format: wgpu::TextureFormat) {
         let rect = ui.available_rect_before_wrap();
         let response = ui.interact(rect, ui.scope_id().with("composer view"), egui::Sense::click_and_drag());
         let ctx = ui.ctx().clone();
         let size = rect.size();
-        if self.renderer.is_none() {
-            self.renderer = Some(Renderer::new(ctx.clone()));
-        }
-
-        // Pictures from the worker.
-        let frames = self.renderer.as_ref().map(|r| r.poll()).unwrap_or_default();
-        for frame in frames {
-            if frame.generation != self.submitted_generation {
-                continue;
-            }
-            self.texture = Some(ctx.load_texture("composer view", frame.image, egui::TextureOptions::LINEAR));
-            if frame.finest {
-                self.rendering = false;
-                if self.frame_pending
-                    && let Some((lo, hi)) = frame.bounds
-                {
-                    self.camera = self.camera.framing(lo, hi);
-                    self.frame_pending = false;
-                }
-            }
+        let scene = self.scene();
+        if self.frame_pending
+            && let Some((lo, hi)) = scene.bounds
+        {
+            self.camera = self.camera.framing(lo, hi);
+            self.frame_pending = false;
         }
 
         // The gizmo under the pointer, or a drag in progress.
@@ -1080,7 +1075,6 @@ impl Composer {
         }
         if response.double_clicked() {
             self.frame_pending = true;
-            self.submitted = None;
         }
         if response.clicked_by(egui::PointerButton::Primary)
             && hovered_axis.is_none()
@@ -1092,40 +1086,27 @@ impl Composer {
             self.selection = pick(&field, &self.camera, ndc, size.x as f64 / size.y as f64);
         }
 
-        // Ask for a picture when anything it depends on changed.
-        let scale = (MAX_VIEW_SIDE / size.x.max(size.y)).min(1.0) * ctx.pixels_per_point().min(1.0);
-        let target = [((size.x * scale) as usize).max(16), ((size.y * scale) as usize).max(16)];
-        let key = (self.version, self.camera, target, self.selection.clone());
-        if self.submitted.as_ref() != Some(&key) {
-            let field = self.field();
-            if let Some(renderer) = &mut self.renderer {
-                self.submitted_generation = renderer.submit(field, self.camera, target, self.selection.clone());
-                self.rendering = true;
-            }
-            self.submitted = Some(key);
-        }
-
-        // Draw.
+        // Draw: the GPU interprets the flattened tree straight into this rectangle.
         let painter = ui.painter_at(rect);
         painter.rect_filled(rect, 0.0, egui::Color32::from_gray(30));
-        if let Some(texture) = &self.texture {
-            painter.image(texture.id(), rect, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), egui::Color32::WHITE);
+        let fits = scene.shape_count <= crate::composer_gpu::MAX_SHAPES && scene.ops.len() <= crate::composer_gpu::MAX_OPS;
+        if fits {
+            let uniforms = Uniforms::new(&self.camera, size.x / size.y.max(1.0), &scene, self.selection.is_some());
+            painter.add(egui_wgpu::Callback::new_paint_callback(rect, ViewCallback { uniforms, scene: scene.clone(), version: self.scene_serial, format }));
+        } else {
+            painter.text(rect.center(), egui::Align2::CENTER_CENTER, "This composition is larger than the viewport can draw", egui::FontId::proportional(15.0), egui::Color32::from_rgb(230, 150, 90));
         }
         if self.shapes().is_empty() {
             painter.text(rect.center(), egui::Align2::CENTER_CENTER, "Add a shape from the hierarchy panel", egui::FontId::proportional(15.0), egui::Color32::from_gray(150));
-        }
-        if self.rendering {
-            painter.text(rect.right_top() + egui::vec2(-10.0, 10.0), egui::Align2::RIGHT_TOP, "rendering…", egui::FontId::proportional(12.0), egui::Color32::from_gray(160));
         }
         let active = self.drag.as_ref().map(|d| d.axis);
         if let Some(g) = geometry {
             self.draw_gizmo(&painter, rect, &g, hovered_axis.or(active));
         }
-        if let Some(axis) = hovered_axis {
-            let _ = axis;
+        if hovered_axis.is_some() {
             ctx.set_cursor_icon(egui::CursorIcon::Grab);
         }
-        if self.rendering || self.drag.is_some() {
+        if self.drag.is_some() {
             ctx.request_repaint();
         }
     }
@@ -1248,7 +1229,7 @@ impl Composer {
 
     // ---- the whole tab ----
 
-    pub fn show(&mut self, ui: &mut egui::Ui) {
+    pub fn show(&mut self, ui: &mut egui::Ui, format: wgpu::TextureFormat) {
         let ctx = ui.ctx().clone();
         if !ctx.egui_wants_keyboard_input() {
             ctx.input(|i| {
@@ -1277,7 +1258,6 @@ impl Composer {
             }
             if frame {
                 self.frame_pending = true;
-                self.submitted = None;
             }
         }
         let (save, open) = ctx.input(|i| (i.modifiers.command && i.key_pressed(egui::Key::S), i.modifiers.command && i.key_pressed(egui::Key::O)));
@@ -1325,7 +1305,6 @@ impl Composer {
                 ui.separator();
                 if ui.button("Frame").on_hover_text("Fit the view to the shape (F)").clicked() {
                     self.frame_pending = true;
-                    self.submitted = None;
                 }
                 let title = self.path.as_ref().and_then(|p| p.file_name()).map_or("untitled".to_string(), |n| n.to_string_lossy().into_owned());
                 ui.weak(format!("{title}{}", if self.modified { " *" } else { "" }));
@@ -1338,7 +1317,7 @@ impl Composer {
         egui::Panel::right("composer inspector").default_size(300.0).show(ui, |ui| {
             egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| self.inspector(ui));
         });
-        egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| self.viewport(ui));
+        egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| self.viewport(ui, format));
         let pointer_down = ctx.input(|i| i.pointer.any_down());
         self.commit_if_settled(pointer_down);
     }

@@ -10,8 +10,8 @@ use eframe::wgpu;
 static GPU_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 pub(crate) struct Gpu {
-    device: wgpu::Device,
-    queue: wgpu::Queue,
+    pub(crate) device: wgpu::Device,
+    pub(crate) queue: wgpu::Queue,
     /// Held until the test drops the device, so the next GPU test starts afterwards.
     _serial: std::sync::MutexGuard<'static, ()>,
 }
