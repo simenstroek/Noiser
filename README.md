@@ -147,7 +147,7 @@ quarter) and a march step limit; none of them affect exports.
 |---|---|
 | Node graph | Middle-drag pans, scroll zooms, left-drag on empty space box-selects, right-click adds a node |
 | | Drag from a pin to connect; drag a connected input away to disconnect; drop a wire on empty space to pick a node for it |
-| | Delete removes the selection, Ctrl+D duplicates it at the cursor, Ctrl+C / Ctrl+V copy and paste, M mutes, F / Home frame, Ctrl+A selects all; drop a lone node on a wire to splice it in; Ctrl+S / Ctrl+O save and open |
+| | Delete or X removes the selection, Ctrl+D duplicates it at the cursor, Ctrl+C / Ctrl+V copy and paste, M mutes, F / Home frame, Ctrl+A selects all; drop a lone node on a wire to splice it in; Ctrl+S / Ctrl+O save and open (all remappable in Preferences > Keybinds) |
 | 3D view | Drag orbits, scroll zooms |
 | Slice view | Scroll moves the slice; hovering shows the value under the pointer |
 | SDF Composer | Drag orbits, Shift-drag or right-drag pans, scroll zooms; W / E / R pick the move, rotate and scale gizmo (the squares on the move gizmo move along two axes); Alt-drag a handle to drag a copy; F frames everything, C the selection, 1 / 3 / 7 look from the front, right and top; Ctrl+D duplicates, Ctrl+G groups |
