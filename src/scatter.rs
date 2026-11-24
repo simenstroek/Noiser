@@ -25,6 +25,9 @@ pub struct ScatterParams {
     pub jitter: f32,
     /// Turn every copy a random angle about the vertical.
     pub yaw: bool,
+    /// Turn every copy so the shape's back (its +Z in the Composer) faces uphill: a cave's chamber goes into the hillside and
+    /// its mouth opens downhill. Replaces the random turn where the ground has a slope.
+    pub face_uphill: bool,
     /// Where the ground may be: slope as rise over run, and height as a fraction of the terrain's height range.
     pub slope: [f32; 2],
     pub elevation: [f32; 2],
@@ -40,12 +43,12 @@ pub struct ScatterParams {
 
 impl Default for ScatterParams {
     fn default() -> Self {
-        ScatterParams { file: String::new(), seed: 1, cell: 4000.0, density: 0.5, size: [1500.0, 2500.0], jitter: 0.8, yaw: true, slope: [0.0, 0.6], elevation: [0.0, 1.0], sink: 0.05, blend: 100.0, subtract: false, roughen: 1.0 }
+        ScatterParams { file: String::new(), seed: 1, cell: 4000.0, density: 0.5, size: [1500.0, 2500.0], jitter: 0.8, yaw: true, face_uphill: false, slope: [0.0, 0.6], elevation: [0.0, 1.0], sink: 0.05, blend: 100.0, subtract: false, roughen: 1.0 }
     }
 }
 
 /// How many shader parameters the node uses (see `shader_params`).
-pub const SLOTS: usize = 21;
+pub const SLOTS: usize = 22;
 
 impl ScatterParams {
     /// The shader's numbers: seed, cell, density, size low and high, jitter, slope low and high, elevation low and high,
@@ -87,6 +90,7 @@ impl ScatterParams {
             // The nine cells around a sample. The loop's length is read from here, not written as 9, so the shader compiler
             // cannot unroll it (nine copies of the shape interpreter per node take minutes to compile).
             9.0,
+            if self.face_uphill { 1.0 } else { 0.0 },
         ]
     }
 
@@ -133,12 +137,16 @@ fn scatter{id}(p: vec3f, base: f32, displace: f32) -> f32 {{
             low = min(low, land_ground_{land}(ctr + vec2f(0.0, rad)).x);
             low = min(low, land_ground_{land}(ctr - vec2f(0.0, rad)).x);
             let sc = size * {inv};
-            let centre = vec3f(ctr, low + {half} * sc - {sink} * size);
+            // Standing shapes rest on the lowest ground under them; cut-outs (caves) start at the ground in the middle, so the mouth
+            // opens where the slope falls away in front of them.
+            let floor = select(low, g.x, {subtract} > 0.5);
+            let centre = vec3f(ctr, floor + {half} * sc - {sink} * size);
             let rel = p - centre;
             let reach = size * 0.9;
             let dist = length(rel);
             if (dist > reach + {blend}) {{ near = min(near, dist - reach); continue; }}
-            let yaw = r2.y * 6.2831853 * {yaw};
+            let uphill = normalize(g.yz + vec2f(1.0e-9));
+            let yaw = select(r2.y * 6.2831853 * {yaw}, atan2(uphill.x, -uphill.y), {face} > 0.5 && slope > 0.02);
             let cy = cos(yaw);
             let sy = sin(yaw);
             let turned = centre + vec3f(cy * rel.x + sy * rel.y, -sy * rel.x + cy * rel.y, rel.z);
@@ -171,6 +179,7 @@ fn scatter{id}(p: vec3f, base: f32, displace: f32) -> f32 {{
         cz = p(18),
         half = p(19),
         cells = p(20),
+        face = p(21),
     )
 }
 
@@ -209,6 +218,7 @@ pub fn props(ui: &mut eframe::egui::Ui, p: &mut ScatterParams) {
     .response
     .on_hover_text("Each copy's longest side is a random size between these.");
     crate::row(ui, &mut p.yaw, d.yaw, |ui, v| _ = ui.checkbox(v, "random facing"));
+    crate::row(ui, &mut p.face_uphill, d.face_uphill, |ui, v| _ = ui.checkbox(v, "face uphill").on_hover_text("Turns each copy so its back (+Z in the Composer) faces uphill: a cave goes into the hillside and opens downhill. Used instead of the random turn where there is a slope."));
     ui.horizontal(|ui| {
         ui.label("slope");
         ui.add(egui::DragValue::new(&mut p.slope[0]).range(0.0..=10.0).speed(0.01));

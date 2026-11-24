@@ -196,7 +196,7 @@ fn mesh_graph(png: &Path, lib: &Path, out_dir: &Path, triangles: u32) -> Graph {
         ("Crag", "StoneStrata", 0.6, 0.08, ScatterParams { file: sdf("Crag"), seed: 5, cell: 8000.0, density: 0.45, size: [2000.0, 3200.0], slope: [0.25, 1.0], elevation: [0.3, 1.0], blend: 150.0, ..Default::default() }),
         ("Mushroom", "MushroomBumps", 0.3, 0.12, ScatterParams { file: sdf("Mushroom"), seed: 7, cell: 6000.0, density: 0.3, size: [1500.0, 2800.0], slope: [0.0, 0.15], elevation: [0.0, 0.5], blend: 100.0, ..Default::default() }),
         ("Arch", "StoneStrata", 0.8, 0.05, ScatterParams { file: sdf("Arch"), seed: 11, cell: 18000.0, density: 0.35, size: [4200.0, 5400.0], slope: [0.0, 0.2], elevation: [0.0, 0.6], blend: 200.0, ..Default::default() }),
-        ("Cave", "CaveWalls", 0.8, 0.04, ScatterParams { file: sdf("Cave"), seed: 13, cell: 20000.0, density: 0.5, size: [4500.0, 5500.0], slope: [0.35, 1.5], elevation: [0.2, 0.95], blend: 150.0, subtract: true, sink: 0.12, ..Default::default() }),
+        ("Cave", "CaveWalls", 0.8, 0.04, ScatterParams { file: sdf("Cave"), seed: 13, cell: 15000.0, density: 0.35, size: [3000.0, 4500.0], slope: [0.7, 1.8], elevation: [0.2, 0.97], blend: 150.0, subtract: true, face_uphill: true, sink: 0.12, ..Default::default() }),
     ];
     for (_, noise, amplitude, frequency, params) in kinds {
         let scatter = g.add(NodeKind::Scatter(params), [0.0; 2]);

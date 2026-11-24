@@ -2,7 +2,7 @@
 
     UnrealEditor.exe Project.uproject -ExecutePythonScript="unreal_shots.py <level> <shots.json> <output folder>" -unattended
 
-`shots.json`: {"size": [1920, 1080], "shots": [{"name": "aerial", "from": [x, y, z], "to": [x, y, z]}, ...]} in centimetres.
+`shots.json`: {"size": [1920, 1080], "console": ["r.Some.Cvar 1"], "shots": [{"name": "aerial", "from": [x, y, z], "to": [x, y, z]}, ...]} in centimetres.
 Pictures are saved to <output folder>/<name>.png.
 """
 
@@ -13,7 +13,7 @@ import time
 
 import unreal
 
-SECONDS_TO_SETTLE = 8.0  # Nanite streaming, shadow maps and the exposure need a moment after the camera moves
+SECONDS_TO_SETTLE = 20.0  # Nanite streaming, shadow maps and the exposure need a moment after the camera moves
 SECONDS_TO_SAVE = 4.0
 
 
@@ -30,6 +30,8 @@ def run(level, shots_path, out_dir):
     if level:
         unreal.get_editor_subsystem(unreal.LevelEditorSubsystem).load_level(level)
     editor = unreal.get_editor_subsystem(unreal.UnrealEditorSubsystem)
+    for command in spec.get("console", []):
+        unreal.SystemLibrary.execute_console_command(editor.get_editor_world(), command)
     # The editor closes when a start-up script returns, unless the script says it is still working.
     unreal.EditorPythonScripting.set_keep_python_script_alive(True)
     state = {"shot": 0, "start": None, "taken": False}

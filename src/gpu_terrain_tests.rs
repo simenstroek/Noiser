@@ -262,6 +262,34 @@ fn a_shape_can_stand_on_the_terrain() {
     assert!(top > 45.0 && top < 90.0, "{top} {log:?}");
 }
 
+/// A steep ramp (rising 0.8 per metre along x) with a cave scattered into it, facing uphill: the cave is a hollow inside the hill
+/// with its mouth on the slope, so the surface has walls below the ramp's own surface.
+#[test]
+fn a_cave_scattered_onto_a_slope_hollows_it_out() {
+    if gpu().is_none() || !Path::new("H:/My Drive/NoiserLibrary/SDFs/Cave.sdf").exists() {
+        return eprintln!("no GPU adapter or no library cave; skipping");
+    }
+    let dir = std::env::temp_dir().join("noiser-terrain-cave");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let n = 129;
+    let metres: Vec<f32> = (0..n * n).map(|k| 0.8 * (k % n) as f32 * 5.0 + 20.0).collect();
+    let png = dir.join("terrain.png");
+    crate::landscape::write_unreal(&png, n, 640.0, &crate::landscape::encode_unreal(&metres)).unwrap();
+    let mut g = graph(&png, 1, 60000, false);
+    let land = g.nodes.iter().find(|(_, n)| matches!(&n.kind, NodeKind::LoadMesh(_))).map(|(id, _)| *id).unwrap();
+    let remesh = g.nodes.iter().find(|(_, n)| matches!(&n.kind, NodeKind::Remesh { .. })).map(|(id, _)| *id).unwrap();
+    // 60 m caves in cells of 320 m: two across, the slope between 0.7 and 0.9.
+    let scatter = g.add(NodeKind::Scatter(crate::scatter::ScatterParams { file: "H:/My Drive/NoiserLibrary/SDFs/Cave.sdf".into(), cell: 320.0, density: 1.0, size: [60.0, 60.0], jitter: 0.0, slope: [0.5, 2.0], face_uphill: true, subtract: true, sink: 0.1, blend: 1.0, ..Default::default() }), [0.0; 2]);
+    g.connect(land, scatter, 0);
+    g.connect(scatter, remesh, 0);
+    let (_, log) = run(&dir, &g);
+    let v = vertices(&dir.join("out").join("terrain.obj"));
+    // Vertices more than 3 m under the ramp's surface are cavity walls.
+    let inside = v.iter().filter(|p| { let (x, z): (f32, f32) = (p[0].parse().unwrap(), p[2].parse().unwrap()); z < 0.8 * x + 20.0 - 3.0 }).count();
+    assert!(inside > 150, "{inside} of {} vertices lie inside the hill: {log:?}", v.len());
+}
+
 /// A Scatter SDF node plants copies of a shape on the ground by a rule.
 #[test]
 fn a_scatter_node_plants_shapes_on_the_terrain() {

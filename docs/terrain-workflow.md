@@ -49,7 +49,8 @@ Put things on the terrain between the terrain and Remesh:
 * **Scatter SDF** plants copies of a shape by a rule. Drop it in the chain, pick the `.sdf`, and set the *cell* (about the
   spacing), *density*, *size* range, and where it may stand (*slope*, *height*). Wire another noise graph into its
   *Roughen* input and only these copies are roughened. Use one Scatter node per kind of object; chain them. Tick *cut out of
-  the base* for caves and pits.
+  the base* for caves and pits, and *face uphill* so a cave's chamber goes into the hillside and its mouth opens downhill (put
+  the chamber at +Z of the shape in the Composer). A different *seed* plants the same rule somewhere else.
 * **Load SDF** places one shape by hand (size, x and y; *Stand on the terrain* finds the height).
 * A *Noise Graph* added to the terrain gives it grit.
 
@@ -70,6 +71,15 @@ Enable the *Python Editor Script Plugin*, then in the Output Log:
 It imports the chunks as Nanite meshes, builds the terrain material (grass, sand, rock and snow by slope and height, with the
 baked occlusion and curvature), places the chunks at the origin and lights the level. `tools/unreal_shots.py` takes
 screenshots from a list of cameras for checking.
+
+## Try it
+
+The library has a finished example: `Terrains/DemoLandscape.landscape` (plains with hills and dunes, a painted mountain range;
+open it in the Landscape tab), `Mesh Graphs/DemoTerrain.meshgraph` (the terrain with Scatter nodes for boulders, crags,
+mushrooms, arches and caves, each with its own noise graph), and the shapes and noises it uses. Run the mesh graph, then the
+Unreal script. `tools/demo/make_shapes.py` and the ignored test `write_demo_terrain` in `src/demo_scene.rs` regenerate all of it.
+
+![The demo terrain in Unreal Engine](screenshots/terrain-unreal.png)
 
 ## Things to know
 
