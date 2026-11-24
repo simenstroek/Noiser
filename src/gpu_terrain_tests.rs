@@ -129,6 +129,34 @@ fn terrain_chunks_meet_and_follow_the_ground() {
     assert!(uvs.len() > 1500 && uvs.iter().all(|u| (0.0..=1.0).contains(&u[0]) && (0.0..=1.0).contains(&u[1])));
 }
 
+/// The graph the Landscape tab's button opens runs as it is: chunk meshes, three maps each, and the manifest.
+#[test]
+fn the_graph_the_landscape_tab_sends_runs_as_it_is() {
+    if gpu().is_none() {
+        return eprintln!("no GPU adapter; skipping");
+    }
+    let dir = std::env::temp_dir().join("noiser-terrain-send");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let png = heightmap(&dir, 129, 1000.0, 80.0);
+    let mut g = crate::landscape_field::terrain_graph(&png, 1000.0);
+    // Keep the test quick: smaller budget and maps.
+    for n in g.nodes.values_mut() {
+        match &mut n.kind {
+            NodeKind::Remesh { triangles, .. } => *triangles = 20_000,
+            NodeKind::Bake(b) => (b.size, b.samples) = (128, 1),
+            _ => {}
+        }
+    }
+    let (written, log) = run(&dir, &g);
+    // 2 x 2 chunks of 500 m, each a mesh and three maps, plus the manifest (written separately).
+    assert_eq!(written.len(), 16, "{log:?}");
+    let out = dir.join("chunks");
+    for f in ["terrain_00_00.obj", "terrain_01_01_normal_base.png", "terrain_00_01_ambient_occlusion.png", "terrain_01_00_curvature.png", "terrain_chunks.json"] {
+        assert!(out.join(f).exists(), "{f} missing: {log:?}");
+    }
+}
+
 /// A rock (a mesh file) standing on the terrain joins the surface with a smooth union, and lifts the chunk's z range.
 #[test]
 fn an_object_on_the_terrain_is_part_of_its_chunk() {

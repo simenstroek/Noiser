@@ -307,6 +307,8 @@ pub struct LandscapeWorkspace {
     status: String,
     pub chunks: crate::landscape_chunks::Options,
     chunk_log: Vec<String>,
+    /// A heightmap being exported for the Mesh graph: when it is written, a graph for it opens there.
+    to_mesh: Option<PathBuf>,
     view: (f32, f32, f32),
     picture: Option<(u64, egui::TextureHandle)>,
     /// The painted masks (read by Mask nodes), the selected one, the brush and its tool.
@@ -327,11 +329,41 @@ pub struct LandscapeWorkspace {
 
 impl Default for LandscapeWorkspace {
     fn default() -> Self {
-        LandscapeWorkspace { graph: default_graph(), editor: Editor::default(), path: None, settings: Settings::default(), values: None, sampled_key: None, eroded: None, job: None, status: String::new(), chunks: Default::default(), chunk_log: Vec::new(), view: (0.8, 0.6, 1.0), picture: None, masks: Vec::new(), mask_selected: 0, mask_rev: 0, mask_live: 0, brush: Brush::default(), tool: Tool::Paint, map_mode: false, stroke_from: None, new_mask: String::new(), overlay: None, map_picture: None }
+        LandscapeWorkspace { graph: default_graph(), editor: Editor::default(), path: None, settings: Settings::default(), values: None, sampled_key: None, eroded: None, job: None, status: String::new(), chunks: Default::default(), chunk_log: Vec::new(), to_mesh: None, view: (0.8, 0.6, 1.0), picture: None, masks: Vec::new(), mask_selected: 0, mask_rev: 0, mask_live: 0, brush: Brush::default(), tool: Tool::Paint, map_mode: false, stroke_from: None, new_mask: String::new(), overlay: None, map_picture: None }
     }
 }
 
 impl LandscapeWorkspace {
+    /// Writes the heightmap (the eroded terrain when there is one) to `path` on a thread.
+    fn start_export(&mut self, path: PathBuf, device: &eframe::wgpu::Device, queue: &eframe::wgpu::Queue) {
+        let ls = self;
+        let (graph, s) = (ls.graph.clone(), ls.settings.clone());
+        let (masks, base) = (ls.mask_map(), ls.base_dir());
+        let eroded = ls.current_eroded().cloned();
+        let (tx, rx) = mpsc::channel();
+        let progress = Progress::default();
+        let p = progress.clone();
+        let (device, queue) = (device.clone(), queue.clone());
+        std::thread::spawn(move || {
+            let r = match eroded {
+                // The eroded grid, resampled to the landscape size.
+                Some(e) => {
+                    let n = side(e.len());
+                    let step = 1.0 / (UNREAL_RES - 1) as f32;
+                    let metres: Vec<f32> = (0..UNREAL_RES * UNREAL_RES).map(|k| bilinear(&e, n, (k % UNREAL_RES) as f32 * step, (k / UNREAL_RES) as f32 * step)).collect();
+                    write_unreal(&path, UNREAL_RES, s.world_m, &encode_unreal(&metres))
+                }
+                None => build_evaluator(&device, &queue, &graph, &s, &masks, &base).and_then(|ev| {
+                    let metres = to_metres(&sample(&ev, UNREAL_RES, &p), &s);
+                    write_unreal(&path, UNREAL_RES, s.world_m, &encode_unreal(&metres))
+                }),
+            };
+            let _ = tx.send(r);
+        });
+        ls.job = Some(Job::Export(rx, progress));
+        ls.status = "Exporting…".into();
+    }
+
     pub fn restore(&mut self, graph: Graph, settings: Settings, path: Option<PathBuf>) {
         (self.graph, self.settings, self.path) = (graph, settings, path);
     }
@@ -559,21 +591,35 @@ impl crate::App {
             },
             None => {}
         }
+        let mut to_mesh = None;
         if let Some(r) = finished {
             ls.job = None;
+            if r.is_err() {
+                ls.to_mesh = None;
+            }
             match r {
                 Ok(Done::Values(v)) => ls.values = Some(v),
                 Ok(Done::Eroded(e, key)) => {
                     ls.eroded = Some((key, e));
                     ls.status = "Erosion done".into();
                 }
-                Ok(Done::Message(m)) => ls.status = m,
+                Ok(Done::Message(m)) => {
+                    ls.status = m;
+                    to_mesh = ls.to_mesh.take();
+                }
                 Err(e) => {
                     ls.status = e;
                     ls.values = None;
                 }
             }
         }
+        if let Some(png) = to_mesh {
+            self.mesh_ws.open_graph(crate::landscape_field::terrain_graph(&png, self.landscape.settings.world_m), png.with_file_name("terrain.meshgraph"));
+            self.workspace = crate::meshworkspace::Workspace::Mesh;
+            self.landscape.status = format!("Opened a mesh graph for {} in the Mesh graph tab", png.display());
+            return;
+        }
+        let ls = &mut self.landscape;
         if let Ok(mut names) = MASK_NAMES.lock() {
             *names = ls.masks.iter().map(|m| m.name.clone()).collect();
         }
@@ -623,31 +669,13 @@ impl crate::App {
             ui.weak("The terrain is one tile of the graph (x and y from 0 to 1) with the density output as height, so any noise graph works. Tiling graphs make a terrain whose edges match.");
             if action(ui, "export", "Export heightmap for Unreal…", TERRAIN, !running && ls.values.is_some()).on_hover_text(format!("A 16-bit PNG at {UNREAL_RES} x {UNREAL_RES} (a valid landscape size) and a .json with the import settings.")).clicked()
                 && let Some(path) = rfd::FileDialog::new().add_filter("16-bit PNG", &["png"]).set_file_name("heightmap.png").save_file() {
-                let (graph, s) = (ls.graph.clone(), ls.settings.clone());
-                let (masks, base) = (ls.mask_map(), ls.base_dir());
-                let eroded = ls.current_eroded().cloned();
-                let (tx, rx) = mpsc::channel();
-                let progress = Progress::default();
-                let p = progress.clone();
-                let (device, queue) = (device.clone(), queue.clone());
-                std::thread::spawn(move || {
-                    let r = match eroded {
-                        // The eroded grid, resampled to the landscape size.
-                        Some(e) => {
-                            let n = side(e.len());
-                            let step = 1.0 / (UNREAL_RES - 1) as f32;
-                            let metres: Vec<f32> = (0..UNREAL_RES * UNREAL_RES).map(|k| bilinear(&e, n, (k % UNREAL_RES) as f32 * step, (k / UNREAL_RES) as f32 * step)).collect();
-                            write_unreal(&path, UNREAL_RES, s.world_m, &encode_unreal(&metres))
-                        }
-                        None => build_evaluator(&device, &queue, &graph, &s, &masks, &base).and_then(|ev| {
-                            let metres = to_metres(&sample(&ev, UNREAL_RES, &p), &s);
-                            write_unreal(&path, UNREAL_RES, s.world_m, &encode_unreal(&metres))
-                        }),
-                    };
-                    let _ = tx.send(r);
-                });
-                ls.job = Some(Job::Export(rx, progress));
-                ls.status = "Exporting…".into();
+                ls.start_export(path, &device, &queue);
+            }
+            if action(ui, "mesh_graph", "Open as Nanite chunks in the Mesh graph…", TERRAIN, !running && ls.values.is_some()).on_hover_text("Exports the heightmap into a folder you choose and opens a Mesh graph there that cuts it into Nanite chunks (planar UVs, normal / occlusion / curvature maps). Press Run in the Mesh graph tab; terrain_chunks.json and tools/unreal_import_terrain.py bring the result into Unreal.").clicked()
+                && let Some(dir) = rfd::FileDialog::new().pick_folder() {
+                let png = dir.join("heightmap.png");
+                ls.to_mesh = Some(png.clone());
+                ls.start_export(png, &device, &queue);
             }
             if let Some(Job::Export(_, p)) = &ls.job {
                 ui.add(egui::ProgressBar::new(p.load(Ordering::Relaxed) as f32 / 1000.0).show_percentage());
@@ -967,7 +995,7 @@ mod tests {
 
     #[test]
     fn every_icon_the_tab_draws_exists() {
-        for name in ["height", "masks", "erosion", "chunks", "graph", "map", "view_3d", "brush", "eraser", "smooth", "blur", "invert", "fill", "clear_mask", "play", "delete", "add", "export", "open", "save", "new", "landscape"] {
+        for name in ["height", "masks", "erosion", "chunks", "graph", "map", "view_3d", "brush", "eraser", "smooth", "blur", "invert", "fill", "clear_mask", "play", "delete", "add", "export", "open", "save", "new", "landscape", "mesh_graph"] {
             assert!(crate::icons::source(name).is_some(), "no icon called {name}");
         }
     }

@@ -152,6 +152,32 @@ impl Heights {
     }
 }
 
+/// The Mesh graph that turns an exported heightmap into Nanite chunks: the terrain as a Load Mesh (1 unit = 1 cm, as Unreal
+/// has it), Remesh in chunks of about 500 m, planar UVs, normal / occlusion / curvature maps, and the outputs, written
+/// next to the heightmap in `chunks/`.
+pub fn terrain_graph(png: &Path, world_m: f32) -> crate::graph::Graph {
+    use crate::graph::{Graph, NodeKind};
+    use crate::meshgraph::{LoadMeshParams, OutParams};
+    let mut g = Graph::default();
+    let chunks = (world_m / 500.0).round().clamp(1.0, 16.0) as u32;
+    let folder = png.parent().unwrap_or(Path::new(".")).join("chunks").to_string_lossy().into_owned();
+    let land = g.add(NodeKind::LoadMesh(LoadMeshParams { path: png.to_string_lossy().into_owned(), unit_cm: 1.0, chunks, ..Default::default() }), [0.0, 0.0]);
+    let remesh = g.add(NodeKind::Remesh { triangles: 250_000, adaptivity: 1.0 }, [320.0, 0.0]);
+    let uv = g.add(NodeKind::AutoUv(crate::uvgen::UvParams { planar: true, ..Default::default() }), [600.0, 0.0]);
+    let out = g.add(NodeKind::OutMesh(OutParams { folder: folder.clone(), name: "terrain".into(), ..Default::default() }), [880.0, 0.0]);
+    let bake = g.add(NodeKind::Bake(crate::bake::Settings { channels: vec![crate::bake::Channel::Normal, crate::bake::Channel::Occlusion, crate::bake::Channel::Curvature], ..Default::default() }), [880.0, 160.0]);
+    g.connect(land, remesh, 0);
+    g.connect(remesh, uv, 0);
+    g.connect(uv, out, 0);
+    g.connect(uv, bake, 0);
+    g.connect(land, bake, 1);
+    for i in 0..3 {
+        let img = g.add(NodeKind::OutImage(OutParams { folder: folder.clone(), name: "terrain".into(), ..Default::default() }), [1160.0, 160.0 + 90.0 * i as f32]);
+        g.connect_from(bake, i, img, 0);
+    }
+    g
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
