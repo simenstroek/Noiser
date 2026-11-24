@@ -28,6 +28,16 @@ pub struct ScatterParams {
     /// Turn every copy so the shape's back (its +Z in the Composer) faces uphill: a cave's chamber goes into the hillside and
     /// its mouth opens downhill. Replaces the random turn where the ground has a slope.
     pub face_uphill: bool,
+    /// Turn every copy so its +Z (its front, as the Composer shows it) faces the middle of the ring.
+    pub face_centre: bool,
+    /// Plant `ring_count` copies evenly round a circle instead of by cells: four sphinxes facing a tower, a ring of standing
+    /// stones. The circle's middle is the terrain's middle unless `ring_centre` is set.
+    pub ring: bool,
+    pub ring_count: u32,
+    pub ring_radius: f32,
+    /// Where the first copy stands, in degrees from +X.
+    pub ring_start: f32,
+    pub ring_centre: Option<[f32; 2]>,
     /// Where the ground may be: slope as rise over run, and height as a fraction of the terrain's height range.
     pub slope: [f32; 2],
     pub elevation: [f32; 2],
@@ -43,12 +53,12 @@ pub struct ScatterParams {
 
 impl Default for ScatterParams {
     fn default() -> Self {
-        ScatterParams { file: String::new(), seed: 1, cell: 4000.0, density: 0.5, size: [1500.0, 2500.0], jitter: 0.8, yaw: true, face_uphill: false, slope: [0.0, 0.6], elevation: [0.0, 1.0], sink: 0.05, blend: 100.0, subtract: false, roughen: 1.0 }
+        ScatterParams { file: String::new(), seed: 1, cell: 4000.0, density: 0.5, size: [1500.0, 2500.0], jitter: 0.8, yaw: true, face_uphill: false, face_centre: false, ring: false, ring_count: 4, ring_radius: 40000.0, ring_start: 45.0, ring_centre: None, slope: [0.0, 0.6], elevation: [0.0, 1.0], sink: 0.05, blend: 100.0, subtract: false, roughen: 1.0 }
     }
 }
 
 /// How many shader parameters the node uses (see `shader_params`).
-pub const SLOTS: usize = 22;
+pub const SLOTS: usize = 30;
 
 impl ScatterParams {
     /// The shader's numbers: seed, cell, density, size low and high, jitter, slope low and high, elevation low and high,
@@ -56,7 +66,7 @@ impl ScatterParams {
     /// and how far its centre is above its lowest point.
     pub fn shader_params(&self) -> [f32; SLOTS] {
         let (inv, centre, half) = match crate::sdf_node::load(&self.file).as_ref() {
-            Ok(data) => match data.scene.bounds {
+            Ok(data) => match data.tight.or(data.scene.bounds) {
                 Some((lo, hi)) => {
                     let longest = (0..3).map(|a| hi[a] - lo[a]).fold(0.0, f64::max).max(1e-9);
                     let c = [0, 1, 2].map(|a| ((lo[a] + hi[a]) * 0.5) as f32);
@@ -91,6 +101,14 @@ impl ScatterParams {
             // cannot unroll it (nine copies of the shape interpreter per node take minutes to compile).
             9.0,
             if self.face_uphill { 1.0 } else { 0.0 },
+            if self.ring { 1.0 } else { 0.0 },
+            self.ring_count as f32,
+            self.ring_radius,
+            self.ring_start.to_radians(),
+            self.ring_centre.map_or(0.0, |c| c[0]),
+            self.ring_centre.map_or(0.0, |c| c[1]),
+            if self.ring_centre.is_none() { 1.0 } else { 0.0 },
+            if self.face_centre { 1.0 } else { 0.0 },
         ]
     }
 
@@ -111,46 +129,60 @@ fn scatter{id}_smin(a: f32, b: f32, k: f32) -> f32 {{
     let h = max(k - abs(a - b), 0.0) / k;
     return min(a, b) - h * h * k * 0.25;
 }}
+// The distance from `p` to the copy planted at `ctr` (1e6 when the ground there is not allowed).
+fn scatter{id}_one(p: vec3f, ctr: vec2f, size: f32, spin: f32, zr: vec2f, middle: vec2f) -> f32 {{
+    let g = land_ground_{land}(ctr);
+    let slope = length(g.yz);
+    let e = (g.x - zr.x) / max(zr.y - zr.x, 1.0e-6);
+    if (slope < {slope_lo} || slope > {slope_hi} || e < {elev_lo} || e > {elev_hi}) {{ return 1.0e6; }}
+    let rad = 0.4 * size;
+    var low = g.x;
+    low = min(low, land_ground_{land}(ctr + vec2f(rad, 0.0)).x);
+    low = min(low, land_ground_{land}(ctr - vec2f(rad, 0.0)).x);
+    low = min(low, land_ground_{land}(ctr + vec2f(0.0, rad)).x);
+    low = min(low, land_ground_{land}(ctr - vec2f(0.0, rad)).x);
+    let sc = size * {inv};
+    // Standing shapes rest on the lowest ground under them; cut-outs (caves) start at the ground in the middle, so the mouth
+    // opens where the slope falls away in front of them.
+    let floor = select(low, g.x, {subtract} > 0.5);
+    let centre = vec3f(ctr, floor + {half} * sc - {sink} * size);
+    let rel = p - centre;
+    let reach = size * 0.9;
+    let dist = length(rel);
+    if (dist > reach + {blend}) {{ return dist - reach; }}
+    let uphill = normalize(g.yz + vec2f(1.0e-9));
+    var yaw = select(spin * 6.2831853 * {yaw}, atan2(uphill.x, -uphill.y), {face} > 0.5 && slope > 0.02);
+    let toward = middle - ctr;
+    yaw = select(yaw, atan2(toward.x, -toward.y), {face_centre} > 0.5 && length(toward) > 1.0e-3);
+    let cy = cos(yaw);
+    let sy = sin(yaw);
+    let turned = centre + vec3f(cy * rel.x + sy * rel.y, -sy * rel.x + cy * rel.y, rel.z);
+    return sdf{id}_at(turned, centre, sc, vec3f({cx}, {cy_}, {cz}));
+}}
 fn scatter{id}(p: vec3f, base: f32, displace: f32) -> f32 {{
     let seed = u32({seed});
-    let cell = {cell};
-    let c0 = vec2i(floor(p.xy / cell));
     let zr = land_range_{land}();
+    let middle = select(vec2f({ring_x}, {ring_y}), land_centre_{land}(), {ring_terrain} > 0.5);
     var near = 1.0e6;
-    let cells = i32({cells});
-    for (var k = 0; k < cells; k++) {{
-        {{
+    if ({ring} < 0.5) {{
+        let cell = {cell};
+        let c0 = vec2i(floor(p.xy / cell));
+        let cells = i32({cells});
+        for (var k = 0; k < cells; k++) {{
             let id2 = c0 + vec2i(k % 3 - 1, k / 3 - 1);
             let r = hash01(vec3i(id2, 0), seed);
             if (r.x > {density}) {{ continue; }}
             let r2 = hash01(vec3i(id2, 1), seed);
             let ctr = (vec2f(id2) + vec2f(0.5) + (r.yz - vec2f(0.5)) * {jitter}) * cell;
-            let size = mix({size_lo}, {size_hi}, r2.x);
-            let g = land_ground_{land}(ctr);
-            let slope = length(g.yz);
-            let e = (g.x - zr.x) / max(zr.y - zr.x, 1.0e-6);
-            if (slope < {slope_lo} || slope > {slope_hi} || e < {elev_lo} || e > {elev_hi}) {{ continue; }}
-            let rad = 0.4 * size;
-            var low = g.x;
-            low = min(low, land_ground_{land}(ctr + vec2f(rad, 0.0)).x);
-            low = min(low, land_ground_{land}(ctr - vec2f(rad, 0.0)).x);
-            low = min(low, land_ground_{land}(ctr + vec2f(0.0, rad)).x);
-            low = min(low, land_ground_{land}(ctr - vec2f(0.0, rad)).x);
-            let sc = size * {inv};
-            // Standing shapes rest on the lowest ground under them; cut-outs (caves) start at the ground in the middle, so the mouth
-            // opens where the slope falls away in front of them.
-            let floor = select(low, g.x, {subtract} > 0.5);
-            let centre = vec3f(ctr, floor + {half} * sc - {sink} * size);
-            let rel = p - centre;
-            let reach = size * 0.9;
-            let dist = length(rel);
-            if (dist > reach + {blend}) {{ near = min(near, dist - reach); continue; }}
-            let uphill = normalize(g.yz + vec2f(1.0e-9));
-            let yaw = select(r2.y * 6.2831853 * {yaw}, atan2(uphill.x, -uphill.y), {face} > 0.5 && slope > 0.02);
-            let cy = cos(yaw);
-            let sy = sin(yaw);
-            let turned = centre + vec3f(cy * rel.x + sy * rel.y, -sy * rel.x + cy * rel.y, rel.z);
-            near = min(near, sdf{id}_at(turned, centre, sc, vec3f({cx}, {cy_}, {cz})));
+            near = min(near, scatter{id}_one(p, ctr, mix({size_lo}, {size_hi}, r2.x), r2.y, zr, middle));
+        }}
+    }} else {{
+        let count = i32({ring_count});
+        for (var k = 0; k < count; k++) {{
+            let a = {ring_start} + 6.2831853 * f32(k) / f32(max(count, 1));
+            let ctr = middle + {ring_radius} * vec2f(cos(a), sin(a));
+            let r = hash01(vec3i(k, 7, 0), seed);
+            near = min(near, scatter{id}_one(p, ctr, mix({size_lo}, {size_hi}, r.x), r.y, zr, middle));
         }}
     }}
     let shapes = near + displace * {roughen};
@@ -180,6 +212,14 @@ fn scatter{id}(p: vec3f, base: f32, displace: f32) -> f32 {{
         half = p(19),
         cells = p(20),
         face = p(21),
+        ring = p(22),
+        ring_count = p(23),
+        ring_radius = p(24),
+        ring_start = p(25),
+        ring_x = p(26),
+        ring_y = p(27),
+        ring_terrain = p(28),
+        face_centre = p(29),
     )
 }
 
@@ -206,17 +246,44 @@ pub fn props(ui: &mut eframe::egui::Ui, p: &mut ScatterParams) {
     }
     crate::row(ui, &mut p.seed, d.seed, |ui, v| _ = ui.add(egui::DragValue::new(v).prefix("seed ")).on_hover_text("Another seed plants the copies somewhere else."));
     let step = (p.cell * 0.01).max(0.01);
-    crate::row(ui, &mut p.cell, d.cell, |ui, v| _ = ui.add(egui::DragValue::new(v).range(1.0..=1.0e7).speed(step).prefix("cell ")).on_hover_text("The terrain is cut into squares this big, each holding at most one copy. Copies should not be much bigger than a cell."));
-    crate::row(ui, &mut p.density, d.density, |ui, v| _ = ui.add(egui::Slider::new(v, 0.0..=1.0).text("density")).on_hover_text("The chance a cell holds a copy."));
-    crate::row(ui, &mut p.jitter, d.jitter, |ui, v| _ = ui.add(egui::Slider::new(v, 0.0..=1.0).text("jitter")).on_hover_text("How far a copy strays from the middle of its cell."));
+    if !p.ring {
+        crate::row(ui, &mut p.cell, d.cell, |ui, v| {
+            ui.add(egui::DragValue::new(v).range(1.0..=1.0e7).speed(step).prefix("cell ")).on_hover_text("The terrain is cut into squares this big, each holding at most one copy. Copies should not be much bigger than a cell.");
+            ui.weak(crate::meshgraph_ui::metres(*v));
+        });
+        crate::row(ui, &mut p.density, d.density, |ui, v| _ = ui.add(egui::Slider::new(v, 0.0..=1.0).text("density")).on_hover_text("The chance a cell holds a copy."));
+        crate::row(ui, &mut p.jitter, d.jitter, |ui, v| _ = ui.add(egui::Slider::new(v, 0.0..=1.0).text("jitter")).on_hover_text("How far a copy strays from the middle of its cell."));
+    }
     ui.horizontal(|ui| {
         ui.label("size");
         let step = (p.size[1] * 0.01).max(0.01);
         ui.add(egui::DragValue::new(&mut p.size[0]).range(1.0..=1.0e7).speed(step));
         ui.add(egui::DragValue::new(&mut p.size[1]).range(1.0..=1.0e7).speed(step));
+        ui.weak(format!("{} to {}", crate::meshgraph_ui::metres(p.size[0]).trim_start_matches("= "), crate::meshgraph_ui::metres(p.size[1]).trim_start_matches("= ")));
     })
     .response
     .on_hover_text("Each copy's longest side is a random size between these.");
+    crate::row(ui, &mut p.ring, d.ring, |ui, v| _ = ui.checkbox(v, "in a ring").on_hover_text("Plant a set number of copies evenly round a circle instead of by cells: four sphinxes facing a tower, a ring of standing stones."));
+    if p.ring {
+        let step = (p.ring_radius * 0.01).max(0.01);
+        crate::row(ui, &mut p.ring_count, d.ring_count, |ui, v| _ = ui.add(egui::DragValue::new(v).range(1..=64).prefix("copies ")));
+        crate::row(ui, &mut p.ring_radius, d.ring_radius, |ui, v| {
+            ui.add(egui::DragValue::new(v).range(0.0..=1.0e7).speed(step).prefix("radius "));
+            ui.weak(crate::meshgraph_ui::metres(*v));
+        });
+        crate::row(ui, &mut p.ring_start, d.ring_start, |ui, v| _ = ui.add(egui::DragValue::new(v).speed(1.0).suffix(" deg first")).on_hover_text("Where the first copy stands, in degrees from +X; the rest follow evenly."));
+        ui.horizontal(|ui| {
+            let mut own = p.ring_centre.is_some();
+            if ui.checkbox(&mut own, "own centre").on_hover_text("Off: the circle is round the middle of the terrain.").changed() {
+                p.ring_centre = own.then_some([0.0, 0.0]);
+            }
+            if let Some(c) = &mut p.ring_centre {
+                ui.add(egui::DragValue::new(&mut c[0]).speed(step));
+                ui.add(egui::DragValue::new(&mut c[1]).speed(step));
+            }
+        });
+        crate::row(ui, &mut p.face_centre, d.face_centre, |ui, v| _ = ui.checkbox(v, "face the middle").on_hover_text("Turns each copy so its front (+Z in the Composer) faces the middle of the ring."));
+    }
     crate::row(ui, &mut p.yaw, d.yaw, |ui, v| _ = ui.checkbox(v, "random facing"));
     crate::row(ui, &mut p.face_uphill, d.face_uphill, |ui, v| _ = ui.checkbox(v, "face uphill").on_hover_text("Turns each copy so its back (+Z in the Composer) faces uphill: a cave goes into the hillside and opens downhill. Used instead of the random turn where there is a slope."));
     ui.horizontal(|ui| {

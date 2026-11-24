@@ -8,6 +8,22 @@ thread_local! {
     static BASE: std::cell::RefCell<std::path::PathBuf> = std::cell::RefCell::new(std::path::PathBuf::from("."));
 }
 
+thread_local! {
+    /// While the Mesh graph draws a node's settings: how many centimetres one unit of its field is, so lengths can show in metres.
+    static UNIT_CM: std::cell::Cell<Option<f32>> = const { std::cell::Cell::new(None) };
+}
+
+pub fn set_unit_cm(unit: Option<f32>) {
+    UNIT_CM.with(|u| u.set(unit));
+}
+
+/// A length in the field's units as metres for display ("45000" is "450 m" for a field in centimetres); empty outside the Mesh graph.
+pub fn metres(v: f32) -> String {
+    let Some(unit) = UNIT_CM.with(|u| u.get()) else { return String::new() };
+    let m = v * unit / 100.0;
+    if m.abs() >= 1000.0 { format!("= {:.2} km", m / 1000.0) } else if m.abs() >= 10.0 { format!("= {m:.0} m") } else { format!("= {m:.1} m") }
+}
+
 /// Tells the node settings which folder relative paths belong to (the mesh graph's).
 pub fn set_base(dir: std::path::PathBuf) {
     BASE.with(|b| *b.borrow_mut() = dir);

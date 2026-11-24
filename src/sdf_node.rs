@@ -30,6 +30,9 @@ pub struct LoadSdfParams {
     /// Beside a terrain (a Load Mesh with a heightmap): stand the shape on it. The offset's height is ignored: the shape's
     /// lowest point sits on the lowest ground under its footprint, sunk by `sink` times its size.
     pub snap: bool,
+    /// Which ground the shape stands on: the lowest under its footprint (a rock on a slope) or the highest (a tower with a
+    /// river running between its legs).
+    pub snap_high: bool,
     pub sink: f32,
     /// The file's up (+Y, as the Composer shows it) stands along the field's +Z: for terrain graphs, where z is up.
     pub z_up: bool,
@@ -37,20 +40,54 @@ pub struct LoadSdfParams {
 
 impl Default for LoadSdfParams {
     fn default() -> Self {
-        LoadSdfParams { file: String::new(), fit: true, size: 0.8, offset: [0.5; 3], stamp: false, snap: false, sink: 0.05, z_up: false }
+        LoadSdfParams { file: String::new(), fit: true, size: 0.8, offset: [0.5; 3], stamp: false, snap: false, snap_high: false, sink: 0.05, z_up: false }
     }
 }
 
 /// A loaded composition: its flattened shapes and the box they fill.
 pub struct SdfData {
     pub scene: GpuScene,
+    /// The box the surface really fills, found by sampling the distance field: `scene.bounds` is a union of spheres round the
+    /// shapes (safe to extract inside of, but far too roomy to stand a shape on the ground or to give it a size).
+    pub tight: Option<([f64; 3], [f64; 3])>,
+}
+
+/// Where the shape really is: the distance field sampled on a grid of 80 cells over the loose bounds, the box of the cells
+/// that lie inside, a half cell wider each way.
+fn tight_bounds(fields: &[crate::sdf_model::LayerField], loose: Option<([f64; 3], [f64; 3])>) -> Option<([f64; 3], [f64; 3])> {
+    use rayon::prelude::*;
+    let (lo, hi) = loose?;
+    const N: usize = 80;
+    let cell = [0, 1, 2].map(|a| (hi[a] - lo[a]) / N as f64);
+    let layers: Vec<&crate::sdf_model::LayerField> = fields.iter().filter(|f| !f.hidden).collect();
+    let boxes: Vec<([f64; 3], [f64; 3])> = (0..N)
+        .into_par_iter()
+        .filter_map(|k| {
+            let (mut a, mut b) = ([f64::MAX; 3], [f64::MIN; 3]);
+            for j in 0..N {
+                for i in 0..N {
+                    let p = [lo[0] + (i as f64 + 0.5) * cell[0], lo[1] + (j as f64 + 0.5) * cell[1], lo[2] + (k as f64 + 0.5) * cell[2]];
+                    let d = layers.iter().filter_map(|f| f.distance(p)).fold(f64::MAX, f64::min);
+                    if d <= 0.0 {
+                        for axis in 0..3 {
+                            a[axis] = a[axis].min(p[axis] - 0.5 * cell[axis]);
+                            b[axis] = b[axis].max(p[axis] + 0.5 * cell[axis]);
+                        }
+                    }
+                }
+            }
+            (a[0] <= b[0]).then_some((a, b))
+        })
+        .collect();
+    let first = *boxes.first()?;
+    Some(boxes.iter().fold(first, |(a, b), (c, d)| ([0, 1, 2].map(|k| a[k].min(c[k])), [0, 1, 2].map(|k| b[k].max(d[k])))))
 }
 
 impl LoadSdfParams {
     /// The seven numbers the shader reads: offset (3), tile units per file unit, and the point of the shape's own
     /// coordinates that lands on the offset (3). Seven floats in all.
     pub fn shader_params(&self, data: Option<&SdfData>) -> [f32; 7] {
-        let bounds = data.and_then(|d| d.scene.bounds);
+        let bounds = data.and_then(|d| d.tight.or(d.scene.bounds));
         match (self.fit, bounds) {
             (true, Some((lo, hi))) => {
                 let longest = (0..3).map(|a| hi[a] - lo[a]).fold(0.0, f64::max).max(1e-9);
@@ -67,7 +104,7 @@ impl LoadSdfParams {
     pub fn field_bounds(&self) -> Option<([f32; 3], [f32; 3])> {
         let loaded = load(&self.file);
         let data = loaded.as_ref().as_ref().ok()?;
-        let (lo, hi) = data.scene.bounds?;
+        let (lo, hi) = data.tight.or(data.scene.bounds)?;
         let [ox, oy, oz, scale, cx, cy, cz] = self.shader_params(Some(data));
         let (offset, center) = ([ox, oy, oz], [cx, cy, cz]);
         let (mut a, mut b) = ([f32::MAX; 3], [f32::MIN; 3]);
@@ -106,7 +143,8 @@ fn read(path: &str) -> Result<SdfData, String> {
     if scene.shape_count > MAX_SHAPES || scene.ops.len() > MAX_OPS {
         return Err(format!("this composition is too large for a graph ({} shapes, {} operations; the limits are {MAX_SHAPES} and {MAX_OPS})", scene.shape_count, scene.ops.len()));
     }
-    Ok(SdfData { scene })
+    let tight = tight_bounds(&fields, scene.bounds);
+    Ok(SdfData { scene, tight })
 }
 
 /// The folders of the graph files that are open (one slot per tab): a relative path in a Load SDF node is looked for
@@ -291,6 +329,7 @@ pub fn props(ui: &mut eframe::egui::Ui, p: &mut LoadSdfParams) {
             // Terrain graphs work in metres or centimetres: no ceiling, and the step follows the size.
             let step = (p.size * 0.01).max(0.005);
             ui.add(egui::DragValue::new(&mut p.size).range(1e-4..=1e8).speed(step));
+            ui.weak(crate::meshgraph_ui::metres(p.size));
         });
         ui.horizontal(|ui| {
             ui.label("offset");
@@ -303,6 +342,7 @@ pub fn props(ui: &mut eframe::egui::Ui, p: &mut LoadSdfParams) {
     if p.fit {
         ui.checkbox(&mut p.snap, "Stand on the terrain").on_hover_text("With a terrain in the graph (a Load Mesh node with a heightmap): the shape's lowest point sits on the ground under it, so only x and y of the offset matter. Without one it does nothing.");
         if p.snap {
+            ui.checkbox(&mut p.snap_high, "on the highest ground").on_hover_text("Stand on the highest ground under the shape instead of the lowest: a tower whose legs straddle a river stands on its banks, not in its bed.");
             ui.horizontal(|ui| {
                 ui.label("sink");
                 ui.add(egui::DragValue::new(&mut p.sink).range(-0.5..=0.5).speed(0.005).suffix(" x size")).on_hover_text("How far into the ground the shape is pushed, as a fraction of its size.");
@@ -383,7 +423,7 @@ pub(crate) mod tests {
         let data = loaded.as_ref().as_ref().unwrap();
         let params = LoadSdfParams::default().shader_params(Some(data));
         // The sphere's longest side (2, grown a little by the bounds' margin) becomes 0.8 of the tile.
-        let (lo, hi) = data.scene.bounds.unwrap();
+        let (lo, hi) = data.tight.or(data.scene.bounds).unwrap();
         let longest = (0..3).map(|a| hi[a] - lo[a]).fold(0.0, f64::max);
         assert!(((params[3] as f64) * longest - 0.8).abs() < 1e-4);
         assert_eq!(&params[..3], &[0.5, 0.5, 0.5]);
@@ -431,6 +471,20 @@ pub(crate) mod tests {
         let b = crate::codegen::compile(&graph_with_sphere(&path, LoadSdfParams { size: 0.5, offset: [0.2, 0.3, 0.4], ..Default::default() })).unwrap();
         assert_eq!(a.wgsl, b.wgsl);
         assert_ne!(a.params, b.params);
+    }
+
+    /// The box the surface fills is found by sampling: it is inside the loose sphere bounds and about the shape's real size.
+    #[test]
+    fn the_tight_bounds_hug_the_surface() {
+        let path = temp_sphere("noiser_sdf_node_tight.sdf");
+        let loaded = load(&path);
+        let data = loaded.as_ref().as_ref().unwrap();
+        let (tlo, thi) = data.tight.unwrap();
+        let (lo, hi) = data.scene.bounds.unwrap();
+        for a in 0..3 {
+            assert!(tlo[a] >= lo[a] - 1e-6 && thi[a] <= hi[a] + 1e-6, "inside the loose bounds on axis {a}");
+            assert!((thi[a] - tlo[a] - 2.0).abs() < 0.1, "the sphere is 2 across: {}", thi[a] - tlo[a]);
+        }
     }
 
     /// With the stamp on, the node gives the height of the shape's top surface over each (x, y), and -1000 off its footprint.

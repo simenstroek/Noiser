@@ -354,7 +354,8 @@ impl Runner<'_> {
                     let mut flat = p.clone();
                     flat.offset[2] = 0.0;
                     if let Some((lo, _)) = flat.field_bounds() {
-                        p.offset[2] = l.heights.lowest_ground(p.offset[0], p.offset[1], 0.4 * p.size) - lo[2] - p.sink * p.size;
+                        let ground = if p.snap_high { l.heights.highest_ground(p.offset[0], p.offset[1], 0.4 * p.size) } else { l.heights.lowest_ground(p.offset[0], p.offset[1], 0.4 * p.size) };
+                        p.offset[2] = ground - lo[2] - p.sink * p.size;
                     }
                 }
             }
@@ -485,7 +486,9 @@ let (mut lo, mut hi) = if loaded.is_empty() && sdf_boxes.is_empty() { ([0.0; 3],
         // Next to the files: where each chunk is (the meshes already hold their world positions, in the field's units).
         if let Some(dir) = written.first().and_then(|f| f.parent()) {
             let path = dir.join("terrain_chunks.json");
-            let json = serde_json::json!({"chunks_per_side": n, "chunks": manifest});
+            let terrain = graph.nodes.values().filter_map(|n| if let NodeKind::LoadMesh(p) = &n.kind { Some(p) } else { None }).find(|p| crate::landscape_field::is_heightmap(&p.path));
+            let water_cm = terrain.and_then(|p| crate::landscape_field::water_level_cm(&resolve_in(&self.base, &p.path)));
+            let json = serde_json::json!({"chunks_per_side": n, "unit_cm": terrain.map_or(1.0, |p| p.unit_cm), "water_level_cm": water_cm, "chunks": manifest});
             std::fs::write(&path, serde_json::to_string_pretty(&json).unwrap_or_default()).map_err(|e| format!("{}: {e}", path.display()))?;
             (self.log)(&format!("wrote {}", path.display()));
         }

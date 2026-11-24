@@ -17,6 +17,8 @@ pub struct Heights {
     /// Row major (x fastest), in units.
     pub h: Vec<f32>,
     pub z: (f32, f32),
+    /// The height of the water in the node's units, when the heightmap says there is some.
+    pub water: Option<f32>,
 }
 
 pub fn is_heightmap(path: &str) -> bool {
@@ -40,7 +42,15 @@ pub fn load(path: &Path, unit_cm: f32) -> Result<Heights, String> {
     let k = 1.0 / unit_cm;
     let h: Vec<f32> = img.as_raw().iter().map(|v| ((*v as f32 - 32768.0) * step_cm + centre_cm) * k).collect();
     let z = h.iter().fold((f32::MAX, f32::MIN), |(lo, hi), v| (lo.min(*v), hi.max(*v)));
-    Ok(Heights { n, cell: size_m * 100.0 * k / (n - 1) as f32, h, z })
+    let water = json["water_level_m"].as_f64().map(|w| w as f32 * 100.0 * k);
+    Ok(Heights { n, cell: size_m * 100.0 * k / (n - 1) as f32, h, z, water })
+}
+
+/// The height of the water a heightmap's sidecar names, in centimetres.
+pub fn water_level_cm(path: &Path) -> Option<f32> {
+    let text = std::fs::read_to_string(format!("{}.json", path.display())).ok()?;
+    let json: serde_json::Value = serde_json::from_str(&text).ok()?;
+    json["water_level_m"].as_f64().map(|w| w as f32 * 100.0)
 }
 
 /// The side of a heightmap's terrain and the middle of its height range in a node's units, from its sidecar alone (no
@@ -100,6 +110,11 @@ impl Heights {
         let (fx, fy) = (gx - i as f32, gy - j as f32);
         let h = |i: usize, j: usize| self.h[j * self.n + i];
         (h(i, j) * (1.0 - fx) + h(i + 1, j) * fx) * (1.0 - fy) + (h(i, j + 1) * (1.0 - fx) + h(i + 1, j + 1) * fx) * fy
+    }
+
+    /// The highest ground within `r` of (x, y): the centre and eight points around.
+    pub fn highest_ground(&self, x: f32, y: f32, r: f32) -> f32 {
+        (0..9).map(|k| if k == 8 { (x, y) } else { let a = k as f32 * std::f32::consts::FRAC_PI_4; (x + r * a.cos(), y + r * a.sin()) }).map(|(px, py)| self.ground(px, py)).fold(f32::MIN, f32::max)
     }
 
     /// The lowest ground within `r` of (x, y): the centre and eight points around.

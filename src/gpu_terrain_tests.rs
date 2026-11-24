@@ -290,6 +290,36 @@ fn a_cave_scattered_onto_a_slope_hollows_it_out() {
     assert!(inside > 150, "{inside} of {} vertices lie inside the hill: {log:?}", v.len());
 }
 
+/// A ring: four copies evenly round the terrain's middle, and none in the middle.
+#[test]
+fn a_scatter_ring_stands_round_the_middle_of_the_terrain() {
+    if gpu().is_none() {
+        return eprintln!("no GPU adapter; skipping");
+    }
+    let dir = std::env::temp_dir().join("noiser-terrain-ring");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let png = heightmap(&dir, 129, 640.0, 20.0);
+    let sdf = crate::sdf_node::tests::temp_sphere("noiser_terrain_ring.sdf");
+    let mut g = graph(&png, 1, 60000, false);
+    let land = g.nodes.iter().find(|(_, n)| matches!(&n.kind, NodeKind::LoadMesh(_))).map(|(id, _)| *id).unwrap();
+    let remesh = g.nodes.iter().find(|(_, n)| matches!(&n.kind, NodeKind::Remesh { .. })).map(|(id, _)| *id).unwrap();
+    // Four 40 m balls on a circle of 200 m round the middle (320, 320), the first at 45 degrees.
+    let ring = g.add(NodeKind::Scatter(crate::scatter::ScatterParams { file: sdf, ring: true, ring_count: 4, ring_radius: 200.0, ring_start: 45.0, size: [40.0, 40.0], slope: [0.0, 10.0], blend: 1.0, face_centre: true, ..Default::default() }), [0.0; 2]);
+    g.connect(land, ring, 0);
+    g.connect(ring, remesh, 0);
+    let (_, log) = run(&dir, &g);
+    let v: Vec<[f32; 3]> = vertices(&dir.join("out").join("terrain.obj")).iter().map(|p| [p[0].parse().unwrap(), p[1].parse().unwrap(), p[2].parse().unwrap()]).collect();
+    let tall: Vec<&[f32; 3]> = v.iter().filter(|p| p[2] > 38.0).collect();
+    assert!(tall.len() > 200, "{} vertices above the ground: {log:?}", tall.len());
+    for k in 0..4 {
+        let a = std::f32::consts::FRAC_PI_4 + std::f32::consts::FRAC_PI_2 * k as f32;
+        let at = [320.0 + 200.0 * a.cos(), 320.0 + 200.0 * a.sin()];
+        assert!(tall.iter().any(|p| (p[0] - at[0]).hypot(p[1] - at[1]) < 20.0), "a copy stands at {at:?}");
+    }
+    assert!(tall.iter().all(|p| (p[0] - 320.0).hypot(p[1] - 320.0) > 120.0), "nothing stands in the middle");
+}
+
 /// A Scatter SDF node plants copies of a shape on the ground by a rule.
 #[test]
 fn a_scatter_node_plants_shapes_on_the_terrain() {

@@ -17,6 +17,7 @@ For every chunk in the manifest it
   * makes one terrain material, M_NoiserTerrain, and a material instance per chunk that carries that chunk's occlusion and
     curvature maps. The material colours the ground by slope and height (grass, sand, rock, snow) with no help from the
     meshes' UVs, so chunks match at their borders;
+  * lays a water surface at the manifest's water level (the Landscape tab's "water at"), if it has one;
   * places the chunks in the level at the origin (the meshes already hold their world positions), with a sun, sky,
     fog and a post process volume so the level is lit.
 Run it again to replace everything it made.
@@ -120,6 +121,16 @@ def make_material(destination, defaults):
         n.set_editor_property("sampler_type", unreal.MaterialSamplerType.SAMPLERTYPE_LINEAR_COLOR)
         return n
 
+    # Everything that is not ground (baked from the field: 0 on the terrain, 1 on objects) is stone, whatever its height. Only when
+    # the export has such a map (a Bake custom map named Objects).
+    if defaults.get("Objects"):
+        objects = texture_parameter("Objects", 1100)
+        stone = lerp(colour(0.17, 0.14, 0.11, 1000), colour(0.33, 0.27, 0.20, 1050), smooth(channel(node(unreal.MaterialExpressionWorldPosition, -1500, 1100), b=True, x=-1300, y=1100), 0.0, 33000.0, -1100, 1100), -700, 1050)
+        link_alpha = node(unreal.MaterialExpressionLinearInterpolate, -450, 1100)
+        link(base, link_alpha, "A")
+        link(stone, link_alpha, "B")
+        link(objects, link_alpha, "Alpha", "R")
+        base = link_alpha
     occlusion = texture_parameter("Occlusion", 500)
     curvature = texture_parameter("Curvature", 800)
     shade = node(unreal.MaterialExpressionLinearInterpolate, -300, 700)
@@ -134,6 +145,45 @@ def make_material(destination, defaults):
     lib.recompile_material(material)
     unreal.EditorAssetLibrary.save_loaded_asset(material)
     return material
+
+
+def make_water_material(destination):
+    """A translucent blue water material: dark where deep, glossy."""
+    name, folder = "M_NoiserWater", destination + "/Materials"
+    path = folder + "/" + name
+    if unreal.EditorAssetLibrary.does_asset_exist(path):
+        unreal.EditorAssetLibrary.delete_asset(path)
+    material = unreal.AssetToolsHelpers.get_asset_tools().create_asset(name, folder, unreal.Material, unreal.MaterialFactoryNew())
+    lib = unreal.MaterialEditingLibrary
+    material.set_editor_property("blend_mode", unreal.BlendMode.BLEND_TRANSLUCENT)
+    colour = lib.create_material_expression(material, unreal.MaterialExpressionConstant3Vector, -400, 0)
+    colour.set_editor_property("constant", unreal.LinearColor(0.03, 0.14, 0.20, 1.0))
+    lib.connect_material_property(colour, "", unreal.MaterialProperty.MP_BASE_COLOR)
+    rough = lib.create_material_expression(material, unreal.MaterialExpressionConstant, -400, 200)
+    rough.set_editor_property("r", 0.06)
+    lib.connect_material_property(rough, "", unreal.MaterialProperty.MP_ROUGHNESS)
+    opacity = lib.create_material_expression(material, unreal.MaterialExpressionConstant, -400, 400)
+    opacity.set_editor_property("r", 0.85)
+    lib.connect_material_property(opacity, "", unreal.MaterialProperty.MP_OPACITY)
+    lib.recompile_material(material)
+    unreal.EditorAssetLibrary.save_loaded_asset(material)
+    return material
+
+
+def place_water(manifest, destination, actors):
+    """A flat water surface over the whole terrain at the manifest's water level (the ground below it is the river, lake or sea)."""
+    level_cm = manifest.get("water_level_cm")
+    if level_cm is None or not manifest["chunks"]:
+        return
+    unit_cm = manifest.get("unit_cm", 1.0)
+    side_cm = manifest["chunks_per_side"] * manifest["chunks"][0]["size"] * unit_cm
+    plane = unreal.load_asset("/Engine/BasicShapes/Plane.Plane")
+    actor = actors.spawn_actor_from_object(plane, unreal.Vector(side_cm / 2, -side_cm / 2, level_cm))
+    actor.set_actor_label("Water")
+    actor.set_folder_path(FOLDER)
+    actor.set_actor_scale3d(unreal.Vector(side_cm / 100.0, side_cm / 100.0, 1.0))
+    actor.static_mesh_component.set_material(0, make_water_material(destination))
+    actor.static_mesh_component.set_editor_property("cast_shadow", False)
 
 
 def import_terrain(manifest_path, destination="/Game/NoiserTerrain", level=None, place=True):
@@ -164,12 +214,13 @@ def import_terrain(manifest_path, destination="/Game/NoiserTerrain", level=None,
             # Maps are made for tiles of the terrain: do not wrap at the edges.
             asset.set_editor_property("address_x", unreal.TextureAddress.TA_CLAMP)
             asset.set_editor_property("address_y", unreal.TextureAddress.TA_CLAMP)
-            textures[asset.get_name()] = asset
+            textures[asset.get_name().lower()] = asset
             unreal.EditorAssetLibrary.save_loaded_asset(asset)
 
     material = make_material(destination, {
         "Occlusion": next((t for n, t in textures.items() if n.endswith("_ambient_occlusion")), None),
         "Curvature": next((t for n, t in textures.items() if n.endswith("_curvature")), None),
+        "Objects": next((t for n, t in textures.items() if n.endswith("_objects")), None),
     })
 
     meshes = []
@@ -187,8 +238,8 @@ def import_terrain(manifest_path, destination="/Game/NoiserTerrain", level=None,
                 unreal.EditorAssetLibrary.delete_asset(instance_path)
             instance = tools.create_asset(instance_name, destination + "/Materials", unreal.MaterialInstanceConstant, unreal.MaterialInstanceConstantFactoryNew())
             instance.set_editor_property("parent", material)
-            for parameter, suffix in (("Occlusion", "_ambient_occlusion"), ("Curvature", "_curvature")):
-                texture = textures.get(stem + suffix)
+            for parameter, suffix in (("Occlusion", "_ambient_occlusion"), ("Curvature", "_curvature"), ("Objects", "_objects")):
+                texture = textures.get((stem + suffix).lower())
                 if texture:
                     unreal.MaterialEditingLibrary.set_material_instance_texture_parameter_value(instance, parameter, texture)
             unreal.MaterialEditingLibrary.update_material_instance(instance)
@@ -200,7 +251,12 @@ def import_terrain(manifest_path, destination="/Game/NoiserTerrain", level=None,
     placed = 0
     if place:
         if level:
-            unreal.EditorLevelLibrary.load_level(level)
+            editor_levels = unreal.get_editor_subsystem(unreal.LevelEditorSubsystem)
+            if not unreal.EditorAssetLibrary.does_asset_exist(level):
+                # A plain level, not a World Partition one (which Unreal makes by default in 5.8).
+                editor_levels.new_level(level, False)
+            else:
+                editor_levels.load_level(level)
         actors = unreal.get_editor_subsystem(unreal.EditorActorSubsystem)
         for actor in actors.get_all_level_actors():
             if str(actor.get_folder_path()) == FOLDER:
@@ -210,50 +266,55 @@ def import_terrain(manifest_path, destination="/Game/NoiserTerrain", level=None,
             actor.set_actor_label(asset.get_name())
             actor.set_folder_path(FOLDER)
             placed += 1
+        place_water(manifest, destination, actors)
         light_the_level(actors)
-        unreal.EditorLevelLibrary.save_current_level()
+        unreal.get_editor_subsystem(unreal.LevelEditorSubsystem).save_current_level()
     unreal.log("Noiser terrain: {} chunk mesh(es) imported, {} placed, {} texture(s) under {}".format(len(mesh_tasks), placed, len(texture_tasks), destination))
 
 
 def light_the_level(actors):
-    """A sun, sky, sky light, fog and an exposure volume, unless the level already has them."""
-    present = {a.get_class().get_name() for a in actors.get_all_level_actors()}
+    """A sun, sky, sky light, fog and an exposure volume: the ones the level already has are set up, the others made. The
+    sky sphere of Unreal's default level is removed (it is a few hundred metres across and hides a bigger terrain)."""
+    for actor in list(actors.get_all_level_actors()):
+        if actor.get_actor_label() == "SM_SkySphere":
+            actors.destroy_actor(actor)
+    existing = {}
+    for actor in actors.get_all_level_actors():
+        existing.setdefault(actor.get_class().get_name(), actor)
 
-    def spawn(cls, location=(0, 0, 0), rotation=(0, 0, 0)):
-        if cls.static_class().get_name() in present:
-            return None
-        actor = unreal.EditorLevelLibrary.spawn_actor_from_class(cls, unreal.Vector(*location), unreal.Rotator(*rotation))
-        actor.set_folder_path(FOLDER)
+    def get(cls, location=(0, 0, 0), rotation=(0, 0, 0)):
+        actor = existing.get(cls.static_class().get_name())
+        if actor is None:
+            actor = unreal.EditorLevelLibrary.spawn_actor_from_class(cls, unreal.Vector(*location), unreal.Rotator(*rotation))
+            actor.set_folder_path(FOLDER)
         return actor
 
-    sun = spawn(unreal.DirectionalLight, (0, 0, 30000), (0, -38, -35))
-    if sun:
-        sun.get_component_by_class(unreal.DirectionalLightComponent).set_editor_property("intensity", 6.0)
+    sun = get(unreal.DirectionalLight, (0, 0, 30000), (0, -38, -35))
+    sun.set_actor_rotation(unreal.Rotator(0, -38, -35), False)
+    sun.get_component_by_class(unreal.DirectionalLightComponent).set_editor_property("intensity", 6.0)
     # The planet's ground at the terrain's lowest level (the terrain's edges are open), in earth colours.
-    atmosphere = spawn(unreal.SkyAtmosphere, (0, 0, -50))
-    if atmosphere:
-        atmosphere.get_component_by_class(unreal.SkyAtmosphereComponent).set_editor_property("ground_albedo", unreal.Color(110, 96, 70, 255))
-    sky = spawn(unreal.SkyLight, (0, 0, 30000))
-    if sky:
-        component = sky.get_component_by_class(unreal.SkyLightComponent)
-        component.set_editor_property("real_time_capture", True)
-    fog = spawn(unreal.ExponentialHeightFog, (50000, 50000, 5000))
-    if fog:
-        fog.get_component_by_class(unreal.ExponentialHeightFogComponent).set_editor_property("fog_density", 0.004)
-    volume = spawn(unreal.PostProcessVolume)
-    if volume:
-        volume.set_editor_property("unbound", True)
-        settings = volume.get_editor_property("settings")
-        settings.set_editor_property("override_auto_exposure_bias", True)
-        settings.set_editor_property("auto_exposure_bias", -0.5)
-        volume.set_editor_property("settings", settings)
+    atmosphere = get(unreal.SkyAtmosphere, (0, 0, -50))
+    atmosphere.set_actor_location(unreal.Vector(0, 0, -50), False, False)
+    atmosphere.get_component_by_class(unreal.SkyAtmosphereComponent).set_editor_property("ground_albedo", unreal.Color(110, 96, 70, 255))
+    sky = get(unreal.SkyLight, (0, 0, 30000))
+    sky.get_component_by_class(unreal.SkyLightComponent).set_editor_property("real_time_capture", True)
+    fog = get(unreal.ExponentialHeightFog, (50000, 50000, 5000))
+    fog.get_component_by_class(unreal.ExponentialHeightFogComponent).set_editor_property("fog_density", 0.004)
+    volume = get(unreal.PostProcessVolume)
+    volume.set_editor_property("unbound", True)
+    settings = volume.get_editor_property("settings")
+    settings.set_editor_property("override_auto_exposure_bias", True)
+    settings.set_editor_property("auto_exposure_bias", -0.5)
+    volume.set_editor_property("settings", settings)
 
 
 if __name__ == "__main__":
+    # Arguments, or the environment (a path with a space in it is easier to pass that way): NOISER_MANIFEST, NOISER_DESTINATION, NOISER_LEVEL.
     args = sys.argv[1:]
-    if not args:
-        unreal.log_error("usage: py unreal_import_terrain.py <terrain_chunks.json> [/Game/Destination] [/Game/Level]")
+    manifest = args[0] if args else os.environ.get("NOISER_MANIFEST")
+    if not manifest:
+        unreal.log_error("usage: py unreal_import_terrain.py <terrain_chunks.json> [/Game/Destination] [/Game/Level]  (or set NOISER_MANIFEST, NOISER_DESTINATION, NOISER_LEVEL)")
     else:
-        import_terrain(args[0], args[1] if len(args) > 1 else "/Game/NoiserTerrain", args[2] if len(args) > 2 else None)
+        import_terrain(manifest, args[1] if len(args) > 1 else os.environ.get("NOISER_DESTINATION", "/Game/NoiserTerrain"), args[2] if len(args) > 2 else os.environ.get("NOISER_LEVEL"))
         if os.environ.get("NOISER_UE_QUIT"):
             unreal.SystemLibrary.execute_console_command(None, "QUIT_EDITOR")

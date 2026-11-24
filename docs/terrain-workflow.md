@@ -81,6 +81,41 @@ Unreal script. `tools/demo/make_shapes.py` and the ignored test `write_demo_terr
 
 ![The demo terrain in Unreal Engine](screenshots/terrain-unreal.png)
 
+## A second scene: the Eiffel tower, four sphinxes and a river
+
+`tools/demo/make_landmarks.py` writes an `EiffelTower.sdf` and a `Sphinx.sdf` (the Composer's up is +Y and the front of a shape is
++Z, which is how Scatter turns a shape to face something). `Terrains/EiffelLandscape.landscape` is a 2 km landscape: a flat plaza,
+mountains along the two sides, and a river painted down the middle (a *river* mask, cut 17 m deep: `ground - mask * 0.17`, with
+the water set to 6.5 m in the terrain section). `Mesh Graphs/EiffelTerrain.meshgraph` stands the tower in the middle on the
+highest ground under it (its legs straddle the river), and a Scatter node in *ring* mode puts four sphinxes round it, facing it.
+`tools/demo/run_eiffel.sh` runs the whole thing and photographs it.
+
+What this scene showed, as a list of things a person would trip over. Each was fixed in the app or the scripts, or is noted:
+
+* **A file named on the command line lost to the saved session.** Opening `x.landscape` showed the last session's terrain. Fixed:
+  a file you name wins.
+* **No way to say where the water is.** A river in a height field is only a dip, and the Landscape tab could not show it. Added a
+  *water at* height to the Terrain section: blue in the 3D and map views, written to the heightmap's sidecar and the chunk
+  manifest, and made into a water surface by the Unreal import script.
+* **Placing four things in a circle by hand** meant four nodes and arithmetic. Scatter now has a *ring* mode (count, radius,
+  where the first one stands, the circle's centre or the terrain's) and *face the middle*.
+* **Standing on the ground put a tower in the river.** Shapes stand on the lowest ground under them, which is the river bed under a
+  tower that straddles it. Load SDF can now stand on the *highest* ground instead.
+* **Shapes floated.** The bounds of a shape were spheres round its parts, so "the lowest point" was far under the real one and
+  the sphinxes hung 25 m up. The box is now found by sampling the shape, and size, centre and standing use it.
+* **A level made with *New Level* is Unreal's Open World template** (a landscape, HLODs, and a sky sphere a few hundred metres
+  wide that hides a terrain of 2 km). The import script now makes a plain level and removes the sphere. Paths with spaces in them,
+  and Git Bash turning `/Game/..` into a Windows path, broke the command line: the script now also reads its arguments from
+  environment variables.
+* **Colour by height paints stone grass.** The flat top of a sphinx is "flat and at 40 m", which the material called meadow. The
+  export now bakes an *objects* map (the distance from the bare terrain) that the material reads to make everything that is not
+  ground stone.
+* **Units are centimetres, and sizes are typed as numbers** (45000 for 450 m). The properties now show metres next to them.
+* **The river is built by wiring** (mask times depth, subtracted from the ground). It works and a painted mask is the right way to
+  draw one, but a person would like a *carve* node that does it; not done.
+* **The tower could not be placed by clicking on the map.** It is typed as x and y. Also not done: a click-to-place on the
+  Landscape map would be the natural way.
+
 ## Things to know
 
 * **Unreal mirrors Y** when it imports an OBJ (it is left-handed), so the terrain sits at y from -size to 0, not 0 to size. The shapes look the same as in Noiser; only the coordinates differ.

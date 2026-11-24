@@ -1014,7 +1014,12 @@ impl crate::App {
                         if ui.add(egui::TextEdit::singleline(&mut label).hint_text("Label (shown on the node)").desired_width(f32::INFINITY)).changed() {
                             node.label = Some(label).filter(|l| !l.is_empty());
                         }
+                        // Lengths show in metres next to the numbers: the field's unit is the first Load Mesh node's.
+                        let unit = self.mesh_ws.graph.nodes.values().filter(|n| !n.muted).find_map(|n| if let NodeKind::LoadMesh(p) = &n.kind { Some(p.unit_cm) } else { None }).filter(|u| u.is_finite() && *u > 0.0).unwrap_or(100.0);
+                        crate::meshgraph_ui::set_unit_cm(Some(unit));
+                        let node = self.mesh_ws.graph.nodes.get_mut(id).unwrap();
                         crate::node_props(ui, &mut node.kind, &mut node.pins, &names);
+                        crate::meshgraph_ui::set_unit_cm(None);
                     }
                     [] => _ = ui.weak("Select a node to edit it. Double-click a Noise Graph node to open that graph in the Noise graph tab."),
                     _ => _ = ui.weak(format!("{} nodes selected", sel.len())),

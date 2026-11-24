@@ -284,6 +284,10 @@ fn land_ground_0(xy: vec2f) -> vec3f { return land_sample(mesh_tex, xy, meshes[0
 fn land_ground_1(xy: vec2f) -> vec3f { return land_sample(mesh_tex1, xy, meshes[1]); }
 fn land_ground_2(xy: vec2f) -> vec3f { return land_sample(mesh_tex2, xy, meshes[2]); }
 fn land_ground_3(xy: vec2f) -> vec3f { return land_sample(mesh_tex3, xy, meshes[3]); }
+fn land_centre_0() -> vec2f { let m = meshes[0]; return m.origin.xy + vec2f(0.5 * (m.origin.z - 1.0) * m.voxel); }
+fn land_centre_1() -> vec2f { let m = meshes[1]; return m.origin.xy + vec2f(0.5 * (m.origin.z - 1.0) * m.voxel); }
+fn land_centre_2() -> vec2f { let m = meshes[2]; return m.origin.xy + vec2f(0.5 * (m.origin.z - 1.0) * m.voxel); }
+fn land_centre_3() -> vec2f { let m = meshes[3]; return m.origin.xy + vec2f(0.5 * (m.origin.z - 1.0) * m.voxel); }
 fn land_range_0() -> vec2f { return meshes[0].centre.yz; }
 fn land_range_1() -> vec2f { return meshes[1].centre.yz; }
 fn land_range_2() -> vec2f { return meshes[2].centre.yz; }

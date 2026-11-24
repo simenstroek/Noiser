@@ -487,6 +487,7 @@ impl App {
         if mesh_tab || mesh_graph_arg.is_some() {
             app.workspace = meshworkspace::Workspace::Mesh;
         }
+        let landscape_from_arg = landscape_arg.is_some();
         if let Some(p) = landscape_arg {
             app.landscape.open_path(p);
             landscape_tab = true;
@@ -514,8 +515,9 @@ impl App {
             let path = cc.storage.and_then(|s| s.get_string(MESH_GRAPH_PATH_KEY)).filter(|p| !p.is_empty()).map(std::path::PathBuf::from);
             app.mesh_ws.restore(g, path);
         }
-        // The landscape as it was left.
-        if let Some(project) = cc.storage.and_then(|s| s.get_string(LANDSCAPE_PROJECT_KEY)) {
+        // The landscape as it was left (a project named on the command line wins).
+        if landscape_from_arg {
+        } else if let Some(project) = cc.storage.and_then(|s| s.get_string(LANDSCAPE_PROJECT_KEY)) {
             let _ = app.landscape.from_project(&project);
         } else if let Some(g) = cc.storage.and_then(|s| s.get_string(LANDSCAPE_GRAPH_KEY)).and_then(|s| Graph::from_json(&s).ok()) {
             let settings = cc.storage.and_then(|s| s.get_string(LANDSCAPE_SETTINGS_KEY)).and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();

@@ -29,12 +29,15 @@ pub struct Settings {
     pub height_m: f32,
     /// Stretch the graph's output to fill 0..`height_m` (otherwise the output times `height_m`, around 0).
     pub fit: bool,
+    /// The height of water (a river, a lake, the sea) in metres: drawn in the previews, written into the heightmap's sidecar and
+    /// the chunk manifest, and made into a water surface by the Unreal import script.
+    pub water_m: Option<f32>,
     pub erosion: crate::landscape_erosion::Erosion,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { seed: 0, world_m: 2000.0, height_m: 400.0, fit: true, erosion: Default::default() }
+        Settings { seed: 0, world_m: 2000.0, height_m: 400.0, fit: true, water_m: None, erosion: Default::default() }
     }
 }
 
@@ -135,6 +138,7 @@ pub struct UnrealHeights {
     pub centre_cm: f32,
     pub step_cm: f32,
     pub range_m: (f32, f32),
+    pub water_m: Option<f32>,
 }
 
 /// Unreal reads a height as `(v - 32768) / 128` units times the actor's Z scale (LandscapeDataAccess.h), so the scale is
@@ -146,7 +150,12 @@ pub fn encode_unreal(metres: &[f32]) -> UnrealHeights {
     let z_scale = span_cm / 512.0;
     let step_cm = z_scale / 128.0;
     let samples = metres.iter().map(|m| (32768.0 + (m * 100.0 - centre_cm) / step_cm).round().clamp(0.0, 65535.0) as u16).collect();
-    UnrealHeights { samples, z_scale, centre_cm, step_cm, range_m: (lo, hi) }
+    UnrealHeights { samples, z_scale, centre_cm, step_cm, range_m: (lo, hi), water_m: None }
+}
+
+/// `encode_unreal`, with the height of the water to write into the sidecar.
+pub fn encode_unreal_with(metres: &[f32], water_m: Option<f32>) -> UnrealHeights {
+    UnrealHeights { water_m, ..encode_unreal(metres) }
 }
 
 /// Writes `<path>` (16-bit grayscale PNG) and `<path>.json` with what to enter in Unreal's import dialog.
@@ -160,6 +169,7 @@ pub fn write_unreal(path: &Path, n: usize, world_m: f32, h: &UnrealHeights) -> R
         "size_m": world_m,
         "height_range_m": [h.range_m.0, h.range_m.1],
         "step_cm": h.step_cm,
+        "water_level_m": h.water_m,
         "unreal_import": {
             "location_cm": [0.0, 0.0, h.centre_cm],
             "scale": [xy, xy, h.z_scale],
@@ -171,7 +181,7 @@ pub fn write_unreal(path: &Path, n: usize, world_m: f32, h: &UnrealHeights) -> R
 }
 
 /// The terrain from a camera by ray marching the height grid: metres in, a picture out.
-fn render(metres: &[f32], n: usize, world_m: f32, (yaw, pitch, zoom): (f32, f32, f32), (w, h): (usize, usize)) -> egui::ColorImage {
+fn render(metres: &[f32], n: usize, world_m: f32, water: Option<f32>, (yaw, pitch, zoom): (f32, f32, f32), (w, h): (usize, usize)) -> egui::ColorImage {
     use rayon::prelude::*;
     let (lo, hi) = metres.iter().fold((f32::MAX, f32::MIN), |(lo, hi), v| (lo.min(*v), hi.max(*v)));
     let range = (hi - lo).max(1e-3);
@@ -182,6 +192,9 @@ fn render(metres: &[f32], n: usize, world_m: f32, (yaw, pitch, zoom): (f32, f32,
         let m = |i: usize, j: usize| metres[j * n + i];
         (m(i, j) * (1.0 - fx) + m(i + 1, j) * fx) * (1.0 - fy) + (m(i, j + 1) * (1.0 - fx) + m(i + 1, j + 1) * fx) * fy
     };
+    // Water: a flat surface at its level wherever the ground is below it.
+    let level = water.unwrap_or(f32::MIN);
+    let surface = |x: f32, y: f32| at(x, y).max(level);
     // Z is up. The camera orbits the middle of the terrain.
     let target = [world_m * 0.5, world_m * 0.5, (lo + hi) * 0.5];
     let dist = world_m * 1.3 / zoom.max(0.1);
@@ -212,16 +225,16 @@ fn render(metres: &[f32], n: usize, world_m: f32, (yaw, pitch, zoom): (f32, f32,
             while t < max_t {
                 let p = [eye[0] + d[0] * t, eye[1] + d[1] * t, eye[2] + d[2] * t];
                 if p[0] >= 0.0 && p[1] >= 0.0 && p[0] <= world_m && p[1] <= world_m {
-                    if p[2] < at(p[0], p[1]) {
+                    if p[2] < surface(p[0], p[1]) {
                         // Refine between the last two steps.
                         let (mut a, mut b) = (prev, t);
                         for _ in 0..5 {
                             let m = (a + b) * 0.5;
                             let q = [eye[0] + d[0] * m, eye[1] + d[1] * m, eye[2] + d[2] * m];
-                            if q[2] < at(q[0], q[1]) { b = m } else { a = m }
+                            if q[2] < surface(q[0], q[1]) { b = m } else { a = m }
                         }
                         let q = [eye[0] + d[0] * b, eye[1] + d[1] * b, eye[2] + d[2] * b];
-                        let (gx, gy) = ((at(q[0] + cell, q[1]) - at(q[0] - cell, q[1])) / (2.0 * cell), (at(q[0], q[1] + cell) - at(q[0], q[1] - cell)) / (2.0 * cell));
+                        let (gx, gy) = ((surface(q[0] + cell, q[1]) - surface(q[0] - cell, q[1])) / (2.0 * cell), (surface(q[0], q[1] + cell) - surface(q[0], q[1] - cell)) / (2.0 * cell));
                         let nrm = norm([-gx, -gy, 1.0]);
                         let diffuse = (nrm[0] * light[0] + nrm[1] * light[1] + nrm[2] * light[2]).max(0.0);
                         let height = ((q[2] - lo) / range).clamp(0.0, 1.0);
@@ -234,6 +247,7 @@ fn render(metres: &[f32], n: usize, world_m: f32, (yaw, pitch, zoom): (f32, f32,
                         let base = blend(low, snow, ((height - 0.78) * 8.0).clamp(0.0, 1.0));
                         let base = blend(base, rock, ((1.0 - nrm[2]) * 3.5 - 0.35).clamp(0.0, 1.0) * (1.0 - ((height - 0.78) * 8.0).clamp(0.0, 0.6)));
                         let shade = 0.25 + 0.85 * diffuse;
+                        let base = if at(q[0], q[1]) < level { [45.0, 95.0, 165.0] } else { base };
                         *out = egui::Color32::from_rgb((base[0] * shade).min(255.0) as u8, (base[1] * shade).min(255.0) as u8, (base[2] * shade).min(255.0) as u8);
                         break;
                     }
@@ -258,7 +272,7 @@ pub(crate) fn build_evaluator(device: &eframe::wgpu::Device, queue: &eframe::wgp
 }
 
 /// The map: the terrain from above, lit from the north-west (`m` x `m` metres, `world_m` across).
-fn hillshade(metres: &[f32], m: usize, world_m: f32) -> egui::ColorImage {
+fn hillshade(metres: &[f32], m: usize, world_m: f32, water: Option<f32>) -> egui::ColorImage {
     let cell = world_m / (m - 1) as f32;
     let (lo, hi) = metres.iter().fold((f32::MAX, f32::MIN), |(lo, hi), v| (lo.min(*v), hi.max(*v)));
     let at = |x: usize, y: usize| metres[y.min(m - 1) * m + x.min(m - 1)];
@@ -269,6 +283,9 @@ fn hillshade(metres: &[f32], m: usize, world_m: f32) -> egui::ColorImage {
             let shade = ((dx * 0.5 + dy * 0.5 + 0.7) / (dx * dx + dy * dy + 1.0).sqrt()).clamp(0.0, 1.0);
             let h = ((at(x, y) - lo) / (hi - lo).max(1e-3)).clamp(0.0, 1.0);
             let v = (60.0 + 150.0 * shade) * (0.75 + 0.25 * h);
+            if water.is_some_and(|w| at(x, y) < w) {
+                return egui::Color32::from_rgb((v * 0.3) as u8, (v * 0.55) as u8, (v * 0.95) as u8);
+            }
             egui::Color32::from_rgb(v as u8, (v * 0.97) as u8, (v * 0.9) as u8)
         })
         .collect();
@@ -351,11 +368,11 @@ impl LandscapeWorkspace {
                     let n = side(e.len());
                     let step = 1.0 / (UNREAL_RES - 1) as f32;
                     let metres: Vec<f32> = (0..UNREAL_RES * UNREAL_RES).map(|k| bilinear(&e, n, (k % UNREAL_RES) as f32 * step, (k / UNREAL_RES) as f32 * step)).collect();
-                    write_unreal(&path, UNREAL_RES, s.world_m, &encode_unreal(&metres))
+                    write_unreal(&path, UNREAL_RES, s.world_m, &encode_unreal_with(&metres, s.water_m))
                 }
                 None => build_evaluator(&device, &queue, &graph, &s, &masks, &base).and_then(|ev| {
                     let metres = to_metres(&sample(&ev, UNREAL_RES, &p), &s);
-                    write_unreal(&path, UNREAL_RES, s.world_m, &encode_unreal(&metres))
+                    write_unreal(&path, UNREAL_RES, s.world_m, &encode_unreal_with(&metres, s.water_m))
                 }),
             };
             let _ = tx.send(r);
@@ -480,6 +497,10 @@ fn action(ui: &mut egui::Ui, icon: &str, text: &str, tint: egui::Color32, enable
     ui.add_enabled(enabled, egui::Button::image_and_text(crate::icons::image(icon, 16.0, tint), text))
 }
 
+fn ls_default_water() -> f32 {
+    5.0
+}
+
 /// The 3D / Map switch in the corner of the top view (drawn last so nothing covers it).
 fn view_toggle(ui: &mut egui::Ui, rect: egui::Rect, map_mode: &mut bool) {
     ui.put(egui::Rect::from_min_size(rect.min + egui::vec2(8.0, 6.0), egui::vec2(60.0, 26.0)), |ui: &mut egui::Ui| {
@@ -513,7 +534,7 @@ impl LandscapeWorkspace {
                     _ => to_metres(values, settings),
                 };
                 let (grid, m) = shrink(&metres, side_of(metres.len()), 512);
-                self.map_picture = Some((key, ctx.load_texture("landscape map", hillshade(&grid, m, settings.world_m), egui::TextureOptions::LINEAR)));
+                self.map_picture = Some((key, ctx.load_texture("landscape map", hillshade(&grid, m, settings.world_m, settings.water_m), egui::TextureOptions::LINEAR)));
             }
             if let Some((_, tex)) = &self.map_picture {
                 ui.painter().image(tex.id(), map, whole, egui::Color32::WHITE);
@@ -670,6 +691,17 @@ impl crate::App {
             crate::row(ui, &mut ls.settings.seed, d.seed, |ui, v| _ = ui.add(egui::DragValue::new(v).prefix("seed ")));
             crate::row(ui, &mut ls.settings.world_m, d.world_m, |ui, v| _ = ui.add(egui::DragValue::new(v).range(10.0..=100000.0).speed(10.0).prefix("size ").suffix(" m")).on_hover_text("Side of the square terrain."));
             crate::row(ui, &mut ls.settings.height_m, d.height_m, |ui, v| _ = ui.add(egui::DragValue::new(v).range(1.0..=20000.0).speed(1.0).prefix("height ").suffix(" m")));
+            crate::row(ui, &mut ls.settings.water_m, d.water_m, |ui, v| {
+                ui.horizontal(|ui| {
+                    let mut on = v.is_some();
+                    if ui.checkbox(&mut on, "water at").on_hover_text("A river, lake or sea: the ground below this height is water. It is drawn blue here and in the map, and the Unreal import script lays a water surface at this height.").changed() {
+                        *v = on.then_some(ls_default_water());
+                    }
+                    if let Some(w) = v {
+                        ui.add(egui::DragValue::new(w).speed(0.1).suffix(" m"));
+                    }
+                });
+            });
             crate::row(ui, &mut ls.settings.fit, d.fit, |ui, v| _ = ui.checkbox(v, "fit the height range").on_hover_text("On: the lowest point is 0 and the highest is the height. Off: the graph's output times the height, around 0."));
             ui.weak("The terrain is one tile of the graph (x and y from 0 to 1) with the density output as height, so any noise graph works. Tiling graphs make a terrain whose edges match.");
             if action(ui, "export", "Export heightmap for Unreal…", TERRAIN, !running && ls.values.is_some()).on_hover_text(format!("A 16-bit PNG at {UNREAL_RES} x {UNREAL_RES} (a valid landscape size) and a .json with the import settings.")).clicked()
@@ -924,7 +956,7 @@ impl crate::App {
                         _ => to_metres(values, &settings),
                     };
                     let (grid, m) = shrink(&metres, side(metres.len()), 513);
-                    let image = render(&grid, m, settings.world_m, new_view, (w, h));
+                    let image = render(&grid, m, settings.world_m, settings.water_m, new_view, (w, h));
                     ls.picture = Some((picture_key, ctx.load_texture("landscape view", image, egui::TextureOptions::LINEAR)));
                 }
                 if let Some((_, tex)) = &ls.picture {
@@ -970,7 +1002,7 @@ pub fn export_headless(project: &Path, out: &Path, erode: bool, log: &mut dyn Fn
     } else {
         to_metres(&sample(&ev, UNREAL_RES, &progress), &s)
     };
-    write_unreal(out, UNREAL_RES, s.world_m, &encode_unreal(&metres))
+    write_unreal(out, UNREAL_RES, s.world_m, &encode_unreal_with(&metres, s.water_m))
 }
 
 #[cfg(test)]
@@ -1032,6 +1064,15 @@ mod tests {
         for name in ["height", "masks", "erosion", "chunks", "graph", "map", "view_3d", "brush", "eraser", "smooth", "blur", "invert", "fill", "clear_mask", "play", "delete", "add", "export", "open", "save", "new", "landscape", "mesh_graph"] {
             assert!(crate::icons::source(name).is_some(), "no icon called {name}");
         }
+    }
+
+    #[test]
+    fn the_eiffel_project_in_the_library_opens() {
+        let path = std::path::Path::new("H:/My Drive/NoiserLibrary/Terrains/EiffelLandscape.landscape");
+        let Ok(text) = std::fs::read_to_string(path) else { return };
+        let mut ls = LandscapeWorkspace::default();
+        ls.from_project(&text).unwrap();
+        assert_eq!((ls.settings.world_m, ls.settings.water_m, ls.masks.len()), (2000.0, Some(6.5), 3));
     }
 
     #[test]
