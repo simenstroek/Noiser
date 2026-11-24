@@ -15,8 +15,6 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::sync::mpsc;
 
-/// Samples across the preview grid.
-const PREVIEW_RES: usize = 257;
 /// Samples across an Unreal landscape export: 64 components of 63 quads, plus one (a valid landscape size).
 pub const UNREAL_RES: usize = 4033;
 
@@ -30,11 +28,12 @@ pub struct Settings {
     pub height_m: f32,
     /// Stretch the graph's output to fill 0..`height_m` (otherwise the output times `height_m`, around 0).
     pub fit: bool,
+    pub erosion: crate::landscape_erosion::Erosion,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { seed: 0, world_m: 2000.0, height_m: 400.0, fit: true }
+        Settings { seed: 0, world_m: 2000.0, height_m: 400.0, fit: true, erosion: Default::default() }
     }
 }
 
@@ -52,7 +51,7 @@ pub fn default_graph() -> Graph {
 /// The graph's output over an `n` x `n` grid across the tile (both edges included), rows along y, x fastest.
 pub fn sample(ev: &Evaluator, n: usize, progress: &Progress) -> Vec<f32> {
     let mut out = Vec::with_capacity(n * n);
-    let rows_per_call = (262_144 / n).max(1);
+    let rows_per_call = (262_000 / n).max(1);
     let step = 1.0 / (n - 1).max(1) as f32;
     let mut y = 0;
     while y < n {
@@ -63,6 +62,29 @@ pub fn sample(ev: &Evaluator, n: usize, progress: &Progress) -> Vec<f32> {
         progress.store((y * 1000 / n) as u32, Ordering::Relaxed);
     }
     out
+}
+
+/// The side of a square grid with `len` values.
+fn side(len: usize) -> usize {
+    (len as f64).sqrt().round() as usize
+}
+
+/// A grid value (`n` x `n`, rows along y) at `x`, `y` across the terrain (0 to 1), by bilinear interpolation.
+pub fn bilinear(grid: &[f32], n: usize, x: f32, y: f32) -> f32 {
+    let top = (n - 1) as f32 - 1e-3;
+    let (gx, gy) = ((x * (n - 1) as f32).clamp(0.0, top.max(0.0)), (y * (n - 1) as f32).clamp(0.0, top.max(0.0)));
+    let (i, j, fx, fy) = (gx as usize, gy as usize, gx.fract(), gy.fract());
+    let (i1, j1) = ((i + 1).min(n - 1), (j + 1).min(n - 1));
+    (grid[j * n + i] * (1.0 - fx) + grid[j * n + i1] * fx) * (1.0 - fy) + (grid[j1 * n + i] * (1.0 - fx) + grid[j1 * n + i1] * fx) * fy
+}
+
+/// The grid as an `m` x `m` one, `m` at most `max`, for drawing.
+fn shrink(grid: &[f32], n: usize, max: usize) -> (Vec<f32>, usize) {
+    let m = n.min(max);
+    if m == n {
+        return (grid.to_vec(), n);
+    }
+    (((0..m * m).map(|k| bilinear(grid, n, (k % m) as f32 / (m - 1) as f32, (k / m) as f32 / (m - 1) as f32))).collect(), m)
 }
 
 /// How the graph's values become heights in metres: `value * k + offset`.
@@ -214,9 +236,19 @@ fn render(metres: &[f32], n: usize, world_m: f32, (yaw, pitch, zoom): (f32, f32,
     egui::ColorImage { size: [w, h], source_size: egui::vec2(w as f32, h as f32), pixels }
 }
 
+/// What a finished job hands back.
+enum Done {
+    Values(Vec<f32>),
+    Eroded(Vec<f32>, u64),
+    Message(String),
+}
+
 /// A background job: sampling the graph (preview or export) and what to do with the result.
 enum Job {
+    /// The graph's values on the working grid.
     Preview(mpsc::Receiver<Result<Vec<f32>, String>>),
+    /// The eroded heights, and the key (see `erosion_key`) they belong to.
+    Erode(mpsc::Receiver<Result<Vec<f32>, String>>, Progress, u64),
     Export(mpsc::Receiver<Result<String, String>>, Progress),
     /// The chunk export, with its log.
     Chunks(mpsc::Receiver<Result<String, String>>, Progress, std::sync::Arc<std::sync::Mutex<Vec<String>>>),
@@ -227,9 +259,11 @@ pub struct LandscapeWorkspace {
     pub editor: Editor,
     pub path: Option<PathBuf>,
     pub settings: Settings,
-    /// The graph's values on the preview grid, and the key (graph + seed) they were sampled for.
+    /// The graph's values on the working grid, and the key (graph, seed, resolution) they were sampled for.
     values: Option<Vec<f32>>,
     sampled_key: Option<u64>,
+    /// The eroded heights in metres and the key of everything they were made from; out of date when it differs.
+    eroded: Option<(u64, Vec<f32>)>,
     job: Option<Job>,
     status: String,
     pub chunks: crate::landscape_chunks::Options,
@@ -240,7 +274,7 @@ pub struct LandscapeWorkspace {
 
 impl Default for LandscapeWorkspace {
     fn default() -> Self {
-        LandscapeWorkspace { graph: default_graph(), editor: Editor::default(), path: None, settings: Settings::default(), values: None, sampled_key: None, job: None, status: String::new(), chunks: Default::default(), chunk_log: Vec::new(), view: (0.8, 0.6, 1.0), picture: None }
+        LandscapeWorkspace { graph: default_graph(), editor: Editor::default(), path: None, settings: Settings::default(), values: None, sampled_key: None, eroded: None, job: None, status: String::new(), chunks: Default::default(), chunk_log: Vec::new(), view: (0.8, 0.6, 1.0), picture: None }
     }
 }
 
@@ -249,10 +283,24 @@ impl LandscapeWorkspace {
         (self.graph, self.settings, self.path) = (graph, settings, path);
     }
 
+    /// What the sampled values depend on: the graph, the seed and the working resolution.
     fn key(&self) -> u64 {
         let mut h = std::collections::hash_map::DefaultHasher::new();
-        (self.graph.to_json(), self.settings.seed).hash(&mut h);
+        (self.graph.to_json(), self.settings.seed, self.settings.erosion.resolution).hash(&mut h);
         h.finish()
+    }
+
+    /// What eroded heights depend on: the sampled values, how they become metres, and the erosion settings.
+    fn erosion_key(&self) -> u64 {
+        let s = &self.settings;
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        (self.key(), s.world_m.to_bits(), s.height_m.to_bits(), s.fit, serde_json::to_string(&s.erosion).unwrap_or_default()).hash(&mut h);
+        h.finish()
+    }
+
+    /// The eroded heights when they are up to date.
+    fn current_eroded(&self) -> Option<&Vec<f32>> {
+        self.eroded.as_ref().filter(|(k, _)| *k == self.erosion_key()).map(|(_, e)| e)
     }
 
     fn open(&mut self) {
@@ -288,20 +336,25 @@ impl crate::App {
         let mut finished = None;
         match &ls.job {
             Some(Job::Preview(rx)) => match rx.try_recv() {
-                Ok(r) => finished = Some(r.map(Some).map(|v| (v, None))),
+                Ok(r) => finished = Some(r.map(Done::Values)),
                 Err(mpsc::TryRecvError::Empty) => ctx.request_repaint_after(std::time::Duration::from_millis(100)),
                 Err(mpsc::TryRecvError::Disconnected) => finished = Some(Err("the sampler stopped unexpectedly".into())),
+            },
+            Some(Job::Erode(rx, _, key)) => match rx.try_recv() {
+                Ok(r) => finished = Some(r.map(|e| Done::Eroded(e, *key))),
+                Err(mpsc::TryRecvError::Empty) => ctx.request_repaint_after(std::time::Duration::from_millis(100)),
+                Err(mpsc::TryRecvError::Disconnected) => finished = Some(Err("the erosion stopped unexpectedly".into())),
             },
             Some(Job::Chunks(rx, _, log)) => {
                 ls.chunk_log = log.lock().unwrap().clone();
                 match rx.try_recv() {
-                    Ok(r) => finished = Some(r.map(|m| (None, Some(m)))),
+                    Ok(r) => finished = Some(r.map(Done::Message)),
                     Err(mpsc::TryRecvError::Empty) => ctx.request_repaint_after(std::time::Duration::from_millis(200)),
                     Err(mpsc::TryRecvError::Disconnected) => finished = Some(Err("the chunk export stopped unexpectedly".into())),
                 }
             }
             Some(Job::Export(rx, _)) => match rx.try_recv() {
-                Ok(r) => finished = Some(r.map(|m| (None, Some(m)))),
+                Ok(r) => finished = Some(r.map(Done::Message)),
                 Err(mpsc::TryRecvError::Empty) => ctx.request_repaint_after(std::time::Duration::from_millis(100)),
                 Err(mpsc::TryRecvError::Disconnected) => finished = Some(Err("the export stopped unexpectedly".into())),
             },
@@ -310,14 +363,12 @@ impl crate::App {
         if let Some(r) = finished {
             ls.job = None;
             match r {
-                Ok((values, message)) => {
-                    if values.is_some() {
-                        ls.values = values;
-                    }
-                    if let Some(m) = message {
-                        ls.status = m;
-                    }
+                Ok(Done::Values(v)) => ls.values = Some(v),
+                Ok(Done::Eroded(e, key)) => {
+                    ls.eroded = Some((key, e));
+                    ls.status = "Erosion done".into();
                 }
+                Ok(Done::Message(m)) => ls.status = m,
                 Err(e) => {
                     ls.status = e;
                     ls.values = None;
@@ -328,10 +379,10 @@ impl crate::App {
         let key = ls.key();
         if ls.job.is_none() && ls.sampled_key != Some(key) {
             ls.sampled_key = Some(key);
-            let (graph, seed) = (ls.graph.clone(), ls.settings.seed);
+            let (graph, seed, resolution) = (ls.graph.clone(), ls.settings.seed, ls.settings.erosion.resolution);
             let (tx, rx) = mpsc::channel();
             std::thread::spawn(move || {
-                let r = Evaluator::new(&device, &queue, &graph, seed).map(|ev| sample(&ev, PREVIEW_RES, &Progress::default()));
+                let r = Evaluator::new(&device, &queue, &graph, seed).map(|ev| sample(&ev, resolution, &Progress::default()));
                 let _ = tx.send(r);
             });
             ls.job = Some(Job::Preview(rx));
@@ -359,19 +410,29 @@ impl crate::App {
             crate::row(ui, &mut ls.settings.height_m, d.height_m, |ui, v| _ = ui.add(egui::DragValue::new(v).range(1.0..=20000.0).speed(1.0).prefix("height ").suffix(" m")));
             crate::row(ui, &mut ls.settings.fit, d.fit, |ui, v| _ = ui.checkbox(v, "fit the height range").on_hover_text("On: the lowest point is 0 and the highest is the height. Off: the graph's output times the height, around 0."));
             ui.weak("The terrain is one tile of the graph (x and y from 0 to 1) with the density output as height, so any noise graph works. Tiling graphs make a terrain whose edges match.");
-            let running = matches!(ls.job, Some(Job::Export(..) | Job::Chunks(..)));
+            let running = matches!(ls.job, Some(Job::Export(..) | Job::Chunks(..) | Job::Erode(..)));
             if ui.add_enabled(!running && ls.values.is_some(), egui::Button::new("Export heightmap for Unreal…")).on_hover_text(format!("A 16-bit PNG at {UNREAL_RES} x {UNREAL_RES} (a valid landscape size) and a .json with the import settings.")).clicked()
                 && let Some(path) = rfd::FileDialog::new().add_filter("16-bit PNG", &["png"]).set_file_name("heightmap.png").save_file() {
                 let (graph, s) = (ls.graph.clone(), ls.settings.clone());
+                let eroded = ls.current_eroded().cloned();
                 let (tx, rx) = mpsc::channel();
                 let progress = Progress::default();
                 let p = progress.clone();
                 let (device, queue) = (device.clone(), queue.clone());
                 std::thread::spawn(move || {
-                    let r = Evaluator::new(&device, &queue, &graph, s.seed).and_then(|ev| {
-                        let metres = to_metres(&sample(&ev, UNREAL_RES, &p), &s);
-                        write_unreal(&path, UNREAL_RES, s.world_m, &encode_unreal(&metres))
-                    });
+                    let r = match eroded {
+                        // The eroded grid, resampled to the landscape size.
+                        Some(e) => {
+                            let n = side(e.len());
+                            let step = 1.0 / (UNREAL_RES - 1) as f32;
+                            let metres: Vec<f32> = (0..UNREAL_RES * UNREAL_RES).map(|k| bilinear(&e, n, (k % UNREAL_RES) as f32 * step, (k / UNREAL_RES) as f32 * step)).collect();
+                            write_unreal(&path, UNREAL_RES, s.world_m, &encode_unreal(&metres))
+                        }
+                        None => Evaluator::new(&device, &queue, &graph, s.seed).and_then(|ev| {
+                            let metres = to_metres(&sample(&ev, UNREAL_RES, &p), &s);
+                            write_unreal(&path, UNREAL_RES, s.world_m, &encode_unreal(&metres))
+                        }),
+                    };
                     let _ = tx.send(r);
                 });
                 ls.job = Some(Job::Export(rx, progress));
@@ -383,6 +444,54 @@ impl crate::App {
             if let Some(Job::Chunks(_, p, _)) = &ls.job {
                 ui.add(egui::ProgressBar::new(p.load(Ordering::Relaxed) as f32 / 1000.0).show_percentage());
             }
+            egui::CollapsingHeader::new("Erosion").default_open(true).show(ui, |ui| {
+                let d = crate::landscape_erosion::Erosion::default();
+                let max = crate::landscape_erosion::max_resolution(&device);
+                let up_to_date = ls.current_eroded().is_some();
+                let e = &mut ls.settings.erosion;
+                crate::row(ui, &mut e.resolution, d.resolution, |ui, v| {
+                    for r in crate::landscape_erosion::RESOLUTIONS.into_iter().filter(|r| *r <= max) {
+                        ui.selectable_value(v, r, format!("{r}"));
+                    }
+                });
+                crate::row(ui, &mut e.iterations, d.iterations, |ui, v| _ = ui.add(egui::DragValue::new(v).range(0..=20000).speed(10.0).prefix("iterations ")));
+                crate::row(ui, &mut e.rain, d.rain, |ui, v| _ = ui.add(egui::DragValue::new(v).range(0.0..=1.0).speed(0.001).prefix("rain ").suffix(" m/s")));
+                crate::row(ui, &mut e.capacity, d.capacity, |ui, v| _ = ui.add(egui::DragValue::new(v).range(0.0..=1.0).speed(0.001).prefix("capacity ")).on_hover_text("How much sediment fast water on a slope can carry: more means deeper channels."));
+                crate::row(ui, &mut e.dissolve, d.dissolve, |ui, v| _ = ui.add(egui::DragValue::new(v).range(0.0..=1.0).speed(0.005).prefix("dissolve ")).on_hover_text("How quickly water picks sediment up."));
+                crate::row(ui, &mut e.deposit, d.deposit, |ui, v| _ = ui.add(egui::DragValue::new(v).range(0.0..=1.0).speed(0.005).prefix("deposit ")).on_hover_text("How quickly water drops sediment."));
+                crate::row(ui, &mut e.evaporation, d.evaporation, |ui, v| _ = ui.add(egui::DragValue::new(v).range(0.0..=1.0).speed(0.001).prefix("evaporation ")));
+                crate::row(ui, &mut e.thermal_iterations, d.thermal_iterations, |ui, v| _ = ui.add(egui::DragValue::new(v).range(0..=5000).speed(1.0).prefix("thermal iterations ")));
+                crate::row(ui, &mut e.talus_deg, d.talus_deg, |ui, v| _ = ui.add(egui::DragValue::new(v).range(1.0..=89.0).speed(0.5).prefix("repose ").suffix(" deg")));
+                ui.horizontal(|ui| {
+                    if ui.add_enabled(!running && ls.values.is_some(), egui::Button::new("Run erosion")).on_hover_text("Erodes the terrain at the working resolution. The preview and both exports use the result until the graph or a setting changes.").clicked() {
+                        let s = ls.settings.clone();
+                        let values = ls.values.clone().unwrap_or_default();
+                        let (n, key) = (side(values.len()), ls.erosion_key());
+                        let metres = to_metres(&values, &s);
+                        let cell = s.world_m / (n.max(2) - 1) as f32;
+                        let (tx, rx) = mpsc::channel();
+                        let progress = Progress::default();
+                        let p = progress.clone();
+                        let (device, queue) = (device.clone(), queue.clone());
+                        std::thread::spawn(move || {
+                            let _ = tx.send(crate::landscape_erosion::erode(&device, &queue, &metres, n, cell, &s.erosion, &p));
+                        });
+                        ls.job = Some(Job::Erode(rx, progress, key));
+                        ls.status = "Eroding...".into();
+                    }
+                    if ui.add_enabled(ls.eroded.is_some(), egui::Button::new("Clear")).clicked() {
+                        ls.eroded = None;
+                    }
+                });
+                if let Some(Job::Erode(_, p, _)) = &ls.job {
+                    ui.add(egui::ProgressBar::new(p.load(Ordering::Relaxed) as f32 / 1000.0).show_percentage());
+                }
+                ui.weak(match (ls.eroded.is_some(), up_to_date) {
+                    (true, true) => "Eroded: the preview and the exports use it.",
+                    (true, false) => "Out of date: the graph or a setting changed. Run again, or the exports use the plain graph.",
+                    _ => "Not eroded. The working resolution is the grid the preview and the erosion use.",
+                });
+            });
             egui::CollapsingHeader::new("Nanite chunks").default_open(true).show(ui, |ui| {
                 let d = crate::landscape_chunks::Options::default();
                 let o = &mut ls.chunks;
@@ -414,12 +523,16 @@ impl crate::App {
                 ui.weak(format!("{0} x {0} chunks of {1} m, {2} x {2} quads (about {3} triangles) each; tiles 1001 to {4}.", plan.chunks, plan.chunk_m, plan.quads, 2 * plan.quads * plan.quads, crate::udim::udim(plan.chunks * plan.chunks - 1)));
                 if ui.add_enabled(!running && !o.folder.is_empty(), egui::Button::new("Export chunks")).on_hover_text("Writes every chunk's mesh (centimetres, the chunk's corner at its origin), its normal, occlusion and curvature maps, and a manifest with each chunk's location.").clicked() {
                     let (graph, s, opts) = (ls.graph.clone(), ls.settings.clone(), o.clone());
+                    let eroded = ls.current_eroded().cloned();
                     let (tx, rx) = mpsc::channel();
                     let (progress, log) = (Progress::default(), std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new())));
                     let (p, l) = (progress.clone(), log.clone());
                     let (device, queue) = (device.clone(), queue.clone());
                     std::thread::spawn(move || {
-                        let r = Evaluator::new(&device, &queue, &graph, s.seed).and_then(|ev| crate::landscape_chunks::export(&ev, &s, &opts, &p, &mut |m| l.lock().unwrap().push(m.to_string())));
+                        let r = Evaluator::new(&device, &queue, &graph, s.seed).and_then(|ev| {
+                            let grid = eroded.as_ref().map(|e| (e.as_slice(), side(e.len())));
+                            crate::landscape_chunks::export(&ev, grid, &s, &opts, &p, &mut |m| l.lock().unwrap().push(m.to_string()))
+                        });
                         let _ = tx.send(r);
                     });
                     ls.job = Some(Job::Chunks(rx, progress, log));
@@ -460,12 +573,18 @@ impl crate::App {
             }
             if let Some(values) = &ls.values {
                 let (w, h) = (((rect.width() * 0.6) as usize).clamp(64, 900), ((rect.height() * 0.6) as usize).clamp(48, 600));
+                let eroded_key = ls.eroded.as_ref().map(|(k, _)| *k).filter(|k| *k == ls.erosion_key());
                 let mut hasher = std::collections::hash_map::DefaultHasher::new();
-                (ls.sampled_key, settings.world_m.to_bits(), settings.height_m.to_bits(), settings.fit, new_view.0.to_bits(), new_view.1.to_bits(), new_view.2.to_bits(), w, h).hash(&mut hasher);
+                (ls.sampled_key, eroded_key, settings.world_m.to_bits(), settings.height_m.to_bits(), settings.fit, new_view.0.to_bits(), new_view.1.to_bits(), new_view.2.to_bits(), w, h).hash(&mut hasher);
                 let picture_key = hasher.finish();
                 if ls.picture.as_ref().is_none_or(|(k, _)| *k != picture_key) {
-                    let metres = to_metres(values, &settings);
-                    let image = render(&metres, PREVIEW_RES, settings.world_m, new_view, (w, h));
+                    // The eroded terrain when it is up to date, otherwise the graph's; drawn from at most 513 x 513 samples.
+                    let metres = match (&ls.eroded, eroded_key) {
+                        (Some((_, e)), Some(_)) => e.clone(),
+                        _ => to_metres(values, &settings),
+                    };
+                    let (grid, m) = shrink(&metres, side(metres.len()), 513);
+                    let image = render(&grid, m, settings.world_m, new_view, (w, h));
                     ls.picture = Some((picture_key, ctx.load_texture("landscape view", image, egui::TextureOptions::LINEAR)));
                 }
                 if let Some((_, tex)) = &ls.picture {

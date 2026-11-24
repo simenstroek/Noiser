@@ -2863,7 +2863,7 @@ fn the_landscape_exports_chunks_with_maps_a_manifest_and_a_udim_pack() {
     let s = crate::landscape::Settings { world_m: 400.0, ..Default::default() };
     let o = crate::landscape_chunks::Options { name: "Terrain".into(), folder: dir.display().to_string(), chunk_m: 200.0, budget: 2000, tex: 64, ao_m: 8.0, glb: false, ..Default::default() };
     let mut log = Vec::new();
-    crate::landscape_chunks::export(&ev, &s, &o, &Default::default(), &mut |m| log.push(m.to_string())).unwrap();
+    crate::landscape_chunks::export(&ev, None, &s, &o, &Default::default(), &mut |m| log.push(m.to_string())).unwrap();
     for stem in ["Terrain_00_00", "Terrain_00_01", "Terrain_01_00", "Terrain_01_01"] {
         assert!(dir.join(format!("{stem}.obj")).exists(), "{stem} mesh");
         for map in ["normal_base", "ambient_occlusion", "curvature"] {
@@ -2887,6 +2887,75 @@ fn landscape_chunks_at_full_size() {
     let ev = crate::export::Evaluator::new(&gpu.device, &gpu.queue, &crate::landscape::default_graph(), 0).unwrap();
     let o = crate::landscape_chunks::Options { folder: dir.display().to_string(), ..Default::default() };
     let t0 = std::time::Instant::now();
-    crate::landscape_chunks::export(&ev, &crate::landscape::Settings::default(), &o, &Default::default(), &mut |m| eprintln!("{:>6.1} s  {m}", t0.elapsed().as_secs_f32())).unwrap();
+    crate::landscape_chunks::export(&ev, None, &crate::landscape::Settings::default(), &o, &Default::default(), &mut |m| eprintln!("{:>6.1} s  {m}", t0.elapsed().as_secs_f32())).unwrap();
     eprintln!("total {:.1} s, folder {}", t0.elapsed().as_secs_f32(), dir.display());
+}
+
+/// A smooth hilly grid in metres for the erosion tests: a slope with bumps.
+fn hilly(n: usize) -> Vec<f32> {
+    (0..n * n).map(|k| {
+        let (x, y) = ((k % n) as f32 / n as f32, (k / n) as f32 / n as f32);
+        60.0 * (1.0 - y) + 25.0 * (x * 12.0).sin() * (y * 9.0).cos() + 10.0 * (x * 31.0 + y * 17.0).sin()
+    }).collect()
+}
+
+#[test]
+fn erosion_keeps_the_ground_and_changes_the_shape() {
+    use crate::landscape_erosion::{erode, Erosion};
+    let Some(gpu) = gpu() else { return eprintln!("no GPU adapter; skipping") };
+    let n = 128;
+    let before = hilly(n);
+    let e = Erosion { iterations: 150, thermal_iterations: 10, ..Default::default() };
+    let after = erode(&gpu.device, &gpu.queue, &before, n, 4.0, &e, &Default::default()).unwrap();
+    let mean = |v: &[f32]| v.iter().sum::<f32>() / v.len() as f32;
+    assert!((mean(&after) - mean(&before)).abs() < 0.5, "the ground is moved, not made or lost: {} -> {}", mean(&before), mean(&after));
+    let changed = before.iter().zip(&after).filter(|(a, b)| (*a - *b).abs() > 0.01).count();
+    assert!(changed > n * n / 4, "{changed} cells changed");
+    assert!(after.iter().all(|v| v.is_finite()), "finite heights");
+    // The same input erodes the same way.
+    let again = erode(&gpu.device, &gpu.queue, &before, n, 4.0, &e, &Default::default()).unwrap();
+    assert_eq!(after, again);
+    // No iterations leave the grid alone.
+    let none = erode(&gpu.device, &gpu.queue, &before, n, 4.0, &Erosion { iterations: 0, thermal_iterations: 0, ..e }, &Default::default()).unwrap();
+    assert_eq!(none, before);
+}
+
+#[test]
+#[ignore = "writes target/erosion_before.png and erosion_after.png: a visual check of the erosion defaults"]
+fn erosion_pictures() {
+    use crate::landscape_erosion::{erode, Erosion};
+    let Some(gpu) = gpu() else { return };
+    let mut graph = crate::landscape::default_graph();
+    for node in graph.nodes.values_mut() {
+        if let NodeKind::Noise(p) = &mut node.kind {
+            (p.scale, p.octaves, p.roughness) = (2.0, 5, 0.4);
+        }
+    }
+    let ev = crate::export::Evaluator::new(&gpu.device, &gpu.queue, &graph, 0).unwrap();
+    let n: usize = std::env::var("EROSION_N").ok().and_then(|v| v.parse().ok()).unwrap_or(1024);
+    let s = crate::landscape::Settings::default();
+    let values = crate::landscape::sample(&ev, n, &Default::default());
+    let metres = crate::landscape::to_metres(&values, &s);
+    let cell = s.world_m / (n - 1) as f32;
+    let mut e = Erosion { resolution: n, ..Default::default() };
+    if let Ok(v) = std::env::var("EROSION_ITERS") { e.iterations = v.parse().unwrap(); }
+    if let Ok(v) = std::env::var("EROSION_CAP") { e.capacity = v.parse().unwrap(); }
+    if let Ok(v) = std::env::var("EROSION_RAIN") { e.rain = v.parse().unwrap(); }
+    if let Ok(v) = std::env::var("EROSION_KS") { (e.dissolve, e.deposit) = (v.parse().unwrap(), v.parse().unwrap()); }
+    let t0 = std::time::Instant::now();
+    let after = erode(&gpu.device, &gpu.queue, &metres, n, cell, &e, &Default::default()).unwrap();
+    eprintln!("RES erosion {:.1} s, mean abs change {:.3} m", t0.elapsed().as_secs_f32(), metres.iter().zip(&after).map(|(a, b)| (a - b).abs()).sum::<f32>() / (n * n) as f32);
+    for (name, h) in [("before", &metres), ("after", &after)] {
+        // Hillshade with a light from the north-west.
+        let mut img = image::GrayImage::new(n as u32, n as u32);
+        for y in 1..n - 1 {
+            for x in 1..n - 1 {
+                let (dx, dy) = ((h[y * n + x + 1] - h[y * n + x - 1]) / (2.0 * cell), (h[(y + 1) * n + x] - h[(y - 1) * n + x]) / (2.0 * cell));
+                let l = (dx * dx + dy * dy + 1.0).sqrt();
+                let shade = ((-dx * -0.5 + -dy * 0.5 + 0.7) / l).clamp(0.0, 1.0);
+                img.put_pixel(x as u32, y as u32, image::Luma([(shade * 255.0) as u8]));
+            }
+        }
+        img.save(format!("target/erosion_{name}.png")).unwrap();
+    }
 }

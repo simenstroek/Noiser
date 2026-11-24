@@ -62,7 +62,7 @@ pub fn plan(world_m: f32, chunk_m: f32, budget: usize) -> Plan {
 /// Samples a `cols` x `rows` block of points, `coord(col, row)` giving each point (about 262,144 points per call).
 fn grid(sampler: Sampler, cols: usize, rows: usize, coord: impl Fn(usize, usize) -> [f32; 3]) -> Vec<f32> {
     let mut out = Vec::with_capacity(cols * rows);
-    let per_call = (262_144 / cols).max(1);
+    let per_call = (262_000 / cols).max(1);
     let mut r = 0;
     while r < rows {
         let n = per_call.min(rows - r);
@@ -170,7 +170,8 @@ pub fn chunk_maps(sampler: Sampler, world_m: f32, p: &Plan, cx: usize, cy: usize
 }
 
 /// Writes every chunk, the manifest, and optionally the UDIM pack. `log` gets one line per step.
-pub fn export(ev: &Evaluator, s: &Settings, o: &Options, progress: &Progress, log: &mut dyn FnMut(&str)) -> Result<String, String> {
+/// `grid` is eroded terrain (metres, `n` x `n`) to cut instead of the graph itself.
+pub fn export(ev: &Evaluator, grid: Option<(&[f32], usize)>, s: &Settings, o: &Options, progress: &Progress, log: &mut dyn FnMut(&str)) -> Result<String, String> {
     if o.folder.is_empty() {
         return Err("choose a folder".into());
     }
@@ -182,10 +183,21 @@ pub fn export(ev: &Evaluator, s: &Settings, o: &Options, progress: &Progress, lo
     std::fs::create_dir_all(&folder).map_err(|e| format!("{}: {e}", folder.display()))?;
     let p = plan(s.world_m, o.chunk_m, o.budget);
     log(&format!("{} x {} chunks of {} m, {} x {} quads each ({} triangles), maps {} px", p.chunks, p.chunks, p.chunk_m, p.quads, p.quads, 2 * p.quads * p.quads, o.tex));
-    // One height mapping for all chunks (and the one the heightmap export uses): the range of the whole terrain.
-    log("measuring the height range");
-    let mapping = Mapping::from_values(&crate::landscape::sample(ev, UNREAL_RES, &Progress::default()), s);
-    let sampler = |pts: &[[f32; 3]]| ev.eval_points(pts).into_iter().map(|v| mapping.apply(v)).collect::<Vec<f32>>();
+    // One height mapping for all chunks (and the one the heightmap export uses): the range of the whole terrain. Eroded
+    // terrain is already in metres and is read by interpolation.
+    let mapping = match grid {
+        Some(_) => Mapping { k: 1.0, offset: 0.0 },
+        None => {
+            log("measuring the height range");
+            Mapping::from_values(&crate::landscape::sample(ev, UNREAL_RES, &Progress::default()), s)
+        }
+    };
+    let from_graph = |pts: &[[f32; 3]]| ev.eval_points(pts).into_iter().map(|v| mapping.apply(v)).collect::<Vec<f32>>();
+    let from_grid = |pts: &[[f32; 3]]| match grid {
+        Some((g, n)) => pts.iter().map(|p| crate::landscape::bilinear(g, n, p[0], p[1])).collect::<Vec<f32>>(),
+        None => Vec::new(),
+    };
+    let sampler: Sampler = if grid.is_some() { &from_grid } else { &from_graph };
     let total = p.chunks * p.chunks;
     let (mut meshes, mut entries) = (Vec::new(), Vec::new());
     for cy in 0..p.chunks {
@@ -193,10 +205,10 @@ pub fn export(ev: &Evaluator, s: &Settings, o: &Options, progress: &Progress, lo
             let index = cy * p.chunks + cx;
             let stem = format!("{name}_{cy:02}_{cx:02}");
             let path = folder.join(format!("{stem}.{}", if o.glb { "glb" } else { "obj" }));
-            let mesh = chunk_mesh(&sampler, &p, cx, cy);
+            let mesh = chunk_mesh(sampler, &p, cx, cy);
             let written = if o.glb { crate::meshformats::write_glb(&path, &mesh.positions, &mesh.normals, Some(&mesh.uvs), &mesh.triangles) } else { mesh.write_obj(&path) };
             written.map_err(|e| format!("{}: {e}", path.display()))?;
-            for img in chunk_maps(&sampler, s.world_m, &p, cx, cy, o) {
+            for img in chunk_maps(sampler, s.world_m, &p, cx, cy, o) {
                 let map = folder.join(format!("{stem}_{}.png", img.label));
                 img.write(&map, ImageFormat::Png16)?;
             }
@@ -227,7 +239,7 @@ pub fn export(ev: &Evaluator, s: &Settings, o: &Options, progress: &Progress, lo
         for (index, path) in meshes.iter().enumerate() {
             let (cx, cy) = (index % p.chunks, index / p.chunks);
             let proxy = proxy_dir.join(format!("{}.obj", path.file_stem().unwrap_or_default().to_string_lossy()));
-            chunk_mesh(&sampler, &proxy_plan, cx, cy).write_obj(&proxy).map_err(|e| format!("{}: {e}", proxy.display()))?;
+            chunk_mesh(sampler, &proxy_plan, cx, cy).write_obj(&proxy).map_err(|e| format!("{}: {e}", proxy.display()))?;
             proxies.push(proxy);
         }
         let combined = crate::udim::pack(&crate::udim::Settings { name: name.clone(), folder: udim, files: proxies, only_combined: true, ..Default::default() }, log)?;

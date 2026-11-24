@@ -24,6 +24,7 @@ mod meshgraph_ui;
 mod meshworkspace;
 mod landscape;
 mod landscape_chunks;
+mod landscape_erosion;
 mod udim;
 mod uvtransfer;
 mod meshformats;
