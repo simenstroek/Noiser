@@ -8,6 +8,7 @@
 
 use crate::graph::{Graph, MathOp, NodeId, NodeKind, NoiseKind, NoiseParams, PortType, Tiling};
 use eframe::egui::{self, Color32, CornerRadius, Pos2, Rect, Sense, Stroke, StrokeKind, Vec2, epaint::CubicBezierShape};
+use crate::keymap::{Action, pressed};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub const ORANGE: Color32 = Color32::from_rgb(255, 150, 40);
@@ -937,7 +938,7 @@ impl Editor {
         let over_canvas = pointer.is_some_and(|p| canvas.contains(p));
         let typing = ui.memory(|m| m.focused().is_some());
         if over_canvas && !typing {
-            if ui.input(|i| i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace)) {
+            if ui.input(|i| pressed(i, Action::Delete)) {
                 for id in std::mem::take(&mut self.selected) {
                     graph.remove(id);
                 }
@@ -954,10 +955,10 @@ impl Editor {
                     self.selected = new;
                 }
             }
-            if ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::A)) {
+            if ui.input(|i| pressed(i, Action::SelectAll)) {
                 self.selected = graph.nodes.keys().copied().collect();
             }
-            if ui.input(|i| i.key_pressed(egui::Key::M) && !i.modifiers.command) {
+            if ui.input(|i| pressed(i, Action::Mute)) {
                 for id in &self.selected {
                     if let Some(n) = graph.nodes.get_mut(id).filter(|n| !matches!(n.kind, NodeKind::OutDensity | NodeKind::OutNormal)) {
                         n.muted = !n.muted;
@@ -965,21 +966,21 @@ impl Editor {
                 }
             }
             // C: a comment frame around the selected nodes (with room for its title bar).
-            if ui.input(|i| i.key_pressed(egui::Key::C) && !i.modifiers.command) && !self.selected.is_empty() {
+            if ui.input(|i| pressed(i, Action::CommentFrame)) && !self.selected.is_empty() {
                 let bounds = self.selected.iter().filter_map(|id| layouts.get(id)).map(|l| l.rect).reduce(|a, b| a.union(b));
                 if let Some(b) = bounds {
                     let (lo, hi) = (self.to_graph(origin, b.min), self.to_graph(origin, b.max));
                     graph.frames.push(crate::graph::Frame { title: "Frame".into(), pos: [lo.x - 16.0, lo.y - 38.0], size: [hi.x - lo.x + 32.0, hi.y - lo.y + 54.0] });
                 }
             }
-            if ui.input(|i| i.key_pressed(egui::Key::F) && !i.modifiers.command) {
+            if ui.input(|i| pressed(i, Action::NodesFrameSelected)) {
                 let only = self.selected.clone();
                 self.frame(canvas.size(), graph, &only);
             }
-            if ui.input(|i| i.key_pressed(egui::Key::Home)) {
+            if ui.input(|i| pressed(i, Action::NodesFrameAll)) {
                 self.frame(canvas.size(), graph, &BTreeSet::new());
             }
-            if ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::D))
+            if ui.input(|i| pressed(i, Action::Duplicate))
                 && let Some(p) = pointer {
                     let at = self.to_graph(origin, p);
                     self.selected = duplicate(graph, &self.selected, [at.x, at.y]);

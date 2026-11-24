@@ -4,6 +4,7 @@
 use crate::composer_gpu::{DEFAULT_STEPS, ReferenceDraw, ReferenceUniforms, Uniforms, ViewCallback};
 use crate::composer_reference::{Reference, ReferenceMesh, ReferenceSettings};
 use crate::composer_render::{Camera, pick};
+use crate::keymap::{Action as Key, pressed};
 use crate::sdf_file::{Assembly, Layer, Node, SdfFile};
 use crate::sdf_model::{GpuScene, LayerField, M3, V3, euler_matrix, file_scene, into_frame, layer_fields};
 use eframe::{egui, egui_wgpu, wgpu};
@@ -1853,20 +1854,13 @@ impl Composer {
         egui_extras::install_image_loaders(&ctx);
         if !ctx.egui_wants_keyboard_input() {
             ctx.input(|i| {
-                for (key, tool) in [(egui::Key::W, Tool::Move), (egui::Key::E, Tool::Rotate), (egui::Key::R, Tool::Scale)] {
-                    if i.key_pressed(key) && !i.modifiers.command {
+                for (action, tool) in [(Key::ToolMove, Tool::Move), (Key::ToolRotate, Tool::Rotate), (Key::ToolScale, Tool::Scale)] {
+                    if pressed(i, action) {
                         self.tool = tool;
                     }
                 }
             });
-            let (undo, redo, delete, frame) = ctx.input(|i| {
-                (
-                    i.modifiers.command && i.key_pressed(egui::Key::Z) && !i.modifiers.shift,
-                    i.modifiers.command && (i.key_pressed(egui::Key::Y) || (i.key_pressed(egui::Key::Z) && i.modifiers.shift)),
-                    i.key_pressed(egui::Key::Delete),
-                    i.key_pressed(egui::Key::F),
-                )
-            });
+            let (undo, redo, delete, frame) = ctx.input(|i| (pressed(i, Key::Undo), pressed(i, Key::Redo), pressed(i, Key::Delete), pressed(i, Key::ComposerFrameAll)));
             if undo {
                 self.undo();
             }
@@ -1876,7 +1870,7 @@ impl Composer {
             if delete {
                 self.delete_selected();
             }
-            let (duplicate, group) = ctx.input(|i| (i.modifiers.command && i.key_pressed(egui::Key::D), i.modifiers.command && i.key_pressed(egui::Key::G)));
+            let (duplicate, group) = ctx.input(|i| (pressed(i, Key::Duplicate), pressed(i, Key::Group)));
             if duplicate {
                 self.duplicate_selected();
             }
@@ -1887,25 +1881,27 @@ impl Composer {
                 self.frame_pending = true;
             }
             // Looking straight down an axis: 1 front, 3 right, 7 top.
-            for (key, yaw, pitch) in [(egui::Key::Num1, 0.0, 0.0), (egui::Key::Num3, std::f64::consts::FRAC_PI_2, 0.0), (egui::Key::Num7, self.camera.yaw, 1.5)] {
-                if ctx.input(|i| i.key_pressed(key) && !i.modifiers.command) {
+            for (action, yaw, pitch) in [(Key::ViewFront, 0.0, 0.0), (Key::ViewRight, std::f64::consts::FRAC_PI_2, 0.0), (Key::ViewTop, self.camera.yaw, 1.5)] {
+                if ctx.input(|i| pressed(i, action)) {
                     self.camera.yaw = yaw;
                     self.camera.pitch = pitch;
                 }
             }
-            if ctx.input(|i| i.key_pressed(egui::Key::C) && !i.modifiers.command) {
+            if ctx.input(|i| pressed(i, Key::ComposerFrameSelection)) {
                 let rect = self.last_view;
                 self.frame_selection(rect);
             }
         }
-        let (save, open) = ctx.input(|i| (i.modifiers.command && i.key_pressed(egui::Key::S), i.modifiers.command && i.key_pressed(egui::Key::O)));
-        if save {
-            self.save(ctx.input(|i| i.modifiers.shift));
+        let (save_as, save, open) = ctx.input(|i| (pressed(i, Key::SaveAs), pressed(i, Key::Save), pressed(i, Key::Open)));
+        if save_as {
+            self.save(true);
+        } else if save {
+            self.save(false);
         }
         if open {
             self.request(Pending::Open);
         }
-        if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::N)) {
+        if ctx.input(|i| pressed(i, Key::New)) {
             self.request(Pending::New);
         }
         for dropped in ctx.input(|i| i.raw.dropped_files.clone()) {
@@ -2695,6 +2691,19 @@ mod ui_tests {
         h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::D);
         h.run();
         assert_eq!(h.state().shapes().len(), 2);
+    }
+
+    #[test]
+    fn x_and_delete_both_delete_the_selected_shape() {
+        for key in [egui::Key::X, egui::Key::Delete] {
+            let mut h = harness();
+            h.run();
+            click(&mut h, "Add cube");
+            click(&mut h, "Add sphere");
+            h.key_press(key);
+            h.run();
+            assert_eq!(h.state().shapes().len(), 1, "{key:?}");
+        }
     }
 
     #[test]

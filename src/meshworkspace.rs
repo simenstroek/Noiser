@@ -2,6 +2,7 @@
 //! node's settings and the log of the last run. Running happens on a worker thread; see `meshgraph::Runner`.
 
 use crate::graph::{Graph, NodeKind};
+use crate::keymap::Action;
 use crate::meshgraph::{MeshCache, Runner};
 use eframe::egui;
 use std::path::PathBuf;
@@ -891,17 +892,19 @@ impl crate::App {
         }
         // Ctrl+Z and Ctrl+Y (or Ctrl+Shift+Z) act on this graph here, unless a text field has the keyboard.
         if !ctx.egui_wants_keyboard_input() {
-            let (z, y, shift) = ui.input(|i| (i.modifiers.command && i.key_pressed(egui::Key::Z), i.modifiers.command && i.key_pressed(egui::Key::Y), i.modifiers.shift));
-            if y || (z && shift) {
+            let (undo, redo) = ui.input(|i| (crate::keymap::pressed(i, Action::Undo), crate::keymap::pressed(i, Action::Redo)));
+            if redo {
                 self.mesh_ws.undo(true);
-            } else if z {
+            } else if undo {
                 self.mesh_ws.undo(false);
             }
         }
-        // Ctrl+S and Ctrl+O act on this graph here.
-        let (ctrl_s, ctrl_shift) = ui.input(|i| (i.modifiers.command && i.key_pressed(egui::Key::S), i.modifiers.shift));
-        if ctrl_s {
-            self.save_mesh_graph(ctrl_shift);
+        // Saving acts on this graph here.
+        let (save_as, save) = ui.input(|i| (crate::keymap::pressed(i, Action::SaveAs), crate::keymap::pressed(i, Action::Save)));
+        if save_as {
+            self.save_mesh_graph(true);
+        } else if save {
+            self.save_mesh_graph(false);
         }
         egui::Panel::right("mesh props").default_size(340.0).show(ui, |ui| {
             ui.horizontal_wrapped(|ui| {

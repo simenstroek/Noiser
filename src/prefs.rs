@@ -1,5 +1,6 @@
 //! Settings that belong to the user, not to a graph, and the Preferences window that edits them.
 
+use crate::keymap::{self, Action, Binding, Keymap};
 use eframe::egui;
 use serde::{Deserialize, Serialize};
 
@@ -21,31 +22,20 @@ impl Theme {
     }
 }
 
-/// The key that opens the library drawer.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+/// The single library key older versions saved; it becomes the first library binding when settings are loaded.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
 pub enum LibraryKey {
-    #[default]
     Tab,
     Backtick,
     F2,
 }
 
 impl LibraryKey {
-    pub const ALL: [LibraryKey; 3] = [LibraryKey::Tab, LibraryKey::Backtick, LibraryKey::F2];
-
-    pub fn key(self) -> egui::Key {
+    fn key(self) -> egui::Key {
         match self {
             LibraryKey::Tab => egui::Key::Tab,
             LibraryKey::Backtick => egui::Key::Backtick,
             LibraryKey::F2 => egui::Key::F2,
-        }
-    }
-
-    pub fn label(self) -> &'static str {
-        match self {
-            LibraryKey::Tab => "Tab",
-            LibraryKey::Backtick => "` (backtick)",
-            LibraryKey::F2 => "F2",
         }
     }
 }
@@ -79,7 +69,9 @@ pub struct Prefs {
     pub library_root: String,
     /// Write a picture of the view next to files saved into the library.
     pub thumbnails: bool,
-    pub library_key: LibraryKey,
+    #[serde(rename = "library_key", skip_serializing)]
+    pub legacy_library_key: Option<LibraryKey>,
+    pub keymap: Keymap,
     pub theme: Theme,
     /// Colour of selections and highlights; none keeps egui's blue.
     pub accent: Option<[u8; 3]>,
@@ -104,7 +96,8 @@ impl Default for Prefs {
             seen_about: false,
             library_root: String::new(),
             thumbnails: true,
-            library_key: LibraryKey::Tab,
+            legacy_library_key: None,
+            keymap: Keymap::default(),
             theme: Theme::System,
             accent: None,
             render_scale: 1.0,
@@ -126,6 +119,9 @@ impl Prefs {
         self.composer_max_steps = self.composer_max_steps.clamp(32, 600);
         self.sdf_mesh_resolution = self.sdf_mesh_resolution.clamp(32, 400);
         self.export_samples = self.export_samples.clamp(48, 640);
+        if let Some(old) = self.legacy_library_key.take() {
+            self.keymap.set(Action::Library, 0, Some(Binding::plain(old.key())));
+        }
         self
     }
 
@@ -147,9 +143,83 @@ fn heading(ui: &mut egui::Ui, text: &str) {
     ui.separator();
 }
 
+/// The slot being recorded: an action and which of its two slots.
+fn recording_id() -> egui::Id {
+    egui::Id::new("keybind being recorded")
+}
+
+/// Every action with its two slots, under group headings.
+fn keybind_table(keymap: &mut Keymap, ui: &mut egui::Ui) {
+    let mut recording: Option<(Action, usize)> = ui.memory(|m| m.data.get_temp(recording_id()));
+    let mut group = "";
+    for action in Action::ALL {
+        if action.group() != group {
+            group = action.group();
+            heading(ui, group);
+        }
+        ui.horizontal(|ui| {
+            ui.allocate_ui_with_layout(egui::vec2(220.0, 20.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                ui.set_min_width(220.0);
+                ui.label(action.label());
+            });
+            for slot in 0..2 {
+                let listening = recording == Some((action, slot));
+                let text = if listening { "Press a key…".to_string() } else { keymap.get(action)[slot].map_or("—".to_string(), Binding::text) };
+                let button = ui.add_sized([116.0, 20.0], egui::Button::new(egui::RichText::new(text).monospace()).selected(listening));
+                button.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, format!("{} binding {}", action.label(), slot + 1)));
+                if button.clicked() {
+                    recording = Some((action, slot));
+                } else if listening {
+                    // Holding focus keeps the editors from also acting on the key that is being recorded.
+                    button.request_focus();
+                    ui.memory_mut(|m| m.set_focus_lock_filter(button.id, egui::EventFilter { tab: true, horizontal_arrows: true, vertical_arrows: true, escape: true }));
+                    let pressed = ui.input(|i| {
+                        i.events.iter().find_map(|e| match e {
+                            egui::Event::Key { key, pressed: true, repeat: false, modifiers, .. } => Some(Binding { key: *key, ctrl: modifiers.command, shift: modifiers.shift }),
+                            _ => None,
+                        })
+                    });
+                    if let Some(binding) = pressed {
+                        if binding.key != egui::Key::Escape {
+                            keymap.set(action, slot, Some(binding));
+                        }
+                        recording = None;
+                        button.surrender_focus();
+                    } else if ui.input(|i| i.pointer.any_pressed()) && !button.hovered() {
+                        recording = None;
+                    }
+                }
+                // The clear button's place stays reserved so the columns line up.
+                let (cell, _) = ui.allocate_exact_size(egui::vec2(20.0, 20.0), egui::Sense::hover());
+                if keymap.get(action)[slot].is_some() {
+                    let clear = ui.put(cell, egui::Button::new("×").small()).on_hover_text("Clear this slot");
+                    clear.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, format!("{} clear {}", action.label(), slot + 1)));
+                    if clear.clicked() {
+                        keymap.set(action, slot, None);
+                    }
+                }
+            }
+            let clashes: Vec<&str> = keymap.get(action).into_iter().flatten().filter_map(|b| keymap.conflict(action, b)).map(Action::label).collect();
+            if !clashes.is_empty() {
+                ui.colored_label(crate::editor::ORANGE, format!("also used by: {}", clashes.join(", ")));
+            }
+        });
+    }
+    keymap::set_capturing(recording.is_some());
+    ui.memory_mut(|m| match recording {
+        Some(r) => {
+            m.data.insert_temp(recording_id(), r);
+        }
+        None => m.data.remove::<(Action, usize)>(recording_id()),
+    });
+}
+
 /// The window's contents: category tabs along the top and the settings of the chosen one below.
 pub fn show(prefs: &mut Prefs, tab: &mut PrefsTab, ui: &mut egui::Ui, shortcuts: &[(&str, &str)]) -> Effects {
     let mut effects = Effects::default();
+    if *tab != PrefsTab::Keybinds {
+        keymap::set_capturing(false);
+    }
     ui.set_min_width(470.0);
     ui.horizontal(|ui| {
         for (which, label) in PrefsTab::ALL {
@@ -168,19 +238,14 @@ pub fn show(prefs: &mut Prefs, tab: &mut PrefsTab, ui: &mut egui::Ui, shortcuts:
                 .on_hover_text("Pictures are separate PNG files (name.sdf.png), so the saved files stay small");
         }
         PrefsTab::Keybinds => {
-            heading(ui, "Library drawer");
-            egui::Grid::new("prefs library key").num_columns(2).spacing([16.0, 6.0]).show(ui, |ui| {
-                let label = ui.label("Open the library with");
-                egui::ComboBox::from_id_salt("library key").selected_text(prefs.library_key.label()).show_ui(ui, |ui| {
-                    for key in LibraryKey::ALL {
-                        ui.selectable_value(&mut prefs.library_key, key, key.label());
-                    }
-                })
-                .response
-                .labelled_by(label.id);
-                ui.end_row();
+            ui.horizontal(|ui| {
+                ui.weak("Click a slot, then press the key (with Ctrl or Shift if you like). Escape cancels.");
+                if ui.add_enabled(!prefs.keymap.is_default(), egui::Button::new("Restore default keybinds")).clicked() {
+                    prefs.keymap = Keymap::default();
+                }
             });
-            heading(ui, "All shortcuts");
+            keybind_table(&mut prefs.keymap, ui);
+            heading(ui, "Fixed shortcuts");
             egui::Grid::new("prefs shortcuts").striped(true).show(ui, |ui| {
                 for (keys, what) in shortcuts {
                     ui.monospace(*keys);
@@ -316,4 +381,41 @@ pub fn visuals(dark: bool, accent: Option<[u8; 3]>) -> egui::Visuals {
         visuals.hyperlink_color = color;
     }
     visuals
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use egui_kittest::{Harness, kittest::Queryable};
+
+    fn harness() -> Harness<'static, Keymap> {
+        Harness::builder().with_size(egui::vec2(700.0, 900.0)).with_step_dt(1.0 / 60.0).build_ui_state(|ui, keymap: &mut Keymap| keybind_table(keymap, ui), Keymap::default())
+    }
+
+    #[test]
+    fn clicking_a_slot_and_pressing_a_key_rebinds_it_and_escape_cancels() {
+        let mut h = harness();
+        h.run();
+        h.get_by_label("Mute (bypass) the selected nodes binding 2").click();
+        h.run();
+        h.key_press(egui::Key::B);
+        h.run();
+        assert_eq!(h.state().get(Action::Mute), [Some(Binding::plain(egui::Key::M)), Some(Binding::plain(egui::Key::B))]);
+
+        h.get_by_label("Mute (bypass) the selected nodes binding 1").click();
+        h.run();
+        h.key_press(egui::Key::Escape);
+        h.run();
+        assert_eq!(h.state().get(Action::Mute)[0], Some(Binding::plain(egui::Key::M)), "escape leaves it alone");
+        keymap::set_capturing(false);
+    }
+
+    #[test]
+    fn the_clear_button_empties_a_slot() {
+        let mut h = harness();
+        h.run();
+        h.get_by_label("Delete the selection clear 2").click();
+        h.run();
+        assert_eq!(h.state().get(Action::Delete), [Some(Binding::plain(egui::Key::Delete)), None]);
+    }
 }

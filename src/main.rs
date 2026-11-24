@@ -40,6 +40,8 @@ mod prefs;
 mod icons;
 mod composer_gpu;
 mod composer_reference;
+mod keymap;
+use keymap::{Action, pressed};
 mod composer_render;
 mod sdf_file;
 mod sdf_mesh;
@@ -891,19 +893,12 @@ const MESH_GRAPH_PATH_KEY: &str = "mesh_graph_path";
 const LANDSCAPE_GRAPH_KEY: &str = "landscape_graph";
 const LANDSCAPE_SETTINGS_KEY: &str = "landscape_settings";
 const LANDSCAPE_PROJECT_KEY: &str = "landscape_project";
-const SHORTCUTS: [(&str, &str); 18] = [
-    ("Ctrl+S / Ctrl+Shift+S / Ctrl+O / Ctrl+N", "Save / Save As / Open / New"),
-    ("Ctrl+Z", "Undo"),
-    ("Ctrl+Y / Ctrl+Shift+Z", "Redo"),
-    ("Ctrl+D", "Duplicate the selected nodes at the cursor (graph editor)"),
+/// The shortcuts that cannot be remapped; the rest come from the keymap.
+const SHORTCUTS: [(&str, &str); 10] = [
     ("Drop a file on the window", "A .noisegraph opens as the graph, an .obj loads as the mesh"),
     ("Drop a lone node on a wire", "Splices the node into the wire (graph editor)"),
     ("Ctrl + right-drag", "Cut the wires the line crosses (graph editor)"),
-    ("M", "Mute (bypass) the selected nodes: readers get the first input instead"),
-    ("F / Home", "Frame the selected nodes / all nodes (graph editor)"),
-    ("Ctrl+A", "Select all nodes (graph editor)"),
     ("Ctrl+C / Ctrl+V", "Copy the selection, paste at the cursor; works between two Noiser windows"),
-    ("Delete / Backspace", "Delete the selected nodes (graph editor)"),
     ("Right-click canvas", "Add node menu; type to search, Enter adds the first match"),
     ("Drag from a pin to empty space", "Add a node already wired up"),
     ("Drag on empty canvas", "Box select (Shift/Ctrl adds)"),
@@ -1007,8 +1002,7 @@ impl App {
     fn library_drawer(&mut self, ui: &mut egui::Ui) {
         use meshworkspace::Workspace;
         let ctx = ui.ctx().clone();
-        let key = self.prefs.library_key.key();
-        if !ctx.egui_wants_keyboard_input() && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, key)) {
+        if !ctx.egui_wants_keyboard_input() && ctx.input_mut(|i| keymap::consume(i, keymap::Action::Library)) {
             self.drawer.open = !self.drawer.open;
         }
         if !self.drawer.open {
@@ -1106,6 +1100,10 @@ impl eframe::App for App {
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let cpu_start = std::time::Instant::now();
+        keymap::activate(&self.prefs.keymap);
+        if !self.prefs_open {
+            keymap::set_capturing(false);
+        }
         self.collect_thumbnails(&ui.ctx().clone());
         self.recovery_prompt(&ui.ctx().clone());
         self.poll_mesh_job(&ui.ctx().clone());
@@ -1113,6 +1111,11 @@ impl eframe::App for App {
         self.batch_window(&ui.ctx().clone());
         egui::Window::new("Keyboard shortcuts").open(&mut self.shortcuts_open).collapsible(false).resizable(false).show(ui.ctx(), |ui| {
             egui::Grid::new("shortcuts").striped(true).show(ui, |ui| {
+                for action in Action::ALL {
+                    ui.monospace(self.prefs.keymap.text(action));
+                    ui.label(action.label());
+                    ui.end_row();
+                }
                 for (k, what) in SHORTCUTS {
                     ui.monospace(k);
                     ui.label(what);
@@ -1287,22 +1290,24 @@ impl eframe::App for App {
                 ui.ctx().request_repaint_after(backup::INTERVAL); // flush the held-back change
             }
         // File shortcuts work even with a text field focused (Ctrl+S would otherwise do nothing there).
-        let (ctrl_s, ctrl_o, ctrl_shift) = ui.input(|i| (i.modifiers.command && i.key_pressed(egui::Key::S), i.modifiers.command && i.key_pressed(egui::Key::O), i.modifiers.shift));
+        let (save_as, save, open, new) = ui.input(|i| (pressed(i, Action::SaveAs), pressed(i, Action::Save), pressed(i, Action::Open), pressed(i, Action::New)));
         if self.workspace != meshworkspace::Workspace::Noise {
             // The mesh graph and composer tabs handle their own keys.
-        } else if ctrl_s {
-            self.save(ctrl_shift);
-        } else if ctrl_o {
+        } else if save_as {
+            self.save(true);
+        } else if save {
+            self.save(false);
+        } else if open {
             self.open();
-        } else if ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::N)) {
+        } else if new {
             self.request(Pending::New);
         }
-        // Ctrl+Z / Ctrl+Y (or Ctrl+Shift+Z), unless a text field has the keyboard.
+        // Undo and redo, unless a text field has the keyboard.
         if !ui.ctx().egui_wants_keyboard_input() && self.workspace == meshworkspace::Workspace::Noise {
-            let (z, y, shift) = ui.input(|i| (i.modifiers.command && i.key_pressed(egui::Key::Z), i.modifiers.command && i.key_pressed(egui::Key::Y), i.modifiers.shift));
-            if y || (z && shift) {
+            let (undo, redo) = ui.input(|i| (pressed(i, Action::Undo), pressed(i, Action::Redo)));
+            if redo {
                 self.undo(true);
-            } else if z {
+            } else if undo {
                 self.undo(false);
             }
         }
@@ -1418,7 +1423,7 @@ impl eframe::App for App {
                     if icons::button(ui, "settings", "Preferences", None, true).on_hover_text("Preferences").clicked() {
                         self.prefs_open = true;
                     }
-                    let key = self.prefs.library_key.label();
+                    let key = keymap::text(keymap::Action::Library);
                     if icons::button(ui, "library", "Library", Some(self.drawer.open), true).on_hover_text(format!("Library: saved SDFs, noise graphs and mesh graphs ({key})")).clicked() {
                         self.drawer.open = !self.drawer.open;
                     }
@@ -1719,6 +1724,15 @@ mod prefs_tests {
         let p: Prefs = serde_json::from_str(r#"{"ui_scale": 9.0}"#).unwrap();
         assert_eq!(p.sane().ui_scale, 2.0);
         assert_eq!(Prefs { ui_scale: f32::NAN, ..Prefs::default() }.sane().ui_scale, 1.0);
+    }
+
+    #[test]
+    fn the_library_key_older_versions_saved_becomes_the_first_library_binding() {
+        use crate::keymap::{Action, Binding};
+        let p: Prefs = serde_json::from_str(r#"{"library_key": "F2"}"#).unwrap();
+        let p = p.sane();
+        assert_eq!(p.keymap.get(Action::Library)[0], Some(Binding::plain(eframe::egui::Key::F2)));
+        assert!(!serde_json::to_string(&p).unwrap().contains("library_key"), "it is saved as a keybind from now on");
     }
 }
 
