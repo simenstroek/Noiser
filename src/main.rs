@@ -24,6 +24,7 @@ mod meshgraph_ui;
 mod meshworkspace;
 mod landscape;
 mod landscape_chunks;
+mod landscape_masks;
 mod landscape_erosion;
 mod udim;
 mod uvtransfer;
@@ -254,6 +255,7 @@ impl App {
         let (mut graph_arg, mut mesh_arg, mut open_mesh_export) = (None, None, false);
         let mut mesh_tab = false;
         let mut landscape_tab = false;
+        let mut landscape_map = false;
         let mut library_root_arg: Option<String> = None;
         let mut show_library = false;
         let mut library_tab: Option<library::Kind> = None;
@@ -316,6 +318,8 @@ impl App {
                 mesh_tab = true;
             } else if a == "--landscape-tab" {
                 landscape_tab = true;
+            } else if a == "--landscape-map" {
+                (landscape_tab, landscape_map) = (true, true);
             } else if a == "--window" {
                 args.next(); // read below
             } else if a == "--mesh-graph" {
@@ -467,6 +471,7 @@ impl App {
         }
         if landscape_tab {
             app.workspace = meshworkspace::Workspace::Landscape;
+            app.landscape.show_map(landscape_map);
         }
         if let Some(p) = mesh_graph_arg {
             match std::fs::read_to_string(&p).map_err(|e| e.to_string()).and_then(|s| Graph::from_json(&s)) {
@@ -488,7 +493,9 @@ impl App {
             app.mesh_ws.restore(g, path);
         }
         // The landscape as it was left.
-        if let Some(g) = cc.storage.and_then(|s| s.get_string(LANDSCAPE_GRAPH_KEY)).and_then(|s| Graph::from_json(&s).ok()) {
+        if let Some(project) = cc.storage.and_then(|s| s.get_string(LANDSCAPE_PROJECT_KEY)) {
+            let _ = app.landscape.from_project(&project);
+        } else if let Some(g) = cc.storage.and_then(|s| s.get_string(LANDSCAPE_GRAPH_KEY)).and_then(|s| Graph::from_json(&s).ok()) {
             let settings = cc.storage.and_then(|s| s.get_string(LANDSCAPE_SETTINGS_KEY)).and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
             app.landscape.restore(g, settings, None);
         }
@@ -871,6 +878,7 @@ const COMPOSER_MODIFIED_KEY: &str = "composer_modified";
 const MESH_GRAPH_PATH_KEY: &str = "mesh_graph_path";
 const LANDSCAPE_GRAPH_KEY: &str = "landscape_graph";
 const LANDSCAPE_SETTINGS_KEY: &str = "landscape_settings";
+const LANDSCAPE_PROJECT_KEY: &str = "landscape_project";
 const SHORTCUTS: [(&str, &str); 18] = [
     ("Ctrl+S / Ctrl+Shift+S / Ctrl+O / Ctrl+N", "Save / Save As / Open / New"),
     ("Ctrl+Z", "Undo"),
@@ -1063,8 +1071,7 @@ impl eframe::App for App {
             None => storage.set_string(COMPOSER_KEY, String::new()),
         }
         storage.set_string(MESH_GRAPH_KEY, self.mesh_ws.graph.to_json());
-        storage.set_string(LANDSCAPE_GRAPH_KEY, self.landscape.graph.to_json());
-        storage.set_string(LANDSCAPE_SETTINGS_KEY, serde_json::to_string(&self.landscape.settings).unwrap_or_default());
+        storage.set_string(LANDSCAPE_PROJECT_KEY, self.landscape.to_project());
         storage.set_string(MESH_GRAPH_PATH_KEY, self.mesh_ws.path.as_ref().map_or(String::new(), |p| p.to_string_lossy().into_owned()));
         if let Ok(s) = serde_json::to_string(&self.recent) {
             storage.set_string(RECENT_KEY, s);

@@ -7,6 +7,24 @@
 
 fn safe_normalize(v: vec3f) -> vec3f { return v / max(length(v), 1e-12); }
 
+// The slope in degrees of a field with gradient g (over x and y), for a height of `k` per unit of the field.
+fn slope_degrees(g: vec2f, k: f32) -> f32 { return degrees(atan(k * length(g))); }
+
+// A painted mask (the Landscape tab): mask `index` is res x res values in P from MASK_BASE on; q.xy across the terrain.
+const MASK_BASE: u32 = 1048576u;
+fn painted_mask(index: f32, res: f32, q: vec3f) -> f32 {
+    let n = u32(res);
+    let base = MASK_BASE + u32(index) * n * n;
+    let g = clamp(q.xy, vec2f(0.0), vec2f(1.0)) * (res - 1.0);
+    let i = min(vec2u(floor(g)), vec2u(n - 2u, n - 2u));
+    let f = g - vec2f(i);
+    let a = P[base + i.y * n + i.x];
+    let b = P[base + i.y * n + i.x + 1u];
+    let c = P[base + (i.y + 1u) * n + i.x];
+    let d = P[base + (i.y + 1u) * n + i.x + 1u];
+    return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+}
+
 // A node's numeric parameters come from P[i], except those a wired input pin replaces: the generated code lists
 // them in ov_i / ov_v (ov_n entries) around the node's call.
 var<private> ov_n: u32;

@@ -40,6 +40,19 @@ pub struct Compiled {
     pub params: Vec<f32>,
     /// The loaded-mesh nodes (mesh graph), in the order of the `mesh_dist_0`, `mesh_dist_1`... functions they call.
     pub mesh_slots: Vec<NodeId>,
+    /// The painted masks the graph reads (Landscape tab), in index order: mask `i` is `MASK_RES` x `MASK_RES` values
+    /// stored in the parameter buffer from `MASK_BASE + i * MASK_RES^2` on.
+    pub masks: Vec<String>,
+}
+
+/// Samples along a painted mask's side.
+pub const MASK_RES: usize = 1024;
+/// Where the mask data starts in the parameter buffer (the same number as `MASK_BASE` in noise.wgsl).
+pub const MASK_BASE: usize = 1 << 20;
+
+/// The distinct names of the graph's Mask nodes, sorted.
+fn mask_names(g: &Graph) -> Vec<String> {
+    g.nodes.values().filter_map(|n| if let NodeKind::Mask { name } = &n.kind { Some(name.clone()) } else { None }).collect::<BTreeSet<_>>().into_iter().collect()
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -109,6 +122,7 @@ fn compile_inner(g: &Graph, caches: &BTreeMap<NodeId, u32>, eps: f32, preview: b
     // Parameter slots, in node-id order.
     let mut slots = BTreeMap::new();
     let mut params = Vec::new();
+    let mask_names = mask_names(g);
     for (&id, n) in &g.nodes {
         slots.insert(id, params.len());
         match &n.kind {
@@ -130,6 +144,8 @@ fn compile_inner(g: &Graph, caches: &BTreeMap<NodeId, u32>, eps: f32, preview: b
             NodeKind::Combine { vals } => params.extend(vals),
             NodeKind::Position { scale } => params.extend(scale),
             NodeKind::Random { vals, seed } => params.extend([vals[0], vals[1], seed.map_or(-1.0, |s| s as f32)]),
+            NodeKind::Mask { name } => params.extend([mask_names.iter().position(|n| n == name).unwrap_or(0) as f32, MASK_RES as f32]),
+            NodeKind::Slope { scale } => params.push(*scale),
             NodeKind::Radial(r) => {
                 params.push(if r.mode == crate::graph::RadialMode::Spherical { 1.0 } else { 0.0 });
                 params.extend(r.center);
@@ -248,7 +264,7 @@ fn compile_inner(g: &Graph, caches: &BTreeMap<NodeId, u32>, eps: f32, preview: b
         }
     }
     wgsl += &cg.out;
-    Ok(Compiled { wgsl, params, mesh_slots })
+    Ok(Compiled { wgsl, params, mesh_slots, masks: mask_names })
 }
 
 /// Body of a function returning the normalized tetrahedral gradient (IQ) of the float field `sample(q)`.
@@ -330,7 +346,7 @@ impl Gen<'_> {
         let kind = &self.g.nodes[&id].kind;
         if self.caches.contains_key(&id) {
             // A cached node is a texture read; its upstream graph isn't evaluated here.
-        } else if let NodeKind::Normal { .. } = kind {
+        } else if matches!(kind, NodeKind::Normal { .. } | NodeKind::Slope { .. }) {
             if let Some(src) = self.g.input(id, 0) {
                 self.cone(src)?;
             }
@@ -492,6 +508,26 @@ impl Gen<'_> {
                 };
                 (Ty::F, format!("{function}({q}, {s}u)"))
             }
+            NodeKind::Mask { .. } => {
+                let q = self.operand(id, 0, Ty::V, "p");
+                (Ty::F, format!("painted_mask(P[{s}], P[{}], {q})", s + 1))
+            }
+            NodeKind::Slope { .. } => match self.g.input_from(id, 0) {
+                Some((src, from_port)) => {
+                    // The input's cone function was written during topo(); add its raw gradient once. One output of a
+                    // Separate node is a component of the vector its function returns.
+                    let part = if matches!(self.g.nodes[&src].kind, NodeKind::Separate) { Some(["x", "y", "z"][from_port.min(2)]) } else { None };
+                    let gname = format!("gr{src}{}", part.map_or(String::new(), |c| format!("_{c}")));
+                    if !self.out.contains(&format!("fn {gname}(")) {
+                        let ty = if part.is_some() { Ty::F } else { self.types[&src] };
+                        let eps = self.eps;
+                        let sample = convert(&format!("c{src}(p + o * e){}", part.map_or(String::new(), |c| format!(".{c}"))), ty, Ty::F);
+                        writeln!(self.out, "fn {gname}(p: vec3f) -> vec3f {{ let e = {eps:e}; var g = vec3f(0.0); for (var k = 0u; k < 4u; k++) {{ let o = tetra(k); g += o * {sample}; }} return g / (4.0 * e); }}").unwrap();
+                    }
+                    (Ty::F, format!("slope_degrees({gname}(p).xy, P[{s}])"))
+                }
+                None => (Ty::F, "0.0".into()),
+            },
             NodeKind::Normal { flip } => {
                 let sign = if *flip { "-" } else { "" };
                 match self.g.input_from(id, 0) {

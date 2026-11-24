@@ -227,8 +227,24 @@ pub struct Evaluator {
 
 impl Evaluator {
     pub fn new(device: &wgpu::Device, queue: &wgpu::Queue, graph: &Graph, seed: u32) -> Result<Self, String> {
+        Self::with_masks(device, queue, graph, seed, &Default::default())
+    }
+
+    /// `new` with the painted masks the graph's Mask nodes read, by name (each `codegen::MASK_RES` squared values;
+    /// a missing mask reads 0). They sit in the parameter buffer from `codegen::MASK_BASE` on.
+    pub fn with_masks(device: &wgpu::Device, queue: &wgpu::Queue, graph: &Graph, seed: u32, masks: &std::collections::BTreeMap<String, Vec<f32>>) -> Result<Self, String> {
         use wgpu::util::DeviceExt;
         let c = codegen::compile(graph)?;
+        let mut params = c.params.clone();
+        if !c.masks.is_empty() {
+            params.resize(codegen::MASK_BASE, 0.0);
+            for name in &c.masks {
+                match masks.get(name) {
+                    Some(m) if m.len() == codegen::MASK_RES * codegen::MASK_RES => params.extend_from_slice(m),
+                    _ => params.resize(params.len() + codegen::MASK_RES * codegen::MASK_RES, 0.0),
+                }
+            }
+        }
         let src = format!("{NOISE_LIB}\n{}\n{EVAL_BINDINGS}\n{EXPORT_WGSL}", c.wgsl);
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("export"), source: wgpu::ShaderSource::Wgsl(src.into()) });
         // Explicit layout: an automatic one would drop bindings that this graph doesn't use.
@@ -265,7 +281,7 @@ impl Evaluator {
             pipeline,
             bgl,
             uniforms: init(bytemuck::bytes_of(&[seed, 0, 0, 0]), wgpu::BufferUsages::UNIFORM),
-            params: init(bytemuck::cast_slice(&c.params), wgpu::BufferUsages::STORAGE),
+            params: init(bytemuck::cast_slice(&params), wgpu::BufferUsages::STORAGE),
             blue: init(bytemuck::cast_slice(&crate::bluenoise::tables()), wgpu::BufferUsages::STORAGE),
         })
     }

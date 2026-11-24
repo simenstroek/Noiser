@@ -328,6 +328,16 @@ pub(crate) fn node_props(ui: &mut egui::Ui, kind: &mut NodeKind, pins: &mut Vec<
             amount_row(ui, pins, amount);
         }
         NodeKind::Normal { flip } => row(ui, flip, false, |ui, f| _ = ui.checkbox(f, "flip")),
+        NodeKind::Mask { name } => {
+            let names = crate::landscape::mask_names();
+            egui::ComboBox::from_label("mask").selected_text(if name.is_empty() { "(none)" } else { name.as_str() }).show_ui(ui, |ui| {
+                for n in &names {
+                    ui.selectable_value(name, n.clone(), n);
+                }
+            });
+            ui.weak("The mask painted in the Landscape tab, 0 to 1. Its input is the position (x and y across the terrain); without one it is the world position.");
+        }
+        NodeKind::Slope { .. } => _ = ui.weak("The slope of the input in degrees. In the Landscape tab one unit of the input is one height (the height setting), spread over the size setting; wire the terrain's height in."),
         NodeKind::Noise(n) => {
             let d = graph::NoiseParams::default();
             // Changing the type keeps the other settings; it has no reset since it defines the node.

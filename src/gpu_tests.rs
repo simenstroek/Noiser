@@ -2959,3 +2959,90 @@ fn erosion_pictures() {
         img.save(format!("target/erosion_{name}.png")).unwrap();
     }
 }
+
+#[test]
+fn mask_and_slope_nodes() {
+    use crate::codegen::MASK_RES;
+    let Some(gpu) = gpu() else { return eprintln!("no GPU adapter; skipping") };
+    // A mask: left half 1, right half 0 (with a two-texel ramp in between), read by name through the Evaluator.
+    let mut g = Graph::default();
+    let pos = g.add(NodeKind::position(), [0.0; 2]);
+    let mask = g.add(NodeKind::Mask { name: "cliffs".into() }, [0.0; 2]);
+    let out = g.add(NodeKind::OutDensity, [0.0; 2]);
+    g.connect(pos, mask, 0);
+    g.connect(mask, out, 0);
+    let data: Vec<f32> = (0..MASK_RES * MASK_RES).map(|k| if (k % MASK_RES) < MASK_RES / 2 { 1.0 } else { 0.0 }).collect();
+    let masks = std::collections::BTreeMap::from([("cliffs".to_string(), data)]);
+    let ev = crate::export::Evaluator::with_masks(&gpu.device, &gpu.queue, &g, 0, &masks).unwrap();
+    let v = ev.eval_points(&[[0.1, 0.5, 0.0], [0.9, 0.5, 0.0], [0.25, 0.9, 0.0]]);
+    near(v[0], 1.0, "inside the painted half");
+    near(v[1], 0.0, "outside it");
+    near(v[2], 1.0, "anywhere along y");
+    // An unknown mask name reads 0 and a graph without masks is unaffected.
+    let none = crate::export::Evaluator::new(&gpu.device, &gpu.queue, &g, 0).unwrap();
+    near(none.eval_points(&[[0.1, 0.5, 0.0]])[0], 0.0, "no data, no mask");
+
+    // Slope: a field that rises by 1 across the tile (x), with scale 0.2 (a height of a fifth of the size): atan(0.2).
+    let mut g = Graph::default();
+    let pos = g.add(NodeKind::position(), [0.0; 2]);
+    let sep = g.add(NodeKind::Separate, [0.0; 2]);
+    let slope = g.add(NodeKind::Slope { scale: 0.2 }, [0.0; 2]);
+    let out = g.add(NodeKind::OutDensity, [0.0; 2]);
+    g.connect(pos, sep, 0);
+    g.connect_from(sep, 0, slope, 0);
+    g.connect(slope, out, 0);
+    let expect = 0.2f32.atan().to_degrees();
+    let ev = crate::export::Evaluator::new(&gpu.device, &gpu.queue, &g, 0).unwrap();
+    let v = ev.eval_points(&[[0.3, 0.4, 0.0], [0.7, 0.2, 0.0]]);
+    assert!((v[0] - expect).abs() < 0.05 && (v[1] - expect).abs() < 0.05, "slope {v:?}, expected {expect}");
+}
+
+#[test]
+fn the_landscape_binds_the_slope_scale_and_the_masks() {
+    let Some(gpu) = gpu() else { return eprintln!("no GPU adapter; skipping") };
+    // x as the field, a Slope node on it, and the product with a painted mask: the slope of a 400 m high, 2 km wide ramp,
+    // only where the mask is painted.
+    let mut g = Graph::default();
+    let pos = g.add(NodeKind::position(), [0.0; 2]);
+    let sep = g.add(NodeKind::Separate, [0.0; 2]);
+    let slope = g.add(NodeKind::Slope { scale: 1.0 }, [0.0; 2]);
+    let mask = g.add(NodeKind::Mask { name: "m".into() }, [0.0; 2]);
+    let times = g.add(NodeKind::Math { op: crate::graph::MathOp::Multiply, a: 0.0, b: 0.0, c: 0.5 }, [0.0; 2]);
+    let out = g.add(NodeKind::OutDensity, [0.0; 2]);
+    g.connect(pos, sep, 0);
+    g.connect_from(sep, 0, slope, 0);
+    g.connect(pos, mask, 0);
+    g.connect(slope, times, 0);
+    g.connect(mask, times, 1);
+    g.connect(times, out, 0);
+    let s = crate::landscape::Settings { world_m: 2000.0, height_m: 400.0, ..Default::default() };
+    let n = crate::codegen::MASK_RES;
+    let painted: Vec<f32> = (0..n * n).map(|k| if (k / n) < n / 2 { 1.0 } else { 0.0 }).collect();
+    let ev = crate::landscape::build_evaluator(&gpu.device, &gpu.queue, &g, &s, &std::collections::BTreeMap::from([("m".to_string(), painted)]), std::path::Path::new(".")).unwrap();
+    let v = ev.eval_points(&[[0.5, 0.25, 0.0], [0.5, 0.75, 0.0]]);
+    let expect = (400.0f32 / 2000.0).atan().to_degrees();
+    assert!((v[0] - expect).abs() < 0.05, "painted: {} vs {expect}", v[0]);
+    assert!(v[1].abs() < 0.05, "unpainted: {}", v[1]);
+}
+
+#[test]
+fn a_noise_graph_node_works_in_the_landscape() {
+    let Some(gpu) = gpu() else { return eprintln!("no GPU adapter; skipping") };
+    // The node holds a noise graph (embedded here, a file in practice) times an amplitude.
+    let inner = crate::landscape::default_graph();
+    let params = crate::meshgraph::NoiseGraphParams { embedded: inner.to_json(), frequency: 1.0, amplitude: 0.5, detached: true, ..Default::default() };
+    let mut g = Graph::default();
+    let pos = g.add(NodeKind::position(), [0.0; 2]);
+    let node = g.add(NodeKind::NoiseGraph(params), [0.0; 2]);
+    let out = g.add(NodeKind::OutDensity, [0.0; 2]);
+    g.connect(pos, node, 0);
+    g.connect(node, out, 0);
+    let s = crate::landscape::Settings::default();
+    let ev = crate::landscape::build_evaluator(&gpu.device, &gpu.queue, &g, &s, &Default::default(), std::path::Path::new(".")).unwrap();
+    let direct = crate::export::Evaluator::new(&gpu.device, &gpu.queue, &inner, 0).unwrap();
+    let pts = points(32, 5);
+    let (a, b) = (ev.eval_points(&pts), direct.eval_points(&pts));
+    for (x, y) in a.iter().zip(&b) {
+        assert!((x - 0.5 * y).abs() < 1e-4, "{x} vs {}", 0.5 * y);
+    }
+}

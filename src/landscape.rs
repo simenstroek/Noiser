@@ -9,6 +9,7 @@
 use crate::editor::Editor;
 use crate::export::{Evaluator, Progress};
 use crate::graph::{Graph, NodeKind, NoiseParams};
+use crate::landscape_masks::{Brush, Mask, Tool};
 use eframe::egui;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
@@ -35,6 +36,13 @@ impl Default for Settings {
     fn default() -> Self {
         Settings { seed: 0, world_m: 2000.0, height_m: 400.0, fit: true, erosion: Default::default() }
     }
+}
+
+/// The names of the masks, for the Mask node's menu (set by the Landscape tab every frame).
+static MASK_NAMES: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+pub fn mask_names() -> Vec<String> {
+    MASK_NAMES.lock().map(|n| n.clone()).unwrap_or_default()
 }
 
 /// The starting graph: position, fractal noise, density output.
@@ -68,6 +76,8 @@ pub fn sample(ev: &Evaluator, n: usize, progress: &Progress) -> Vec<f32> {
 fn side(len: usize) -> usize {
     (len as f64).sqrt().round() as usize
 }
+
+use self::side as side_of;
 
 /// A grid value (`n` x `n`, rows along y) at `x`, `y` across the terrain (0 to 1), by bilinear interpolation.
 pub fn bilinear(grid: &[f32], n: usize, x: f32, y: f32) -> f32 {
@@ -236,6 +246,35 @@ fn render(metres: &[f32], n: usize, world_m: f32, (yaw, pitch, zoom): (f32, f32,
     egui::ColorImage { size: [w, h], source_size: egui::vec2(w as f32, h as f32), pixels }
 }
 
+/// The evaluator for the terrain: Noise Graph nodes inlined, the slope scale set from the size and height, the masks in.
+pub(crate) fn build_evaluator(device: &eframe::wgpu::Device, queue: &eframe::wgpu::Queue, graph: &Graph, s: &Settings, masks: &std::collections::BTreeMap<String, Vec<f32>>, base: &Path) -> Result<Evaluator, String> {
+    let mut g = crate::meshgraph::lowered_mesh(graph, base)?;
+    for n in g.nodes.values_mut() {
+        if let NodeKind::Slope { scale } = &mut n.kind {
+            *scale = s.height_m / s.world_m.max(1.0);
+        }
+    }
+    Evaluator::with_masks(device, queue, &g, s.seed, masks)
+}
+
+/// The map: the terrain from above, lit from the north-west (`m` x `m` metres, `world_m` across).
+fn hillshade(metres: &[f32], m: usize, world_m: f32) -> egui::ColorImage {
+    let cell = world_m / (m - 1) as f32;
+    let (lo, hi) = metres.iter().fold((f32::MAX, f32::MIN), |(lo, hi), v| (lo.min(*v), hi.max(*v)));
+    let at = |x: usize, y: usize| metres[y.min(m - 1) * m + x.min(m - 1)];
+    let pixels = (0..m * m)
+        .map(|k| {
+            let (x, y) = (k % m, k / m);
+            let (dx, dy) = ((at(x + 1, y) - at(x.saturating_sub(1), y)) / (2.0 * cell), (at(x, y + 1) - at(x, y.saturating_sub(1))) / (2.0 * cell));
+            let shade = ((dx * 0.5 + dy * 0.5 + 0.7) / (dx * dx + dy * dy + 1.0).sqrt()).clamp(0.0, 1.0);
+            let h = ((at(x, y) - lo) / (hi - lo).max(1e-3)).clamp(0.0, 1.0);
+            let v = (60.0 + 150.0 * shade) * (0.75 + 0.25 * h);
+            egui::Color32::from_rgb(v as u8, (v * 0.97) as u8, (v * 0.9) as u8)
+        })
+        .collect();
+    egui::ColorImage { size: [m, m], source_size: egui::vec2(m as f32, m as f32), pixels }
+}
+
 /// What a finished job hands back.
 enum Done {
     Values(Vec<f32>),
@@ -270,11 +309,25 @@ pub struct LandscapeWorkspace {
     chunk_log: Vec<String>,
     view: (f32, f32, f32),
     picture: Option<(u64, egui::TextureHandle)>,
+    /// The painted masks (read by Mask nodes), the selected one, the brush and its tool.
+    pub masks: Vec<Mask>,
+    mask_selected: usize,
+    /// Bumped when a mask edit ends (the terrain is sampled again), and on every dab (the overlay is drawn again).
+    mask_rev: u64,
+    mask_live: u64,
+    brush: Brush,
+    tool: Tool,
+    /// The top view shows the map (for painting) instead of the 3D terrain.
+    map_mode: bool,
+    stroke_from: Option<(f32, f32)>,
+    new_mask: String,
+    overlay: Option<((u64, usize), egui::TextureHandle)>,
+    map_picture: Option<(u64, egui::TextureHandle)>,
 }
 
 impl Default for LandscapeWorkspace {
     fn default() -> Self {
-        LandscapeWorkspace { graph: default_graph(), editor: Editor::default(), path: None, settings: Settings::default(), values: None, sampled_key: None, eroded: None, job: None, status: String::new(), chunks: Default::default(), chunk_log: Vec::new(), view: (0.8, 0.6, 1.0), picture: None }
+        LandscapeWorkspace { graph: default_graph(), editor: Editor::default(), path: None, settings: Settings::default(), values: None, sampled_key: None, eroded: None, job: None, status: String::new(), chunks: Default::default(), chunk_log: Vec::new(), view: (0.8, 0.6, 1.0), picture: None, masks: Vec::new(), mask_selected: 0, mask_rev: 0, mask_live: 0, brush: Brush::default(), tool: Tool::Paint, map_mode: false, stroke_from: None, new_mask: String::new(), overlay: None, map_picture: None }
     }
 }
 
@@ -283,10 +336,44 @@ impl LandscapeWorkspace {
         (self.graph, self.settings, self.path) = (graph, settings, path);
     }
 
+    /// Opens the top view as the map, with a mask to paint on if there is none (`--landscape-map`).
+    pub fn show_map(&mut self, on: bool) {
+        self.map_mode = on;
+        if on && self.masks.is_empty() {
+            self.masks.push(Mask::new("mask"));
+        }
+    }
+
+    /// The whole project as JSON: the graph, the settings and the masks (16-bit PNGs, base64).
+    pub fn to_project(&self) -> String {
+        let masks: Vec<_> = self.masks.iter().map(|m| serde_json::json!({ "name": m.name, "png": crate::landscape_masks::base64_encode(&m.to_png()) })).collect();
+        serde_json::json!({ "noiser_landscape": 1, "graph": self.graph.to_json(), "settings": self.settings, "masks": masks }).to_string()
+    }
+
+    /// Replaces the project with one written by `to_project`.
+    pub fn from_project(&mut self, text: &str) -> Result<(), String> {
+        let v: serde_json::Value = serde_json::from_str(text).map_err(|e| e.to_string())?;
+        let graph = Graph::from_json(v.get("graph").and_then(|g| g.as_str()).ok_or("not a landscape project")?)?;
+        let settings = v.get("settings").and_then(|s| serde_json::from_value(s.clone()).ok()).unwrap_or_default();
+        let masks = v.get("masks").and_then(|m| m.as_array()).map(|a| a.iter().filter_map(|m| Mask::from_png(m.get("name")?.as_str()?, &crate::landscape_masks::base64_decode(m.get("png")?.as_str()?)?)).collect()).unwrap_or_default();
+        (self.graph, self.settings, self.masks) = (graph, settings, masks);
+        (self.mask_selected, self.mask_rev) = (0, self.mask_rev + 1);
+        Ok(())
+    }
+
+    fn mask_map(&self) -> std::collections::BTreeMap<String, Vec<f32>> {
+        self.masks.iter().map(|m| (m.name.clone(), m.data.clone())).collect()
+    }
+
+    /// Where a Noise Graph node's relative file names are looked for: the project's folder.
+    fn base_dir(&self) -> PathBuf {
+        self.path.as_ref().and_then(|p| p.parent()).map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("."))
+    }
+
     /// What the sampled values depend on: the graph, the seed and the working resolution.
     fn key(&self) -> u64 {
         let mut h = std::collections::hash_map::DefaultHasher::new();
-        (self.graph.to_json(), self.settings.seed, self.settings.erosion.resolution).hash(&mut h);
+        (self.graph.to_json(), self.settings.seed, self.settings.erosion.resolution, self.mask_rev).hash(&mut h);
         h.finish()
     }
 
@@ -303,26 +390,109 @@ impl LandscapeWorkspace {
         self.eroded.as_ref().filter(|(k, _)| *k == self.erosion_key()).map(|(_, e)| e)
     }
 
+    /// A landscape project (graph, settings, masks) or a plain noise graph (the masks stay).
     fn open(&mut self) {
-        let Some(path) = rfd::FileDialog::new().add_filter("Noise graph", &["noisegraph", "json"]).pick_file() else { return };
-        match std::fs::read_to_string(&path).map_err(|e| e.to_string()).and_then(|t| Graph::from_json(&t)) {
-            Ok(g) => {
-                self.graph = g;
-                self.path = Some(path);
-            }
+        let Some(path) = rfd::FileDialog::new().add_filter("Landscape project or noise graph", &["landscape", "noisegraph", "json"]).pick_file() else { return };
+        let text = match std::fs::read_to_string(&path) {
+            Ok(t) => t,
+            Err(e) => return self.status = format!("could not open: {e}"),
+        };
+        let result = if path.extension().is_some_and(|e| e == "landscape") { self.from_project(&text) } else { Graph::from_json(&text).map(|g| self.graph = g) };
+        match result {
+            Ok(()) => self.path = Some(path),
             Err(e) => self.status = format!("could not open: {e}"),
         }
     }
 
-    fn save(&mut self) {
-        let Some(path) = rfd::FileDialog::new().add_filter("Noise graph", &["noisegraph"]).set_file_name("terrain.noisegraph").save_file() else { return };
-        self.status = match std::fs::write(&path, self.graph.to_json()) {
+    fn save(&mut self, project: bool) {
+        let (title, ext) = if project { ("Landscape project", "landscape") } else { ("Noise graph", "noisegraph") };
+        let Some(path) = rfd::FileDialog::new().add_filter(title, &[ext]).set_file_name(format!("terrain.{ext}")).save_file() else { return };
+        let text = if project { self.to_project() } else { self.graph.to_json() };
+        self.status = match std::fs::write(&path, text) {
             Ok(()) => {
                 self.path = Some(path.clone());
                 format!("Saved {}", path.display())
             }
             Err(e) => format!("could not save: {e}"),
         };
+    }
+}
+
+/// The 3D / Map switch in the corner of the top view (drawn last so nothing covers it).
+fn view_toggle(ui: &mut egui::Ui, rect: egui::Rect, map_mode: &mut bool) {
+    ui.put(egui::Rect::from_min_size(rect.min + egui::vec2(8.0, 6.0), egui::vec2(110.0, 22.0)), |ui: &mut egui::Ui| {
+        ui.horizontal(|ui| {
+            ui.selectable_value(map_mode, false, "3D");
+            ui.selectable_value(map_mode, true, "Map");
+        })
+        .response
+    });
+}
+
+impl LandscapeWorkspace {
+    /// The map view: the terrain from above with the selected mask in red over it, and the brush.
+    fn map_ui(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, rect: egui::Rect, response: &egui::Response, settings: &Settings) {
+        let side = rect.width().min(rect.height());
+        let map = egui::Rect::from_center_size(rect.center(), egui::vec2(side, side));
+        ui.painter().rect_filled(rect, 0.0, egui::Color32::from_gray(24));
+        let whole = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+        if let Some(values) = &self.values {
+            let eroded_key = self.eroded.as_ref().map(|(k, _)| *k).filter(|k| *k == self.erosion_key());
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            (self.sampled_key, eroded_key, settings.world_m.to_bits(), settings.height_m.to_bits(), settings.fit).hash(&mut hasher);
+            let key = hasher.finish();
+            if self.map_picture.as_ref().is_none_or(|(k, _)| *k != key) {
+                let metres = match (&self.eroded, eroded_key) {
+                    (Some((_, e)), Some(_)) => e.clone(),
+                    _ => to_metres(values, settings),
+                };
+                let (grid, m) = shrink(&metres, side_of(metres.len()), 512);
+                self.map_picture = Some((key, ctx.load_texture("landscape map", hillshade(&grid, m, settings.world_m), egui::TextureOptions::LINEAR)));
+            }
+            if let Some((_, tex)) = &self.map_picture {
+                ui.painter().image(tex.id(), map, whole, egui::Color32::WHITE);
+            }
+        }
+        if let Some(mask) = self.masks.get(self.mask_selected) {
+            let key = (self.mask_live, self.mask_selected);
+            if self.overlay.as_ref().is_none_or(|(k, _)| *k != key) {
+                const N: usize = 512;
+                let res = crate::codegen::MASK_RES;
+                let pixels = (0..N * N).map(|k| bilinear(&mask.data, res, (k % N) as f32 / (N - 1) as f32, (k / N) as f32 / (N - 1) as f32)).map(|v| egui::Color32::from_rgba_unmultiplied(255, 60, 40, (v * 170.0) as u8)).collect();
+                let image = egui::ColorImage { size: [N, N], source_size: egui::vec2(N as f32, N as f32), pixels };
+                self.overlay = Some((key, ctx.load_texture("landscape mask", image, egui::TextureOptions::LINEAR)));
+            }
+            if let Some((_, tex)) = &self.overlay {
+                ui.painter().image(tex.id(), map, whole, egui::Color32::WHITE);
+            }
+            // Painting: Shift erases.
+            let tool = if ui.input(|i| i.modifiers.shift) { Tool::Erase } else { self.tool };
+            let norm = |p: egui::Pos2| ((p.x - map.left()) / side, (p.y - map.top()) / side);
+            let inside = |n: (f32, f32)| (0.0..=1.0).contains(&n.0) && (0.0..=1.0).contains(&n.1);
+            if response.dragged_by(egui::PointerButton::Primary) {
+                if let Some(n) = response.interact_pointer_pos().map(norm).filter(|n| inside(*n)) {
+                    let from = self.stroke_from.unwrap_or(n);
+                    let mask = &mut self.masks[self.mask_selected];
+                    mask.stroke(from, n, &self.brush, tool);
+                    self.stroke_from = Some(n);
+                    self.mask_live += 1;
+                }
+            } else if response.clicked_by(egui::PointerButton::Primary) {
+                if let Some(n) = response.interact_pointer_pos().map(norm).filter(|n| inside(*n)) {
+                    self.masks[self.mask_selected].dab(n.0, n.1, &self.brush, tool);
+                    (self.mask_live, self.mask_rev) = (self.mask_live + 1, self.mask_rev + 1);
+                }
+            }
+            if response.drag_stopped() && self.stroke_from.take().is_some() {
+                self.mask_rev += 1;
+            }
+            if let Some(p) = response.hover_pos() {
+                ui.painter().circle_stroke(p, self.brush.radius * side, egui::Stroke::new(1.5, egui::Color32::WHITE));
+                self.brush.radius = (self.brush.radius * (1.0 + ui.input(|i| i.smooth_scroll_delta.y) * 0.002)).clamp(0.002, 0.25);
+            }
+        } else {
+            ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, "Add a mask in the Masks panel, then paint here", egui::FontId::proportional(14.0), egui::Color32::GRAY);
+        }
     }
 }
 
@@ -375,14 +545,19 @@ impl crate::App {
                 }
             }
         }
-        // Sample the preview again when the graph or seed changed and nothing else is running.
+        if let Ok(mut names) = MASK_NAMES.lock() {
+            *names = ls.masks.iter().map(|m| m.name.clone()).collect();
+        }
+        ls.editor.landscape_mode = true;
+        // Sample the preview again when the graph, the seed or a mask changed and nothing else is running.
         let key = ls.key();
         if ls.job.is_none() && ls.sampled_key != Some(key) {
             ls.sampled_key = Some(key);
-            let (graph, seed, resolution) = (ls.graph.clone(), ls.settings.seed, ls.settings.erosion.resolution);
+            let (graph, settings, masks, base) = (ls.graph.clone(), ls.settings.clone(), ls.mask_map(), ls.base_dir());
+            let resolution = settings.erosion.resolution;
             let (tx, rx) = mpsc::channel();
             std::thread::spawn(move || {
-                let r = Evaluator::new(&device, &queue, &graph, seed).map(|ev| sample(&ev, resolution, &Progress::default()));
+                let r = build_evaluator(&device, &queue, &graph, &settings, &masks, &base).map(|ev| sample(&ev, resolution, &Progress::default()));
                 let _ = tx.send(r);
             });
             ls.job = Some(Job::Preview(rx));
@@ -392,15 +567,20 @@ impl crate::App {
         let ls = &mut self.landscape;
         egui::Panel::right("landscape props").default_size(320.0).show(ui, |ui| {
             ui.horizontal(|ui| {
-                if ui.button("Open…").on_hover_text("Opens a noise graph as the terrain.").clicked() {
+                if ui.button("Open…").on_hover_text("Opens a landscape project (graph, settings and masks) or a noise graph as the terrain.").clicked() {
                     ls.open();
                 }
-                if ui.button("Save…").clicked() {
-                    ls.save();
+                if ui.button("Save…").on_hover_text("Saves the project: the graph, the settings and the painted masks, in one file.").clicked() {
+                    ls.save(true);
+                }
+                if ui.button("Graph…").on_hover_text("Saves the graph alone as a noise graph file.").clicked() {
+                    ls.save(false);
                 }
                 if ui.button("New").clicked() {
                     ls.graph = default_graph();
                     ls.path = None;
+                    ls.masks.clear();
+                    ls.mask_rev += 1;
                 }
             });
             ui.separator();
@@ -414,6 +594,7 @@ impl crate::App {
             if ui.add_enabled(!running && ls.values.is_some(), egui::Button::new("Export heightmap for Unreal…")).on_hover_text(format!("A 16-bit PNG at {UNREAL_RES} x {UNREAL_RES} (a valid landscape size) and a .json with the import settings.")).clicked()
                 && let Some(path) = rfd::FileDialog::new().add_filter("16-bit PNG", &["png"]).set_file_name("heightmap.png").save_file() {
                 let (graph, s) = (ls.graph.clone(), ls.settings.clone());
+                let (masks, base) = (ls.mask_map(), ls.base_dir());
                 let eroded = ls.current_eroded().cloned();
                 let (tx, rx) = mpsc::channel();
                 let progress = Progress::default();
@@ -428,7 +609,7 @@ impl crate::App {
                             let metres: Vec<f32> = (0..UNREAL_RES * UNREAL_RES).map(|k| bilinear(&e, n, (k % UNREAL_RES) as f32 * step, (k / UNREAL_RES) as f32 * step)).collect();
                             write_unreal(&path, UNREAL_RES, s.world_m, &encode_unreal(&metres))
                         }
-                        None => Evaluator::new(&device, &queue, &graph, s.seed).and_then(|ev| {
+                        None => build_evaluator(&device, &queue, &graph, &s, &masks, &base).and_then(|ev| {
                             let metres = to_metres(&sample(&ev, UNREAL_RES, &p), &s);
                             write_unreal(&path, UNREAL_RES, s.world_m, &encode_unreal(&metres))
                         }),
@@ -444,6 +625,93 @@ impl crate::App {
             if let Some(Job::Chunks(_, p, _)) = &ls.job {
                 ui.add(egui::ProgressBar::new(p.load(Ordering::Relaxed) as f32 / 1000.0).show_percentage());
             }
+            egui::CollapsingHeader::new("Masks").default_open(true).show(ui, |ui| {
+                ui.weak("Paint masks on the map (the top view's Map button), then read them in the graph with a Mask node: shape a canyon or a ridge, or choose where a noise graph applies. Shift erases; scroll changes the brush size.");
+                ui.horizontal(|ui| {
+                    ui.add(egui::TextEdit::singleline(&mut ls.new_mask).hint_text("new mask").desired_width(120.0));
+                    let name = ls.new_mask.trim().to_string();
+                    if ui.add_enabled(!name.is_empty() && !ls.masks.iter().any(|m| m.name == name), egui::Button::new("Add")).clicked() {
+                        ls.masks.push(Mask::new(&name));
+                        (ls.mask_selected, ls.map_mode) = (ls.masks.len() - 1, true);
+                        ls.mask_live += 1;
+                        ls.new_mask.clear();
+                    }
+                });
+                let mut pick = None;
+                for (i, m) in ls.masks.iter().enumerate() {
+                    if ui.selectable_label(i == ls.mask_selected, &m.name).clicked() {
+                        pick = Some(i);
+                    }
+                }
+                if let Some(i) = pick {
+                    (ls.mask_selected, ls.map_mode) = (i, true);
+                    ls.mask_live += 1;
+                }
+                let (mut rename, mut delete, mut edited) = (None, false, false);
+                let others: Vec<String> = ls.masks.iter().enumerate().filter(|(i, _)| *i != ls.mask_selected).map(|(_, m)| m.name.clone()).collect();
+                if let Some(m) = ls.masks.get_mut(ls.mask_selected) {
+                    ui.horizontal(|ui| {
+                        let old = m.name.clone();
+                        let mut name = m.name.clone();
+                        if ui.add(egui::TextEdit::singleline(&mut name).desired_width(120.0)).changed() && !name.is_empty() && !others.contains(&name) {
+                            rename = Some((old, name.clone()));
+                            m.name = name;
+                        }
+                        if ui.button("Delete").clicked() {
+                            delete = true;
+                        }
+                    });
+                    ui.horizontal(|ui| {
+                        if ui.button("Clear").clicked() {
+                            m.fill(0.0);
+                            edited = true;
+                        }
+                        if ui.button("Fill").clicked() {
+                            m.fill(1.0);
+                            edited = true;
+                        }
+                        if ui.button("Invert").clicked() {
+                            m.invert();
+                            edited = true;
+                        }
+                        if ui.button("Blur").on_hover_text("Softens the whole mask (a few metres at a time on a 2 km terrain).").clicked() {
+                            m.blur(6);
+                            edited = true;
+                        }
+                    });
+                }
+                if let Some((old, new)) = rename {
+                    // Mask nodes that read the old name follow the rename.
+                    for node in ls.graph.nodes.values_mut() {
+                        if let NodeKind::Mask { name } = &mut node.kind {
+                            if *name == old {
+                                *name = new.clone();
+                            }
+                        }
+                    }
+                }
+                if delete && ls.mask_selected < ls.masks.len() {
+                    ls.masks.remove(ls.mask_selected);
+                    ls.mask_selected = ls.mask_selected.saturating_sub(1);
+                    edited = true;
+                }
+                if edited {
+                    ls.mask_rev += 1;
+                    ls.mask_live += 1;
+                }
+                ui.horizontal(|ui| {
+                    ui.selectable_value(&mut ls.tool, Tool::Paint, "Paint");
+                    ui.selectable_value(&mut ls.tool, Tool::Erase, "Erase");
+                    ui.selectable_value(&mut ls.tool, Tool::Smooth, "Smooth");
+                });
+                let world = ls.settings.world_m;
+                let mut radius_m = ls.brush.radius * world;
+                if ui.add(egui::DragValue::new(&mut radius_m).range(1.0..=world * 0.5).speed(1.0).prefix("radius ").suffix(" m")).changed() {
+                    ls.brush.radius = radius_m / world.max(1.0);
+                }
+                ui.add(egui::DragValue::new(&mut ls.brush.strength).range(0.01..=1.0).speed(0.01).prefix("strength "));
+                ui.add(egui::DragValue::new(&mut ls.brush.hardness).range(0.0..=1.0).speed(0.01).prefix("hardness "));
+            });
             egui::CollapsingHeader::new("Erosion").default_open(true).show(ui, |ui| {
                 let d = crate::landscape_erosion::Erosion::default();
                 let max = crate::landscape_erosion::max_resolution(&device);
@@ -523,13 +791,14 @@ impl crate::App {
                 ui.weak(format!("{0} x {0} chunks of {1} m, {2} x {2} quads (about {3} triangles) each; tiles 1001 to {4}.", plan.chunks, plan.chunk_m, plan.quads, 2 * plan.quads * plan.quads, crate::udim::udim(plan.chunks * plan.chunks - 1)));
                 if ui.add_enabled(!running && !o.folder.is_empty(), egui::Button::new("Export chunks")).on_hover_text("Writes every chunk's mesh (centimetres, the chunk's corner at its origin), its normal, occlusion and curvature maps, and a manifest with each chunk's location.").clicked() {
                     let (graph, s, opts) = (ls.graph.clone(), ls.settings.clone(), o.clone());
+                    let (masks, base) = (ls.mask_map(), ls.base_dir());
                     let eroded = ls.current_eroded().cloned();
                     let (tx, rx) = mpsc::channel();
                     let (progress, log) = (Progress::default(), std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new())));
                     let (p, l) = (progress.clone(), log.clone());
                     let (device, queue) = (device.clone(), queue.clone());
                     std::thread::spawn(move || {
-                        let r = Evaluator::new(&device, &queue, &graph, s.seed).and_then(|ev| {
+                        let r = build_evaluator(&device, &queue, &graph, &s, &masks, &base).and_then(|ev| {
                             let grid = eroded.as_ref().map(|e| (e.as_slice(), side(e.len())));
                             crate::landscape_chunks::export(&ev, grid, &s, &opts, &p, &mut |m| l.lock().unwrap().push(m.to_string()))
                         });
@@ -563,6 +832,11 @@ impl crate::App {
         egui::Panel::top("landscape view").resizable(true).default_size(380.0).show(ui, |ui| {
             let size = ui.available_size();
             let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click_and_drag());
+            if ls.map_mode {
+                ls.map_ui(ui, &ctx, rect, &response, &settings);
+                view_toggle(ui, rect, &mut ls.map_mode);
+                return;
+            }
             if response.dragged() {
                 let delta = response.drag_delta();
                 new_view.0 -= delta.x * 0.01;
@@ -595,6 +869,7 @@ impl crate::App {
                 ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, if matches!(ls.job, Some(Job::Preview(_))) { "Sampling…" } else { "No terrain: the graph has no density output, or has an error" }, egui::FontId::proportional(14.0), egui::Color32::GRAY);
             }
             ui.painter().text(rect.left_bottom() + egui::vec2(8.0, -8.0), egui::Align2::LEFT_BOTTOM, "drag to orbit, scroll to zoom", egui::FontId::proportional(11.0), egui::Color32::from_white_alpha(120));
+            view_toggle(ui, rect, &mut ls.map_mode);
         });
         ls.view = new_view;
         let tiling = ls.graph.tiling();
@@ -641,6 +916,20 @@ mod tests {
         assert_eq!(side["resolution"], 33);
         // 1000 m over 32 quads: 3125 cm per quad.
         assert!((side["unreal_import"]["scale"][0].as_f64().unwrap() - 3125.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn a_project_keeps_the_graph_the_settings_and_the_masks() {
+        let mut a = LandscapeWorkspace::default();
+        a.settings.world_m = 3000.0;
+        let mut m = Mask::new("canyon");
+        m.dab(0.4, 0.4, &Brush::default(), Tool::Paint);
+        a.masks.push(m);
+        let mut b = LandscapeWorkspace::default();
+        b.from_project(&a.to_project()).unwrap();
+        assert_eq!((b.graph.to_json(), b.settings.world_m, b.masks.len(), b.masks[0].name.as_str()), (a.graph.to_json(), 3000.0, 1, "canyon"));
+        assert!(a.masks[0].data.iter().zip(&b.masks[0].data).all(|(x, y)| (x - y).abs() < 2e-5));
+        assert!(b.from_project("{\"nothing\": 1}").is_err());
     }
 
     #[test]

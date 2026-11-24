@@ -59,6 +59,15 @@ pub enum NodeKind {
     Position { scale: [f32; 3] },
     /// Position in cylindrical or spherical coordinates around a centre and an axis (see `RadialParams`). Input: position (defaults to world position).
     Radial(RadialParams),
+    /// The painted mask `name` of the Landscape tab at the position (x and y across the terrain, 0 to 1): a value from 0 to 1.
+    /// Input: position (defaults to world position).
+    Mask { name: String },
+    /// The slope of its input field over x and y across the terrain, in degrees: `atan(scale * |gradient|)`. The
+    /// Landscape tab sets `scale` to the height divided by the size, so one unit of the field is one height.
+    Slope {
+        #[serde(default = "one")]
+        scale: f32,
+    },
     /// A waypoint on a wire: passes its input through (every reader skips it, like a muted node).
     Reroute,
     /// The named end of a wire (Unreal's named reroute): passes its input on, and any `NamedRerouteUse` with the
@@ -145,7 +154,7 @@ impl NodeKind {
             NodeKind::Separate => 1,
             NodeKind::Curve { .. } => 1,
             NodeKind::Noise(_) | NodeKind::Grid { .. } | NodeKind::Pattern(_) => 1 + self.param_pins().len(),
-            NodeKind::Normal { .. } | NodeKind::Radial(_) | NodeKind::OutDensity | NodeKind::OutNormal => 1,
+            NodeKind::Normal { .. } | NodeKind::Radial(_) | NodeKind::Mask { .. } | NodeKind::Slope { .. } | NodeKind::OutDensity | NodeKind::OutNormal => 1,
             NodeKind::LoadMesh(_) | NodeKind::LoadSdf(_) | NodeKind::NoiseGraph(_) | NodeKind::Remesh { .. } | NodeKind::AutoUv(_) | NodeKind::OutMesh(_) | NodeKind::OutImage(_) | NodeKind::ImageSplit | NodeKind::ImageLevels { .. } => 1,
             NodeKind::Bake(s) => 2 + s.custom.len(),
             NodeKind::ImageCombine => 4,
@@ -725,6 +734,11 @@ impl Graph {
                 if whole { Coord } else { Broken("a position scaled by a value that is not a known whole number".into()) }
             }
             NodeKind::Radial(_) => Broken("a radial position does not tile".into()),
+            NodeKind::Mask { .. } => Broken("a painted mask does not tile".into()),
+            NodeKind::Slope { .. } => match input(0, memo, stack).unwrap_or(Const) {
+                Coord => Const, // the slope of a linear position map is constant
+                t => t,
+            },
             NodeKind::Reroute | NodeKind::NamedReroute { .. } => input(0, memo, stack).unwrap_or(Const),
             NodeKind::NamedRerouteUse { name } => match self.named_declaration(name).and_then(|d| self.input(d, 0)) {
                 Some(src) => self.tiling_of(src, memo, stack),
@@ -1035,6 +1049,8 @@ impl Graph {
                 None => (0.0, 0.0),
             },
             NodeKind::Normal { .. } => (-1.0, 1.0),
+            NodeKind::Mask { .. } => (0.0, 1.0),
+            NodeKind::Slope { .. } => (0.0, 90.0),
             // noise.wgsl keeps every kind within [-1, 1] (Perlin and Simplex are clamped).
             NodeKind::Noise(n) => scaled(if n.normalize { (0.0, 1.0) } else { (-1.0, 1.0) }, n.amount),
             NodeKind::Math { op, a, b, c } => {

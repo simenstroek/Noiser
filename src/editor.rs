@@ -64,6 +64,8 @@ pub struct Editor {
     pub selected: BTreeSet<NodeId>,
     /// The mesh graph's editor: its add menus offer the mesh nodes.
     pub mesh_mode: bool,
+    /// The Landscape tab's editor: its add menus offer the Mask, Slope and Noise Graph nodes.
+    pub landscape_mode: bool,
     /// A node was double-clicked this frame (the app opens what it refers to).
     pub opened: Option<NodeId>,
     /// Snap nodes to a 20-unit grid when a drag ends (a preference).
@@ -107,6 +109,7 @@ impl Default for Editor {
             zoom: 1.0,
             selected: BTreeSet::new(),
             mesh_mode: false,
+            landscape_mode: false,
             opened: None,
             snap: false,
             cut_start: None,
@@ -152,6 +155,8 @@ pub fn title(kind: &NodeKind) -> String {
         NodeKind::NamedReroute { name } => format!("{name}  (reroute)"),
         NodeKind::NamedRerouteUse { name } => name.clone(),
         NodeKind::Normal { .. } => "Normal".into(),
+        NodeKind::Mask { name } => if name.is_empty() { "Mask".into() } else { format!("Mask: {name}") },
+        NodeKind::Slope { .. } => "Slope".into(),
         NodeKind::Noise(n) => n.kind.name().into(),
         NodeKind::OutDensity => "Density Output".into(),
         NodeKind::OutNormal => "Normal Output".into(),
@@ -199,7 +204,8 @@ fn input_label(kind: &NodeKind, port: usize) -> &'static str {
         (NodeKind::Grid { .. } | NodeKind::Pattern(_) | NodeKind::Noise(_), port) if port > 0 => kind.param_pins()[port - 1].label,
         (NodeKind::Grid { .. } | NodeKind::Pattern(_), _) => "Position",
         (NodeKind::Noise(_) | NodeKind::Radial(_), _) => "Position",
-        (NodeKind::Normal { .. }, _) => "Field",
+        (NodeKind::Normal { .. } | NodeKind::Slope { .. }, _) => "Field",
+        (NodeKind::Mask { .. }, _) => "Position",
         (NodeKind::OutDensity, _) => "Density",
         (NodeKind::OutNormal, _) => "Normal",
         (NodeKind::LoadMesh(_) | NodeKind::LoadSdf(_) | NodeKind::NoiseGraph(_), _) => "Position",
@@ -224,7 +230,7 @@ fn input_label(kind: &NodeKind, port: usize) -> &'static str {
 fn header_tint(kind: &NodeKind) -> Color32 {
     match kind {
         NodeKind::Noise(_) | NodeKind::Pattern(_) | NodeKind::Grid { .. } => Color32::from_rgb(50, 95, 70),
-        NodeKind::Math { .. } | NodeKind::Remap { .. } | NodeKind::Mix { .. } | NodeKind::Curve { .. } | NodeKind::Normal { .. } => Color32::from_rgb(55, 70, 110),
+        NodeKind::Math { .. } | NodeKind::Remap { .. } | NodeKind::Mix { .. } | NodeKind::Curve { .. } | NodeKind::Normal { .. } | NodeKind::Slope { .. } | NodeKind::Mask { .. } => Color32::from_rgb(55, 70, 110),
         NodeKind::OutDensity | NodeKind::OutNormal | NodeKind::OutMesh(_) | NodeKind::OutImage(_) => Color32::from_rgb(80, 60, 95),
         NodeKind::LoadMesh(_) | NodeKind::LoadSdf(_) | NodeKind::NoiseGraph(_) => Color32::from_rgb(50, 95, 70),
         NodeKind::Remesh { .. } | NodeKind::AutoUv(_) | NodeKind::Bake(_) | NodeKind::TransferUv | NodeKind::ImageSplit | NodeKind::ImageCombine | NodeKind::ImageLevels { .. } => Color32::from_rgb(50, 100, 110),
@@ -241,6 +247,7 @@ pub fn has_output(kind: &NodeKind) -> bool {
     !matches!(kind, NodeKind::OutDensity | NodeKind::OutNormal | NodeKind::OutMesh(_) | NodeKind::OutImage(_))
 }
 
+static LANDSCAPE_MODE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 /// Whether the add menus offer the mesh graph's nodes (and leave out the noise graph's outputs) instead of the
 /// noise graph's: set by the editor each frame from `Editor::mesh_mode`.
 static MESH_MODE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -262,6 +269,13 @@ fn summary(kind: &NodeKind) -> String {
 fn palette() -> Vec<(&'static str, NodeKind)> {
     let mesh_mode = MESH_MODE.load(std::sync::atomic::Ordering::Relaxed);
     let mut all = noise_palette();
+    if LANDSCAPE_MODE.load(std::sync::atomic::Ordering::Relaxed) {
+        all.extend([
+            ("Mask", NodeKind::Mask { name: String::new() }),
+            ("Slope", NodeKind::Slope { scale: 1.0 }),
+            ("Noise Graph", NodeKind::NoiseGraph(Default::default())),
+        ]);
+    }
     if mesh_mode {
         all.retain(|(_, k)| !matches!(k, NodeKind::OutDensity | NodeKind::OutNormal));
         all.extend([
@@ -487,6 +501,7 @@ impl Editor {
 
     pub fn show(&mut self, ui: &mut egui::Ui, graph: &mut Graph, tiling: &BTreeMap<NodeId, Tiling>) {
         MESH_MODE.store(self.mesh_mode, std::sync::atomic::Ordering::Relaxed);
+        LANDSCAPE_MODE.store(self.landscape_mode, std::sync::atomic::Ordering::Relaxed);
         // Most edits land after the nodes were drawn this frame, and egui only redraws on input,
         // so redraw once more whenever the graph, selection, preview or menu changed.
         let before = (graph.clone(), self.selected.clone(), self.preview, self.pin_menu.is_some());
