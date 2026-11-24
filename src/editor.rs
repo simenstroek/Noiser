@@ -162,6 +162,7 @@ pub fn title(kind: &NodeKind) -> String {
         NodeKind::OutDensity => "Density Output".into(),
         NodeKind::OutNormal => "Normal Output".into(),
         NodeKind::LoadSdf(p) => std::path::Path::new(&p.file).file_stem().filter(|_| !p.file.is_empty()).map_or("Load SDF".into(), |s| s.to_string_lossy().into_owned()),
+        NodeKind::Scatter(p) => std::path::Path::new(&p.file).file_stem().filter(|_| !p.file.is_empty()).map_or("Scatter SDF".into(), |s| format!("Scatter {}", s.to_string_lossy())),
         NodeKind::LoadMesh(p) => std::path::Path::new(&p.path).file_stem().filter(|_| !p.path.is_empty()).map_or(if p.sdf { "Load SDF" } else { "Load Mesh" }.into(), |s| s.to_string_lossy().into_owned()),
         NodeKind::NoiseGraph(p) => std::path::Path::new(&p.file).file_stem().map_or("Noise Graph".into(), |s| s.to_string_lossy().into_owned()),
         NodeKind::Remesh { .. } => "Remesh".into(),
@@ -210,6 +211,8 @@ fn input_label(kind: &NodeKind, port: usize) -> &'static str {
         (NodeKind::OutDensity, _) => "Density",
         (NodeKind::OutNormal, _) => "Normal",
         (NodeKind::LoadMesh(_) | NodeKind::LoadSdf(_) | NodeKind::NoiseGraph(_), _) => "Position",
+        (NodeKind::Scatter(_), 0) => "Field",
+        (NodeKind::Scatter(_), _) => "Roughen",
         (NodeKind::Remesh { .. }, _) => "Field",
         (NodeKind::AutoUv(_) | NodeKind::OutMesh(_), _) => "Mesh",
         (NodeKind::TransferUv, 0) => "Target",
@@ -237,6 +240,7 @@ fn header_tint(kind: &NodeKind) -> Color32 {
         NodeKind::Slope { .. } => Color32::from_rgb(112, 96, 58),
         NodeKind::OutDensity | NodeKind::OutNormal | NodeKind::OutMesh(_) | NodeKind::OutImage(_) => Color32::from_rgb(80, 60, 95),
         NodeKind::LoadMesh(_) | NodeKind::LoadSdf(_) | NodeKind::NoiseGraph(_) => Color32::from_rgb(50, 95, 70),
+        NodeKind::Scatter(_) => Color32::from_rgb(70, 110, 60),
         NodeKind::Remesh { .. } | NodeKind::AutoUv(_) | NodeKind::Bake(_) | NodeKind::TransferUv | NodeKind::ImageSplit | NodeKind::ImageCombine | NodeKind::ImageLevels { .. } => Color32::from_rgb(50, 100, 110),
         _ => Color32::from_rgb(78, 78, 84),
     }
@@ -284,6 +288,7 @@ fn palette() -> Vec<(&'static str, NodeKind)> {
         all.retain(|(_, k)| !matches!(k, NodeKind::OutDensity | NodeKind::OutNormal));
         all.extend([
             ("Load Mesh", NodeKind::LoadMesh(Default::default())),
+            ("Scatter SDF", NodeKind::Scatter(Default::default())),
             ("Noise Graph", NodeKind::NoiseGraph(Default::default())),
             ("Remesh", NodeKind::Remesh { triangles: 20_000, adaptivity: 1.0 }),
             ("Auto UVs", NodeKind::AutoUv(Default::default())),

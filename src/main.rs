@@ -25,6 +25,7 @@ mod meshworkspace;
 mod landscape;
 mod landscape_chunks;
 mod landscape_field;
+mod scatter;
 mod landscape_masks;
 mod landscape_erosion;
 mod udim;
@@ -52,6 +53,8 @@ mod sdf_model;
 mod gpu_tests;
 #[cfg(test)]
 mod gpu_terrain_tests;
+#[cfg(test)]
+mod demo_scene;
 mod vdb;
 mod view;
 
@@ -262,6 +265,7 @@ impl App {
         let mut mesh_tab = false;
         let mut landscape_tab = false;
         let mut landscape_map = false;
+        let mut landscape_arg: Option<std::path::PathBuf> = None;
         let mut library_root_arg: Option<String> = None;
         let mut show_library = false;
         let mut library_tab: Option<library::Kind> = None;
@@ -352,6 +356,8 @@ impl App {
             } else if a.to_lowercase().ends_with(".sdf") {
                 // An SDF Modeler file given as a plain file name opens in the SDF Composer tab.
                 sdf_arg = Some(std::path::PathBuf::from(a));
+            } else if a.to_lowercase().ends_with(".landscape") {
+                landscape_arg = Some(std::path::PathBuf::from(a));
             } else if a.to_lowercase().ends_with(".meshgraph") {
                 // A mesh graph given as a plain file name ("open with") opens in the Mesh graph tab.
                 mesh_graph_arg = Some(std::path::PathBuf::from(a));
@@ -480,6 +486,10 @@ impl App {
         }
         if mesh_tab || mesh_graph_arg.is_some() {
             app.workspace = meshworkspace::Workspace::Mesh;
+        }
+        if let Some(p) = landscape_arg {
+            app.landscape.open_path(p);
+            landscape_tab = true;
         }
         if landscape_tab {
             app.workspace = meshworkspace::Workspace::Landscape;

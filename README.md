@@ -57,7 +57,7 @@ A terrain workspace where a noise graph is the height function. Masks are painte
 
 Plan and status: [`docs/landscape-plan.md`](docs/landscape-plan.md).
 
-**In progress / experimental:** terrain chunks from a heightmap in the Mesh graph. *Load Mesh* given a Landscape heightmap PNG can be remeshed in chunks with planar UVs, so 3D detail can later go on top of the terrain. Expect rough edges.
+**Terrain with 3D shapes (new, rough edges):** in the Mesh graph, *Load Mesh* given a Landscape heightmap PNG is the ground. *Scatter SDF* plants copies of a Composer shape across it by a rule (spacing, density, size, slope, height; each kind with its own noise graph), *Remesh* cuts the result into chunks that match at their borders, and `tools/unreal_import_terrain.py` brings the chunks into Unreal as Nanite meshes with a terrain material. The whole path is in [`docs/terrain-workflow.md`](docs/terrain-workflow.md).
 
 ## How the pieces fit
 

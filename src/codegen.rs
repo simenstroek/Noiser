@@ -187,6 +187,7 @@ fn compile_inner(g: &Graph, caches: &BTreeMap<NodeId, u32>, eps: f32, preview: b
                 let loaded = crate::sdf_node::load(&p.file);
                 params.extend(p.shader_params(loaded.as_ref().as_ref().ok()));
             }
+            NodeKind::Scatter(p) => params.extend(p.shader_params()),
             NodeKind::Noise(n) => params.extend([
                 n.scale,
                 if n.normalize { 1.0 } else { 0.0 },
@@ -257,10 +258,17 @@ fn compile_inner(g: &Graph, caches: &BTreeMap<NodeId, u32>, eps: f32, preview: b
     }
     wgsl += &cg.kinds.iter().map(|&k| fbm_function(k, general_worley)).collect::<String>();
     for id in &cg.sdf_used {
+        if let NodeKind::Scatter(p) = &g.nodes[id].kind
+            && let Ok(data) = crate::sdf_node::load(&p.file).as_ref()
+            && let Some(land) = cg.land_slot()
+        {
+            wgsl += &crate::sdf_node::embed(&format!("sdf{id}_"), &data.scene, true);
+            wgsl += &crate::scatter::wgsl(*id, cg.slots[id], land);
+        }
         if let NodeKind::LoadSdf(p) = &g.nodes[id].kind
             && let Ok(data) = crate::sdf_node::load(&p.file).as_ref()
         {
-            wgsl += &crate::sdf_node::embed(&format!("sdf{id}_"), &data.scene);
+            wgsl += &crate::sdf_node::embed(&format!("sdf{id}_"), &data.scene, p.z_up);
             if p.stamp {
                 // Sphere tracing straight down from the top of the shape's box: the first hit is its top surface.
                 wgsl += &format!("
@@ -268,7 +276,7 @@ fn sdf{id}_top(q: vec2f, off: vec3f, s: f32, c: vec3f, zhi: f32, zlo: f32) -> f3
     let eps = 0.0005 * (zhi - zlo);
     var z = zhi;
     for (var i = 0; i < 96; i++) {{
-        let d = sdf{id}_map(c + (vec3f(q, z) - off) / s) * s;
+        let d = sdf{id}_at(vec3f(q, z), off, s, c);
         if (d < eps) {{ return z; }}
         z -= max(d, eps);
         if (z < zlo) {{ break; }}
@@ -311,6 +319,11 @@ fn fbm_function(kind: NoiseKind, general_worley: bool) -> String {
 }
 
 impl Gen<'_> {
+    /// The mesh slot of the terrain: the first Load Mesh node that has a heightmap.
+    fn land_slot(&self) -> Option<usize> {
+        self.mesh_slots.iter().position(|id| matches!(&self.g.nodes[id].kind, NodeKind::LoadMesh(p) if crate::landscape_field::is_heightmap(&p.path)))
+    }
+
     /// Writes `fn c{root}(p) -> T` evaluating everything upstream of `root`. Returns T.
     fn cone(&mut self, root: NodeId) -> Result<Ty, String> {
         if self.done.contains(&root) {
@@ -440,9 +453,24 @@ impl Gen<'_> {
                     }
                     Ok(_) => {
                         self.sdf_used.insert(id);
-                        (Ty::F, format!("sdf{id}_map(vec3f(P[{}], P[{}], P[{}]) + ({q} - vec3f(P[{s}], P[{}], P[{}])) / P[{}]) * P[{}]", s + 4, s + 5, s + 6, s + 1, s + 2, s + 3, s + 3))
+                        (Ty::F, format!("sdf{id}_at({q}, vec3f(P[{s}], P[{}], P[{}]), P[{}], vec3f(P[{}], P[{}], P[{}]))", s + 1, s + 2, s + 3, s + 4, s + 5, s + 6))
                     }
                     Err(_) => (Ty::F, "1000.0".into()),
+                }
+            }
+            // Copies of a shape across the terrain: the shader gets its own copy of the interpreter and a function (scatter.rs).
+            NodeKind::Scatter(p) => {
+                let base = self.operand(id, 0, Ty::F, "1.0e6");
+                let displace = self.operand(id, 1, Ty::F, "0.0");
+                if self.land_slot().is_none() {
+                    return Err("a Scatter SDF node needs a terrain: add a Load Mesh node with a heightmap".into());
+                }
+                match crate::sdf_node::load(&p.file).as_ref() {
+                    Ok(_) => {
+                        self.sdf_used.insert(id);
+                        (Ty::F, format!("scatter{id}(p, {base}, {displace})"))
+                    }
+                    Err(_) => (Ty::F, base),
                 }
             }
             NodeKind::NoiseGraph(_) => return Err("a Noise Graph node must be lowered first (meshgraph::lowered_mesh)".into()),

@@ -19,7 +19,7 @@ pub(crate) struct Gpu {
 pub(crate) fn gpu() -> Option<Gpu> {
     // A test that panicked while holding the lock poisons it; the lock has no data to protect.
     let serial = GPU_TESTS.lock().unwrap_or_else(|e| e.into_inner());
-    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor { backends: crate::view::preferred_backends(), ..wgpu::InstanceDescriptor::new_without_display_handle() });
     let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default())).ok()?;
     let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).ok()?;
     Some(Gpu { device, queue, _serial: serial })

@@ -550,6 +550,8 @@ impl MeshWorkspace {
                     _ => None,
                 });
                 if let Some((side, z)) = terrain {
+                    p.z_up = true;
+                    p.snap = true;
                     p.size = side / 20.0;
                     p.offset = [side / 2.0, side / 2.0, z];
                 }

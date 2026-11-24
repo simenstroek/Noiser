@@ -92,6 +92,21 @@ impl Heights {
         (sum / count.max(1) as f64) as f32
     }
 
+    /// The height of the ground at (x, y), bilinear (the nearest edge outside the terrain).
+    pub fn ground(&self, x: f32, y: f32) -> f32 {
+        let g = |v: f32| (v / self.cell).clamp(0.0, (self.n - 1) as f32);
+        let (gx, gy) = (g(x), g(y));
+        let (i, j) = ((gx as usize).min(self.n - 2), (gy as usize).min(self.n - 2));
+        let (fx, fy) = (gx - i as f32, gy - j as f32);
+        let h = |i: usize, j: usize| self.h[j * self.n + i];
+        (h(i, j) * (1.0 - fx) + h(i + 1, j) * fx) * (1.0 - fy) + (h(i, j + 1) * (1.0 - fx) + h(i + 1, j + 1) * fx) * fy
+    }
+
+    /// The lowest ground within `r` of (x, y): the centre and eight points around.
+    pub fn lowest_ground(&self, x: f32, y: f32, r: f32) -> f32 {
+        (0..9).map(|k| if k == 8 { (x, y) } else { let a = k as f32 * std::f32::consts::FRAC_PI_4; (x + r * a.cos(), y + r * a.sin()) }).map(|(px, py)| self.ground(px, py)).fold(f32::MAX, f32::min)
+    }
+
     /// Texture size: a square of `min(n, 2048)` texels, in `tiles()` by `tiles()` layers.
     pub fn tile_size(&self) -> usize {
         self.n.min(TILE)

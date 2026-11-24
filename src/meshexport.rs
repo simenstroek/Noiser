@@ -254,12 +254,40 @@ fn land_dist(t: texture_3d<f32>, p: vec3f, m: MeshInfo) -> f32 {
     let h = mix(mix(h00, h10, f.x), mix(h01, h11, f.x), f.y);
     let dx = mix(h10 - h00, h11 - h01, f.y) / m.voxel;
     let dy = mix(h01 - h00, h11 - h10, f.x) / m.voxel;
-    // The terrain ends at its square: outside it the field is the distance to the square, so it is empty there
-    // (the surface at the border stands as a short wall, not as ground running off to infinity).
-    let w = f32(n - 1) * m.voxel;
-    let out = vec2f(max(max(m.origin.x - p.x, p.x - (m.origin.x + w)), 0.0), max(max(m.origin.y - p.y, p.y - (m.origin.y + w)), 0.0));
-    return max((p.z - h) * inverseSqrt(1.0 + dx * dx + dy * dy), length(out));
+    // The terrain ends at its square: the ground below the height, cut by the signed distance to the square (negative
+    // inside), so the field is empty outside it. The square is a hair larger than the terrain so that lattice points on
+    // its edge are inside: the surface then simply ends at the border (no wall, no ragged edge).
+    let middle = 0.5 * f32(n - 1) * m.voxel;
+    let half = middle + 0.5 * m.voxel;
+    let q = abs(p.xy - (m.origin.xy + vec2f(middle))) - vec2f(half);
+    let square = length(max(q, vec2f(0.0))) + min(max(q.x, q.y), 0.0);
+    // The square counts 1024 times over, and reaches half a sample past the terrain, so the lattice points on the border are
+    // far enough inside that noise added to the field cannot flip them: without that, noise of half a metre stood a ragged
+    // wall of surface along the whole border, as deep as the lattice goes.
+    return max((p.z - h) * inverseSqrt(1.0 + dx * dx + dy * dy), 1024.0 * square);
 }
+// The ground under (x, y) for scattering: height and the slope along x and along y; and the terrain's lowest and highest
+// height (centre.y and centre.z).
+fn land_sample(t: texture_3d<f32>, xy: vec2f, m: MeshInfo) -> vec3f {
+    let n = i32(m.origin.z);
+    let tiles = i32(m.centre.x);
+    let g = clamp((xy - m.origin.xy) / m.voxel, vec2f(0.0), vec2f(f32(n - 1)));
+    let i = vec2i(floor(g));
+    let f = g - vec2f(i);
+    let h00 = land_h(t, i.x, i.y, n, tiles);
+    let h10 = land_h(t, i.x + 1, i.y, n, tiles);
+    let h01 = land_h(t, i.x, i.y + 1, n, tiles);
+    let h11 = land_h(t, i.x + 1, i.y + 1, n, tiles);
+    return vec3f(mix(mix(h00, h10, f.x), mix(h01, h11, f.x), f.y), mix(h10 - h00, h11 - h01, f.y) / m.voxel, mix(h01 - h00, h11 - h10, f.x) / m.voxel);
+}
+fn land_ground_0(xy: vec2f) -> vec3f { return land_sample(mesh_tex, xy, meshes[0]); }
+fn land_ground_1(xy: vec2f) -> vec3f { return land_sample(mesh_tex1, xy, meshes[1]); }
+fn land_ground_2(xy: vec2f) -> vec3f { return land_sample(mesh_tex2, xy, meshes[2]); }
+fn land_ground_3(xy: vec2f) -> vec3f { return land_sample(mesh_tex3, xy, meshes[3]); }
+fn land_range_0() -> vec2f { return meshes[0].centre.yz; }
+fn land_range_1() -> vec2f { return meshes[1].centre.yz; }
+fn land_range_2() -> vec2f { return meshes[2].centre.yz; }
+fn land_range_3() -> vec2f { return meshes[3].centre.yz; }
 fn mesh_dist_0(p: vec3f) -> f32 { let m = meshes[0]; if (m.scale < 0.0) { return land_dist(mesh_tex, p, m); } return mesh_sdf_at(mesh_tex, (p - m.centre) / m.scale, m.origin, m.voxel) * m.scale; }
 fn mesh_dist_1(p: vec3f) -> f32 { let m = meshes[1]; if (m.scale < 0.0) { return land_dist(mesh_tex1, p, m); } return mesh_sdf_at(mesh_tex1, (p - m.centre) / m.scale, m.origin, m.voxel) * m.scale; }
 fn mesh_dist_2(p: vec3f) -> f32 { let m = meshes[2]; if (m.scale < 0.0) { return land_dist(mesh_tex2, p, m); } return mesh_sdf_at(mesh_tex2, (p - m.centre) / m.scale, m.origin, m.voxel) * m.scale; }

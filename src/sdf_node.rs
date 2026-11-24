@@ -27,11 +27,17 @@ pub struct LoadSdfParams {
     /// Output the height of the shape's top surface at each (x, y) instead of its distance: how a shape goes into a
     /// height field (the Landscape tab). Where the shape is not, the output is -1000, so a Maximum with the ground ignores it.
     pub stamp: bool,
+    /// Beside a terrain (a Load Mesh with a heightmap): stand the shape on it. The offset's height is ignored: the shape's
+    /// lowest point sits on the lowest ground under its footprint, sunk by `sink` times its size.
+    pub snap: bool,
+    pub sink: f32,
+    /// The file's up (+Y, as the Composer shows it) stands along the field's +Z: for terrain graphs, where z is up.
+    pub z_up: bool,
 }
 
 impl Default for LoadSdfParams {
     fn default() -> Self {
-        LoadSdfParams { file: String::new(), fit: true, size: 0.8, offset: [0.5; 3], stamp: false }
+        LoadSdfParams { file: String::new(), fit: true, size: 0.8, offset: [0.5; 3], stamp: false, snap: false, sink: 0.05, z_up: false }
     }
 }
 
@@ -64,8 +70,16 @@ impl LoadSdfParams {
         let (lo, hi) = data.scene.bounds?;
         let [ox, oy, oz, scale, cx, cy, cz] = self.shader_params(Some(data));
         let (offset, center) = ([ox, oy, oz], [cx, cy, cz]);
-        let map = |p: [f64; 3]| [0, 1, 2].map(|a| offset[a] + (p[a] as f32 - center[a]) * scale);
-        Some((map(lo), map(hi)))
+        let (mut a, mut b) = ([f32::MAX; 3], [f32::MIN; 3]);
+        for corner in 0..8 {
+            let p = [0, 1, 2].map(|k| (if corner >> k & 1 == 0 { lo[k] } else { hi[k] } as f32 - center[k]) * scale);
+            let rel = if self.z_up { [p[0], -p[2], p[1]] } else { p };
+            for k in 0..3 {
+                a[k] = a[k].min(offset[k] + rel[k]);
+                b[k] = b[k].max(offset[k] + rel[k]);
+            }
+        }
+        Some((a, b))
     }
 }
 
@@ -223,7 +237,7 @@ fn write_array(out: &mut String, name: &str, values: &[[f32; 4]]) {
 
 /// The WGSL one Load SDF node needs: the interpreter under `prefix`, the scene's arrays, and
 /// `{prefix}sdf_map(p)`, the distance in the composition's own coordinates.
-pub fn embed(prefix: &str, scene: &GpuScene) -> String {
+pub fn embed(prefix: &str, scene: &GpuScene, z_up: bool) -> String {
     debug_assert_eq!(scene.shapes.len(), scene.shape_count * GPU_SHAPE_STRIDE);
     let names = library_names();
     let mut out = String::new();
@@ -231,6 +245,9 @@ pub fn embed(prefix: &str, scene: &GpuScene) -> String {
     write_array(&mut out, &format!("{prefix}ops"), &scene.ops);
     let _ = writeln!(out, "fn {prefix}sdf_op_count() -> u32 {{ return {}u; }}", scene.ops.len());
     out.push_str(&prefix_identifiers(SDF_LIBRARY, &names, prefix));
+    // The field's point to the composition's: undo the placement (offset, scale), and the up axis when asked.
+    let up = if z_up { "vec3f(r.x, r.z, -r.y)" } else { "r" };
+    let _ = writeln!(out, "fn {prefix}at(f: vec3f, off: vec3f, s: f32, c: vec3f) -> f32 {{ let r = (f - off) / s; return {prefix}map(c + {up}) * s; }}");
     out
 }
 
@@ -266,6 +283,7 @@ pub fn props(ui: &mut eframe::egui::Ui, p: &mut LoadSdfParams) {
             }
         }
     }
+    ui.checkbox(&mut p.z_up, "Z is up (terrain graphs)").on_hover_text("The Composer's up is +Y. Terrain, and the Landscape tab, have +Z up: tick this to stand the shape upright there.");
     ui.checkbox(&mut p.fit, "Fit to the tile").on_hover_text("Scale the shape so its longest side is the size below and put its centre at the offset. Off: the shape keeps the units and the origin of its file.");
     if p.fit {
         ui.horizontal(|ui| {
@@ -281,6 +299,15 @@ pub fn props(ui: &mut eframe::egui::Ui, p: &mut LoadSdfParams) {
                 ui.add(egui::DragValue::new(v).speed(step));
             }
         });
+    }
+    if p.fit {
+        ui.checkbox(&mut p.snap, "Stand on the terrain").on_hover_text("With a terrain in the graph (a Load Mesh node with a heightmap): the shape's lowest point sits on the ground under it, so only x and y of the offset matter. Without one it does nothing.");
+        if p.snap {
+            ui.horizontal(|ui| {
+                ui.label("sink");
+                ui.add(egui::DragValue::new(&mut p.sink).range(-0.5..=0.5).speed(0.005).suffix(" x size")).on_hover_text("How far into the ground the shape is pushed, as a fraction of its size.");
+            });
+        }
     }
     ui.checkbox(&mut p.stamp, "Height from above (stamp)").on_hover_text("Output the height of the shape's top surface at each x, y instead of its distance. This is how a shape goes into the Landscape tab's height graph: combine it with the terrain by a Maximum node (where the shape is not, the output is -1000, so the terrain wins). Heights are in the graph's own units: with the default fit the shape fills 0.1 to 0.9 of the tile, up from 0.");
 }
@@ -343,7 +370,7 @@ pub(crate) mod tests {
         for a in 0..3 {
             assert!((loose.0[a] + 1.0).abs() < 0.05 && (loose.1[a] - 1.0).abs() < 0.05, "a sphere of size 2: {loose:?}");
         }
-        let fitted = LoadSdfParams { file: path, fit: true, size: 0.8, offset: [0.5; 3], stamp: false }.field_bounds().unwrap();
+        let fitted = LoadSdfParams { file: path, fit: true, size: 0.8, offset: [0.5; 3], ..Default::default() }.field_bounds().unwrap();
         for a in 0..3 {
             assert!((fitted.0[a] - 0.1).abs() < 0.02 && (fitted.1[a] - 0.9).abs() < 0.02, "inside the tile: {fitted:?}");
         }

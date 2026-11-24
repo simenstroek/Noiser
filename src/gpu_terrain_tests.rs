@@ -114,6 +114,9 @@ fn terrain_chunks_meet_and_follow_the_ground() {
     assert_eq!(manifest["chunks"][1]["column"], 1);
     let name = |cy: usize, cx: usize| dir.join("out").join(format!("terrain_{cy:02}_{cx:02}.obj"));
     let (a, b) = (vertices(&name(0, 0)), vertices(&name(0, 1)));
+    // Noise is added to the whole field, and must not stand a wall of surface along the outer border down to the bottom of the lattice.
+    let below = a.iter().filter(|v| v[2].parse::<f32>().unwrap() < -5.0).count();
+    assert!(below == 0, "no wall stands below the ground along the border: {below} of {} vertices", a.len());
     assert!(a.len() > 1500 && b.len() > 1500, "{} {}", a.len(), b.len());
     // q = 64 quads over 320 m: cells are 5 m, and the column of cells just before x = 320 m is in both files. The first
     // chunk also owns the quads of the x edges there, which the second does not, so the second's vertices are a subset.
@@ -155,6 +158,27 @@ fn the_graph_the_landscape_tab_sends_runs_as_it_is() {
     for f in ["terrain_00_00.obj", "terrain_01_01_normal_base.png", "terrain_00_01_ambient_occlusion.png", "terrain_01_00_curvature.png", "terrain_chunks.json"] {
         assert!(out.join(f).exists(), "{f} missing: {log:?}");
     }
+}
+
+/// The bare terrain has a surface of its own (not only the noise and shapes added to it), ending at its square.
+#[test]
+fn the_bare_terrain_is_a_surface_that_ends_at_its_square() {
+    if gpu().is_none() {
+        return eprintln!("no GPU adapter; skipping");
+    }
+    let dir = std::env::temp_dir().join("noiser-terrain-bare");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let png = heightmap(&dir, 129, 640.0, 30.0);
+    let (_, log) = run(&dir, &graph(&png, 1, 20000, false));
+    let obj = std::fs::read_to_string(dir.join("out").join("terrain_00_00.obj").with_file_name("terrain.obj")).unwrap();
+    let faces = obj.lines().filter(|l| l.starts_with("f ")).count();
+    assert!(faces > 15000, "{faces} triangles {log:?}");
+    let v = vertices(&dir.join("out").join("terrain.obj"));
+    let (xmax, zmin) = v.iter().fold((f32::MIN, f32::MAX), |(x, z), p| (x.max(p[0].parse().unwrap()), z.min(p[2].parse().unwrap())));
+    assert!(xmax < 640.0 + 6.0, "the terrain ends at 640 m: {xmax}");
+    // The surface ends at the border: no wall under it.
+    assert!(zmin > -6.0, "no surface below the ground: {zmin}");
 }
 
 /// A rock (a mesh file) standing on the terrain joins the surface with a smooth union, and lifts the chunk's z range.
@@ -213,6 +237,66 @@ fn a_placed_sdf_shape_is_part_of_its_chunk() {
     assert!(top(0, 1) < 45.0, "the far chunk stays ground: {}", top(0, 1));
 }
 
+/// "Stand on the terrain" ignores the offset's height and puts the shape's base on the ground.
+#[test]
+fn a_shape_can_stand_on_the_terrain() {
+    if gpu().is_none() {
+        return eprintln!("no GPU adapter; skipping");
+    }
+    let dir = std::env::temp_dir().join("noiser-terrain-snap");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let png = heightmap(&dir, 129, 640.0, 40.0);
+    let sdf = crate::sdf_node::tests::temp_sphere("noiser_terrain_snap.sdf");
+    let mut g = graph(&png, 2, 20000, false);
+    let land = g.nodes.iter().find(|(_, n)| matches!(&n.kind, NodeKind::LoadMesh(_))).map(|(id, _)| *id).unwrap();
+    let remesh = g.nodes.iter().find(|(_, n)| matches!(&n.kind, NodeKind::Remesh { .. })).map(|(id, _)| *id).unwrap();
+    let shape = g.add(NodeKind::LoadSdf(crate::sdf_node::LoadSdfParams { file: sdf, size: 40.0, offset: [160.0, 160.0, 5000.0], snap: true, ..Default::default() }), [0.0; 2]);
+    let union = g.add(NodeKind::Math { op: MathOp::Min, a: 0.0, b: 0.0, c: 0.5 }, [0.0; 2]);
+    g.connect(land, union, 0);
+    g.connect(shape, union, 1);
+    g.connect(union, remesh, 0);
+    let (_, log) = run(&dir, &g);
+    let top = vertices(&dir.join("out").join("terrain_00_00.obj")).iter().map(|v| v[2].parse::<f32>().unwrap()).fold(f32::MIN, f32::max);
+    // The ground there is under 40 m and the ball is 40 m across: its top is above 40 m but nowhere near the 5000 m offset.
+    assert!(top > 45.0 && top < 90.0, "{top} {log:?}");
+}
+
+/// A Scatter SDF node plants copies of a shape on the ground by a rule.
+#[test]
+fn a_scatter_node_plants_shapes_on_the_terrain() {
+    if gpu().is_none() {
+        return eprintln!("no GPU adapter; skipping");
+    }
+    let dir = std::env::temp_dir().join("noiser-terrain-scatter");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let png = heightmap(&dir, 129, 640.0, 20.0);
+    let sdf = crate::sdf_node::tests::temp_sphere("noiser_terrain_scatter.sdf");
+    let mut g = graph(&png, 1, 40000, false);
+    let land = g.nodes.iter().find(|(_, n)| matches!(&n.kind, NodeKind::LoadMesh(_))).map(|(id, _)| *id).unwrap();
+    let remesh = g.nodes.iter().find(|(_, n)| matches!(&n.kind, NodeKind::Remesh { .. })).map(|(id, _)| *id).unwrap();
+    // Metres: a cell of 160 m with a copy in every cell, 30 to 40 m across: the ground is under 20 m, so the copies stand above it.
+    let scatter = g.add(NodeKind::Scatter(crate::scatter::ScatterParams { file: sdf, cell: 160.0, density: 1.0, size: [30.0, 40.0], slope: [0.0, 10.0], blend: 2.0, ..Default::default() }), [0.0; 2]);
+    g.connect(land, scatter, 0);
+    g.connect(scatter, remesh, 0);
+    let (_, log) = run(&dir, &g);
+    let v = vertices(&dir.join("out").join("terrain.obj"));
+    let top = v.iter().map(|v| v[2].parse::<f32>().unwrap()).fold(f32::MIN, f32::max);
+    assert!(v.len() > 1000, "{} vertices {log:?}", v.len());
+    assert!(top > 35.0 && top < 80.0, "the copies reach above the 20 m ground but not far: {top} {log:?}");
+    // Cut out instead, the same shapes leave pits: the surface is ground, nothing above it, and more of it than before.
+    let NodeKind::Scatter(p) = &mut g.nodes.get_mut(&scatter).unwrap().kind else { panic!() };
+    p.subtract = true;
+    p.density = 0.0;
+    p.sink = 0.3;
+    p.size = [60.0, 70.0];
+    let (_, log) = run(&dir, &g);
+    let pits = vertices(&dir.join("out").join("terrain.obj"));
+    let high = pits.iter().map(|v| v[2].parse::<f32>().unwrap()).fold(f32::MIN, f32::max);
+    assert!(pits.len() > 1000 && high < 25.0, "{} vertices, top {high} {log:?}", pits.len());
+}
+
 /// Time and size for growing chunks: `cargo test --release terrain_chunk_scaling -- --ignored --nocapture`.
 /// Set `NOISER_SCALE_QUADS` to a comma separated list of quads per side to try others.
 #[test]
@@ -259,5 +343,28 @@ fn terrain_chunk_bake() {
         for l in &log {
             eprintln!("    {l}");
         }
+    }
+}
+
+/// Timing of the real demo graph (needs the library's DemoTerrain.meshgraph): `cargo test --release scratch_demo_compile -- --ignored --nocapture`.
+#[test]
+#[ignore]
+fn scratch_demo_compile() {
+    let text = std::fs::read_to_string("H:/My Drive/NoiserLibrary/Mesh Graphs/DemoTerrain.meshgraph").unwrap();
+    let mut g = Graph::from_json(&text).unwrap();
+    for n in g.nodes.values_mut() {
+        match &mut n.kind {
+            NodeKind::LoadMesh(p) => p.chunks = 1,
+            NodeKind::Remesh { triangles, .. } => *triangles = 20_000,
+            NodeKind::Bake(b) => (b.size, b.samples) = (64, 1),
+            NodeKind::OutMesh(o) | NodeKind::OutImage(o) => o.folder = std::env::temp_dir().join("noiser-scratch-demo").to_string_lossy().into_owned(),
+            _ => {}
+        }
+    }
+    let t = std::time::Instant::now();
+    let (_, log) = run(&std::env::temp_dir(), &g);
+    eprintln!("total {:.1} s", t.elapsed().as_secs_f32());
+    for l in log {
+        eprintln!("  {l}");
     }
 }

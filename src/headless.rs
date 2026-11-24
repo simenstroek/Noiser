@@ -9,7 +9,8 @@ use crate::meshmask::{MaskKind, MaskSettings, MaskTerm};
 use std::io::Write;
 use std::path::PathBuf;
 
-pub const USAGE: &str = "usage: noiser --headless --mesh-graph FILE.meshgraph [--seed N] [--batch-dir SRC | --batch-file F ...]   (runs a mesh graph, once per mesh file for a batch: Load Mesh paths of {batch} and output names with {name})
+pub const USAGE: &str = "usage: noiser --headless --landscape-export P.landscape OUT.png [--erode]   (writes a landscape project's heightmap and its .json)
+   or: noiser --headless --mesh-graph FILE.meshgraph [--seed N] noiser --headless --mesh-graph FILE.meshgraph [--seed N] [--batch-dir SRC | --batch-file F ...]   (runs a mesh graph, once per mesh file for a batch: Load Mesh paths of {batch} and output names with {name})
    or: noiser --headless GRAPH.noisegraph --batch-out DIR (--batch-file F.obj ... | --batch-dir SRC)
   [--export-noiser OUT.noiser] [--export-shader OUT.hlsl|glsl|wgsl] [--manifest meshes.json] [--param name=value ...] [--set 3.scale=8 ...] [--amount 0.25] [--amount-var 0.2] [--tile 1.0] [--size 1.0] [--seed 0] [--seed-mode same|increment|random]
   [--res 256] [--grid-res 128] [--format obj|ply] [--cull 0.01] [--mask KIND ...]
@@ -339,6 +340,12 @@ fn run_mesh_graph(args: &[String], log: &mut Log) -> Result<usize, String> {
 }
 
 fn run(args: &[String], log: &mut Log) -> Result<usize, String> {
+    if let Some(at) = args.iter().position(|a| a == "--landscape-export") {
+        let (project, out) = (args.get(at + 1).ok_or("--landscape-export needs a project and an output PNG")?, args.get(at + 2).ok_or("--landscape-export needs an output PNG")?);
+        let message = crate::landscape::export_headless(std::path::Path::new(project), std::path::Path::new(out), args.iter().any(|a| a == "--erode"), &mut |s| log.line(s))?;
+        log.line(&message);
+        return Ok(0);
+    }
     if args.iter().any(|a| a == "--mesh-graph") {
         return run_mesh_graph(args, log);
     }

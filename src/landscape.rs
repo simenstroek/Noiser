@@ -425,6 +425,11 @@ impl LandscapeWorkspace {
     /// A landscape project (graph, settings, masks) or a plain noise graph (the masks stay).
     fn open(&mut self) {
         let Some(path) = rfd::FileDialog::new().add_filter("Landscape project or noise graph", &["landscape", "noisegraph", "json"]).pick_file() else { return };
+        self.open_path(path);
+    }
+
+    /// Opens a landscape project, or a noise graph as the terrain.
+    pub fn open_path(&mut self, path: PathBuf) {
         let text = match std::fs::read_to_string(&path) {
             Ok(t) => t,
             Err(e) => return self.status = format!("could not open: {e}"),
@@ -937,6 +942,35 @@ impl crate::App {
         ls.editor.show(ui, &mut ls.graph, &tiling);
         ls.graph.prune_edges();
     }
+}
+
+/// Exports a landscape project's heightmap for Unreal without a window (`noiser --headless --landscape-export P.landscape
+/// OUT.png [--erode]`): the graph sampled at the Unreal size, or with `erode` the terrain eroded with the project's
+/// settings first.
+pub fn export_headless(project: &Path, out: &Path, erode: bool, log: &mut dyn FnMut(&str)) -> Result<String, String> {
+    let text = std::fs::read_to_string(project).map_err(|e| format!("{}: {e}", project.display()))?;
+    let mut ls = LandscapeWorkspace::default();
+    if project.extension().is_some_and(|e| e == "landscape") {
+        ls.from_project(&text)?;
+    } else {
+        ls.graph = Graph::from_json(&text)?;
+    }
+    ls.path = Some(project.to_path_buf());
+    let (device, queue) = crate::meshgraph::headless_gpu()?;
+    let (s, masks, base) = (ls.settings.clone(), ls.mask_map(), ls.base_dir());
+    let ev = build_evaluator(&device, &queue, &ls.graph, &s, &masks, &base)?;
+    let progress = Progress::default();
+    let metres = if erode {
+        let n = s.erosion.resolution;
+        log(&format!("sampling {n} x {n} and eroding ({} iterations)", s.erosion.iterations));
+        let values = to_metres(&sample(&ev, n, &progress), &s);
+        let eroded = crate::landscape_erosion::erode(&device, &queue, &values, n, s.world_m / (n - 1) as f32, &s.erosion, &progress)?;
+        let step = 1.0 / (UNREAL_RES - 1) as f32;
+        (0..UNREAL_RES * UNREAL_RES).map(|k| bilinear(&eroded, n, (k % UNREAL_RES) as f32 * step, (k / UNREAL_RES) as f32 * step)).collect()
+    } else {
+        to_metres(&sample(&ev, UNREAL_RES, &progress), &s)
+    };
+    write_unreal(out, UNREAL_RES, s.world_m, &encode_unreal(&metres))
 }
 
 #[cfg(test)]

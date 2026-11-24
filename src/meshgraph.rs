@@ -177,7 +177,7 @@ use std::path::{Path, PathBuf};
 /// A GPU device for running graphs without a window.
 pub fn headless_gpu() -> Result<(eframe::wgpu::Device, eframe::wgpu::Queue), String> {
     use eframe::wgpu;
-    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor { backends: crate::view::preferred_backends(), ..wgpu::InstanceDescriptor::new_without_display_handle() });
     let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default())).map_err(|e| format!("no GPU adapter: {e}"))?;
     pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).map_err(|e| format!("no GPU device: {e}"))
 }
@@ -268,7 +268,7 @@ impl Runner<'_> {
                 view,
                 origin: [0.0, 0.0, heights.n as f32],
                 voxel: heights.cell,
-                norm: Normalization { center: [heights.tiles() as f32, 0.0, 0.0], scale: -1.0 },
+                norm: Normalization { center: [heights.tiles() as f32, heights.z.0, heights.z.1], scale: -1.0 },
                 lo: [0.0, 0.0, heights.z.0],
                 hi: [w, w, heights.z.1],
                 raw: heights.coarse_mesh(),
@@ -308,13 +308,13 @@ impl Runner<'_> {
         let (x0, y0) = (cx as f32 * size, cy as f32 * size);
         // The surface can leave the ground by the reach, and objects stand wherever they stand.
         let (lo, hi) = land.heights.z_range(x0 - 2.0 * h, x0 + size + 2.0 * h, y0 - 2.0 * h, y0 + size + 2.0 * h);
-        let mut z = (lo - field.reach - 3.0 * h, hi + field.reach + 3.0 * h);
+        let mut z = (lo - field.reach - field.lift.1 - 3.0 * h, hi + field.reach + field.lift.0 + 3.0 * h);
         for (blo, bhi) in &field.objects {
             if blo[0] < x0 + size + h && bhi[0] > x0 - h && blo[1] < y0 + size + h && bhi[1] > y0 - h {
                 z = (z.0.min(blo[2] - field.reach - 3.0 * h), z.1.max(bhi[2] + field.reach + 3.0 * h));
             }
         }
-        let z_origin = field.lo[2] - field.reach - 3.0 * h;
+        let z_origin = field.lo[2] - field.reach - field.lift.1 - 3.0 * h;
         self.cache.chunk_box = Some((x0, y0, size));
         let t0 = std::time::Instant::now();
         let d = Displace { amount: 0.0, tile_size: 1.0, prim_size: 1.0, mask: crate::meshmask::PackedMask::NONE };
@@ -346,13 +346,28 @@ impl Runner<'_> {
             graph_meshes.push(GraphMesh { view: m.view.clone(), origin: m.origin, voxel: m.voxel, centre: m.norm.center, scale: m.norm.scale });
             loaded.push(m);
         }
+        // Shapes that stand on the terrain: their height comes from the ground under them.
+        if let Some(l) = &land {
+            for node in g.nodes.values_mut() {
+                if let NodeKind::LoadSdf(p) = &mut node.kind
+                    && p.snap && p.fit {
+                    let mut flat = p.clone();
+                    flat.offset[2] = 0.0;
+                    if let Some((lo, _)) = flat.field_bounds() {
+                        p.offset[2] = l.heights.lowest_ground(p.offset[0], p.offset[1], 0.4 * p.size) - lo[2] - p.sink * p.size;
+                    }
+                }
+            }
+        }
 // A Load SDF node knows where its shape is, so it can stand in for a mesh as the place to look for the surface.
         let sdf_boxes: Vec<([f32; 3], [f32; 3])> = g.nodes.values().filter_map(|n| if let NodeKind::LoadSdf(p) = &n.kind { p.field_bounds() } else { None }).collect();
         objects.extend(sdf_boxes.iter().copied());
         if loaded.is_empty() && sdf_boxes.is_empty() && require_mesh {
             return Err("the field has no Load Mesh or Load SDF node, so there is no surface to extract".into());
         }
+        let compile_started = std::time::Instant::now();
         let ev = MeshEvaluator::new_graph(self.device, self.queue, &g, self.seed, graph_meshes)?;
+        (self.log)(&format!("compiled the field in {:.1} s", compile_started.elapsed().as_secs_f32()));
 let (mut lo, mut hi) = if loaded.is_empty() && sdf_boxes.is_empty() { ([0.0; 3], [0.0; 3]) } else { ([f32::MAX; 3], [f32::MIN; 3]) };
         for m in &loaded {
             for a in 0..3 {
@@ -385,7 +400,9 @@ let (mut lo, mut hi) = if loaded.is_empty() && sdf_boxes.is_empty() { ([0.0; 3],
                     reach += p.amplitude.abs() * size;
                 }
         }
-        Ok(FieldSource { ev, lo, hi, reach: reach.min(2.0 * radius), land, objects, _loaded: loaded })
+        let scatters: Vec<&crate::scatter::ScatterParams> = original.nodes.values().filter_map(|n| if let NodeKind::Scatter(p) = &n.kind { Some(p) } else { None }).collect();
+        let lift = (scatters.iter().map(|p| p.reach()).fold(0.0, f32::max), scatters.iter().filter(|p| p.subtract).map(|p| p.reach()).fold(0.0, f32::max));
+        Ok(FieldSource { ev, lo, hi, reach: reach.min(2.0 * radius), land, lift, objects, _loaded: loaded })
     }
 
     fn output_path(&self, o: &OutParams, suffix: &str, ext: &str) -> PathBuf {
@@ -707,6 +724,8 @@ struct FieldSource {
     hi: [f32; 3],
     reach: f32,
     land: Option<Land>,
+    /// How far scattered shapes can stand above the ground, and how far cut-outs can reach below it.
+    lift: (f32, f32),
     /// The boxes of the other meshes and SDFs, which can stand above or inside the terrain.
     objects: Vec<([f32; 3], [f32; 3])>,
     /// Keeps the distance grids' textures alive as long as the evaluator.

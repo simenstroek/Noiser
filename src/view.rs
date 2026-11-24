@@ -448,6 +448,17 @@ struct VsOut { @builtin(position) pos: vec4f, @location(0) uv: vec2f };
 @fragment fn fs(in: VsOut) -> @location(0) vec4f { return textureSample(img, smp, in.uv); }
 ";
 
+/// Vulkan when this machine has it, otherwise every primary backend (so DX12 on Windows). DX12 compiles shaders with FXC, which
+/// takes minutes on a big graph (a mesh graph with many shapes in it: 126 s against about none on Vulkan, whose drivers compile
+/// fast). `WGPU_BACKEND` still decides when it is set.
+pub fn preferred_backends() -> wgpu::Backends {
+    if let Some(from_env) = wgpu::Backends::from_env() {
+        return from_env;
+    }
+    let vulkan = wgpu::Instance::new(wgpu::InstanceDescriptor { backends: wgpu::Backends::VULKAN, ..wgpu::InstanceDescriptor::new_without_display_handle() });
+    if pollster::block_on(vulkan.request_adapter(&wgpu::RequestAdapterOptions::default())).is_ok() { wgpu::Backends::VULKAN } else { wgpu::Backends::PRIMARY }
+}
+
 /// Adds TIMESTAMP_QUERY (GPU timing) and FLOAT32_FILTERABLE (smooth caches) to eframe's device request when supported.
 pub fn request_timestamps(mut cfg: egui_wgpu::WgpuConfiguration) -> egui_wgpu::WgpuConfiguration {
     if let egui_wgpu::WgpuSetup::CreateNew(new) = &mut cfg.wgpu_setup {
@@ -455,7 +466,7 @@ pub fn request_timestamps(mut cfg: egui_wgpu::WgpuConfiguration) -> egui_wgpu::W
         // segfault during adapter enumeration, killing the app before a window appears.
         // WGPU_BACKEND still overrides this.
         if wgpu::Backends::from_env().is_none() {
-            new.instance_descriptor.backends = wgpu::Backends::PRIMARY;
+            new.instance_descriptor.backends = preferred_backends();
         }
         let base = new.device_descriptor.clone();
         new.device_descriptor = Arc::new(move |adapter| {
