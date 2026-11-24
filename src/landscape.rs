@@ -640,7 +640,7 @@ impl crate::App {
 
         let (device, queue) = (self.rs.device.clone(), self.rs.queue.clone());
         let ls = &mut self.landscape;
-        egui::Panel::right("landscape props").default_size(320.0).show(ui, |ui| {
+        egui::Panel::right("landscape props").default_size(320.0).show(ui, |ui| egui::ScrollArea::vertical().id_salt("landscape props scroll").auto_shrink([false, false]).show(ui, |ui| {
             ui.horizontal(|ui| {
                 if crate::icons::button(ui, "open", "Open", None, true).on_hover_text("Open a landscape project (graph, settings and masks) or a noise graph as the terrain").clicked() {
                     ls.open();
@@ -883,9 +883,9 @@ impl crate::App {
             if let [id] = ls.editor.selected.iter().copied().collect::<Vec<_>>().as_slice()
                 && let Some(node) = ls.graph.nodes.get_mut(id) {
                 ui.heading(crate::editor::title(&node.kind));
-                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| crate::node_props(ui, &mut node.kind, &mut node.pins, &names));
+                crate::node_props(ui, &mut node.kind, &mut node.pins, &names);
             }
-        });
+        }));
 
         // The terrain, then the graph.
         let (settings, view) = (ls.settings.clone(), ls.view);
