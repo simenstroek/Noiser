@@ -186,6 +186,33 @@ fn an_object_on_the_terrain_is_part_of_its_chunk() {
     assert!(top(0, 1) < 45.0, "the far chunk stays ground: {}", top(0, 1));
 }
 
+/// A Load SDF node (live, placed by size and offset in the terrain's units) joins the terrain like a mesh does.
+#[test]
+fn a_placed_sdf_shape_is_part_of_its_chunk() {
+    if gpu().is_none() {
+        return eprintln!("no GPU adapter; skipping");
+    }
+    let dir = std::env::temp_dir().join("noiser-terrain-sdf");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let png = heightmap(&dir, 129, 640.0, 40.0);
+    let sdf = crate::sdf_node::tests::temp_sphere("noiser_terrain_sdf.sdf");
+    let mut g = graph(&png, 2, 20000, false);
+    let land = g.nodes.iter().find(|(_, n)| matches!(&n.kind, NodeKind::LoadMesh(_))).map(|(id, _)| *id).unwrap();
+    let remesh = g.nodes.iter().find(|(_, n)| matches!(&n.kind, NodeKind::Remesh { .. })).map(|(id, _)| *id).unwrap();
+    // Metres: a shape 60 m across, its centre 70 m up over (160, 160).
+    let shape = g.add(NodeKind::LoadSdf(crate::sdf_node::LoadSdfParams { file: sdf, size: 60.0, offset: [160.0, 160.0, 70.0], ..Default::default() }), [0.0; 2]);
+    let union = g.add(NodeKind::Math { op: MathOp::SmoothMin, a: 0.0, b: 0.0, c: 0.5 }, [0.0; 2]);
+    g.connect(land, union, 0);
+    g.connect(shape, union, 1);
+    g.connect(union, remesh, 0);
+    let (written, log) = run(&dir, &g);
+    assert_eq!(written.len(), 4, "{log:?}");
+    let top = |cy: usize, cx: usize| vertices(&dir.join("out").join(format!("terrain_{cy:02}_{cx:02}.obj"))).iter().map(|v| v[2].parse::<f32>().unwrap()).fold(f32::MIN, f32::max);
+    assert!(top(0, 0) > 85.0, "the shape's top is at 100 m: {}", top(0, 0));
+    assert!(top(0, 1) < 45.0, "the far chunk stays ground: {}", top(0, 1));
+}
+
 /// Time and size for growing chunks: `cargo test --release terrain_chunk_scaling -- --ignored --nocapture`.
 /// Set `NOISER_SCALE_QUADS` to a comma separated list of quads per side to try others.
 #[test]

@@ -261,6 +261,22 @@ fn compile_inner(g: &Graph, caches: &BTreeMap<NodeId, u32>, eps: f32, preview: b
             && let Ok(data) = crate::sdf_node::load(&p.file).as_ref()
         {
             wgsl += &crate::sdf_node::embed(&format!("sdf{id}_"), &data.scene);
+            if p.stamp {
+                // Sphere tracing straight down from the top of the shape's box: the first hit is its top surface.
+                wgsl += &format!("
+fn sdf{id}_top(q: vec2f, off: vec3f, s: f32, c: vec3f, zhi: f32, zlo: f32) -> f32 {{
+    let eps = 0.0005 * (zhi - zlo);
+    var z = zhi;
+    for (var i = 0; i < 96; i++) {{
+        let d = sdf{id}_map(c + (vec3f(q, z) - off) / s) * s;
+        if (d < eps) {{ return z; }}
+        z -= max(d, eps);
+        if (z < zlo) {{ break; }}
+    }}
+    return -1000.0;
+}}
+");
+            }
         }
     }
     wgsl += &cg.out;
@@ -417,6 +433,11 @@ impl Gen<'_> {
             NodeKind::LoadSdf(p) => {
                 let q = self.operand(id, 0, Ty::V, "p");
                 match crate::sdf_node::load(&p.file).as_ref() {
+                    Ok(_) if p.stamp => {
+                        self.sdf_used.insert(id);
+                        let (lo, hi) = p.field_bounds().unwrap_or(([0.0; 3], [1.0; 3]));
+                        (Ty::F, format!("sdf{id}_top({q}.xy, vec3f(P[{s}], P[{}], P[{}]), P[{}], vec3f(P[{}], P[{}], P[{}]), {:e}, {:e})", s + 1, s + 2, s + 3, s + 4, s + 5, s + 6, hi[2] + 1e-4, lo[2]))
+                    }
                     Ok(_) => {
                         self.sdf_used.insert(id);
                         (Ty::F, format!("sdf{id}_map(vec3f(P[{}], P[{}], P[{}]) + ({q} - vec3f(P[{s}], P[{}], P[{}])) / P[{}]) * P[{}]", s + 4, s + 5, s + 6, s + 1, s + 2, s + 3, s + 3))

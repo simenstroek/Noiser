@@ -541,6 +541,20 @@ impl MeshWorkspace {
                 let embedded = std::fs::read_to_string(&path).unwrap_or_default();
                 self.graph.add(NodeKind::NoiseGraph(crate::meshgraph::NoiseGraphParams { file: text, embedded, ..Default::default() }), at);
             }
+            "sdf" => {
+                // A live Load SDF node. Beside a terrain it starts at the terrain's middle, a twentieth of its side wide.
+                let mut p = crate::sdf_node::LoadSdfParams { file: text, ..Default::default() };
+                let base = self.base();
+                let terrain = self.graph.nodes.values().find_map(|n| match &n.kind {
+                    NodeKind::LoadMesh(m) if crate::landscape_field::is_heightmap(&m.path) => crate::landscape_field::extent(&crate::meshgraph::resolve_in(&base, &m.path), m.unit_cm),
+                    _ => None,
+                });
+                if let Some((side, z)) = terrain {
+                    p.size = side / 20.0;
+                    p.offset = [side / 2.0, side / 2.0, z];
+                }
+                self.graph.add(NodeKind::LoadSdf(p), at);
+            }
             "png" => {
                 self.graph.add(NodeKind::LoadMesh(crate::meshgraph::LoadMeshParams { path: text, unit_cm: 1.0, ..Default::default() }), at);
             }
@@ -1242,6 +1256,22 @@ impl crate::App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_dropped_sdf_lands_in_the_middle_of_the_terrain() {
+        let dir = std::env::temp_dir().join("noiser-drop-sdf-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let metres: Vec<f32> = (0..33 * 33).map(|k| (k % 33) as f32).collect();
+        let png = dir.join("heightmap.png");
+        crate::landscape::write_unreal(&png, 33, 2000.0, &crate::landscape::encode_unreal(&metres)).unwrap();
+        let mut ws = MeshWorkspace::default();
+        ws.graph.add(NodeKind::LoadMesh(crate::meshgraph::LoadMeshParams { path: png.to_string_lossy().into_owned(), unit_cm: 1.0, ..Default::default() }), [0.0; 2]);
+        ws.drop_file(dir.join("rock.sdf"));
+        let NodeKind::LoadSdf(p) = ws.graph.nodes.values().last().unwrap().kind.clone() else { panic!("a Load SDF node") };
+        // Centimetres: 2 km is 200,000 units; a twentieth of it wide, in the middle, at the middle of the heights (16 m).
+        assert!((p.size - 10_000.0).abs() < 1.0 && (p.offset[0] - 100_000.0).abs() < 1.0 && (p.offset[2] - 1_600.0).abs() < 2.0, "{p:?}");
+    }
 
     #[test]
     fn dropped_files_become_nodes() {

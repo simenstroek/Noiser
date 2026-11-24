@@ -43,6 +43,16 @@ pub fn load(path: &Path, unit_cm: f32) -> Result<Heights, String> {
     Ok(Heights { n, cell: size_m * 100.0 * k / (n - 1) as f32, h, z })
 }
 
+/// The side of a heightmap's terrain and the middle of its height range in a node's units, from its sidecar alone (no
+/// need to read the image).
+pub fn extent(path: &Path, unit_cm: f32) -> Option<(f32, f32)> {
+    let text = std::fs::read_to_string(format!("{}.json", path.display())).ok()?;
+    let json: serde_json::Value = serde_json::from_str(&text).ok()?;
+    let k = 100.0 / unit_cm;
+    let (lo, hi) = (json["height_range_m"][0].as_f64()? as f32, json["height_range_m"][1].as_f64()? as f32);
+    Some((json["size_m"].as_f64()? as f32 * k, (lo + hi) * 0.5 * k))
+}
+
 impl Heights {
     /// Side of the terrain, in units.
     pub fn world(&self) -> f32 {

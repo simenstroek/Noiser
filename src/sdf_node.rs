@@ -24,11 +24,14 @@ pub struct LoadSdfParams {
     pub fit: bool,
     pub size: f32,
     pub offset: [f32; 3],
+    /// Output the height of the shape's top surface at each (x, y) instead of its distance: how a shape goes into a
+    /// height field (the Landscape tab). Where the shape is not, the output is -1000, so a Maximum with the ground ignores it.
+    pub stamp: bool,
 }
 
 impl Default for LoadSdfParams {
     fn default() -> Self {
-        LoadSdfParams { file: String::new(), fit: true, size: 0.8, offset: [0.5; 3] }
+        LoadSdfParams { file: String::new(), fit: true, size: 0.8, offset: [0.5; 3], stamp: false }
     }
 }
 
@@ -267,19 +270,23 @@ pub fn props(ui: &mut eframe::egui::Ui, p: &mut LoadSdfParams) {
     if p.fit {
         ui.horizontal(|ui| {
             ui.label("size");
-            ui.add(egui::DragValue::new(&mut p.size).range(0.01..=100.0).speed(0.005));
+            // Terrain graphs work in metres or centimetres: no ceiling, and the step follows the size.
+            let step = (p.size * 0.01).max(0.005);
+            ui.add(egui::DragValue::new(&mut p.size).range(1e-4..=1e8).speed(step));
         });
         ui.horizontal(|ui| {
             ui.label("offset");
+            let step = (p.size * 0.01).max(0.005);
             for v in &mut p.offset {
-                ui.add(egui::DragValue::new(v).speed(0.005));
+                ui.add(egui::DragValue::new(v).speed(step));
             }
         });
     }
+    ui.checkbox(&mut p.stamp, "Height from above (stamp)").on_hover_text("Output the height of the shape's top surface at each x, y instead of its distance. This is how a shape goes into the Landscape tab's height graph: combine it with the terrain by a Maximum node (where the shape is not, the output is -1000, so the terrain wins). Heights are in the graph's own units: with the default fit the shape fills 0.1 to 0.9 of the tile, up from 0.");
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     const SPHERE: &str = r#"{"version":[0,6,1],"environment":{},
@@ -336,7 +343,7 @@ mod tests {
         for a in 0..3 {
             assert!((loose.0[a] + 1.0).abs() < 0.05 && (loose.1[a] - 1.0).abs() < 0.05, "a sphere of size 2: {loose:?}");
         }
-        let fitted = LoadSdfParams { file: path, fit: true, size: 0.8, offset: [0.5; 3] }.field_bounds().unwrap();
+        let fitted = LoadSdfParams { file: path, fit: true, size: 0.8, offset: [0.5; 3], stamp: false }.field_bounds().unwrap();
         for a in 0..3 {
             assert!((fitted.0[a] - 0.1).abs() < 0.02 && (fitted.1[a] - 0.9).abs() < 0.02, "inside the tile: {fitted:?}");
         }
@@ -397,6 +404,22 @@ mod tests {
         let b = crate::codegen::compile(&graph_with_sphere(&path, LoadSdfParams { size: 0.5, offset: [0.2, 0.3, 0.4], ..Default::default() })).unwrap();
         assert_eq!(a.wgsl, b.wgsl);
         assert_ne!(a.params, b.params);
+    }
+
+    /// With the stamp on, the node gives the height of the shape's top surface over each (x, y), and -1000 off its footprint.
+    #[test]
+    fn a_stamp_is_the_height_of_the_shapes_top_surface() {
+        let Some(gpu) = crate::gpu_tests::gpu() else {
+            eprintln!("no GPU adapter: skipped");
+            return;
+        };
+        let path = temp_sphere("noiser_sdf_node_stamp.sdf");
+        let g = graph_with_sphere(&path, LoadSdfParams { stamp: true, ..Default::default() });
+        // Fitted: a sphere 0.8 across centred in the tile, so its top is at 0.9 over the middle and lower away from it.
+        let v = crate::gpu_tests::eval(&gpu, &g, &[[0.5, 0.5, 0.0], [0.5, 0.7, 0.0], [0.05, 0.05, 0.0]]);
+        assert!((v[0] - 0.9).abs() < 0.03, "middle: {}", v[0]);
+        assert!(v[1] < v[0] - 0.02 && v[1] > 0.6, "off the middle: {}", v[1]);
+        assert!(v[2] < -900.0, "off the footprint: {}", v[2]);
     }
 
     /// The node's output on the GPU is the composition's distance, fitted into the tile.

@@ -254,7 +254,11 @@ fn land_dist(t: texture_3d<f32>, p: vec3f, m: MeshInfo) -> f32 {
     let h = mix(mix(h00, h10, f.x), mix(h01, h11, f.x), f.y);
     let dx = mix(h10 - h00, h11 - h01, f.y) / m.voxel;
     let dy = mix(h01 - h00, h11 - h10, f.x) / m.voxel;
-    return (p.z - h) * inverseSqrt(1.0 + dx * dx + dy * dy);
+    // The terrain ends at its square: outside it the field is the distance to the square, so it is empty there
+    // (the surface at the border stands as a short wall, not as ground running off to infinity).
+    let w = f32(n - 1) * m.voxel;
+    let out = vec2f(max(max(m.origin.x - p.x, p.x - (m.origin.x + w)), 0.0), max(max(m.origin.y - p.y, p.y - (m.origin.y + w)), 0.0));
+    return max((p.z - h) * inverseSqrt(1.0 + dx * dx + dy * dy), length(out));
 }
 fn mesh_dist_0(p: vec3f) -> f32 { let m = meshes[0]; if (m.scale < 0.0) { return land_dist(mesh_tex, p, m); } return mesh_sdf_at(mesh_tex, (p - m.centre) / m.scale, m.origin, m.voxel) * m.scale; }
 fn mesh_dist_1(p: vec3f) -> f32 { let m = meshes[1]; if (m.scale < 0.0) { return land_dist(mesh_tex1, p, m); } return mesh_sdf_at(mesh_tex1, (p - m.centre) / m.scale, m.origin, m.voxel) * m.scale; }
