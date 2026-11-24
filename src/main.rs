@@ -24,6 +24,7 @@ mod meshgraph_ui;
 mod meshworkspace;
 mod landscape;
 mod landscape_chunks;
+mod landscape_field;
 mod landscape_masks;
 mod landscape_erosion;
 mod udim;
@@ -49,6 +50,8 @@ mod sdf_node;
 mod sdf_model;
 #[cfg(test)]
 mod gpu_tests;
+#[cfg(test)]
+mod gpu_terrain_tests;
 mod vdb;
 mod view;
 

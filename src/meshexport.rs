@@ -233,10 +233,33 @@ struct MeshInfo { origin: vec3f, voxel: f32, centre: vec3f, scale: f32 };
 @group(0) @binding(10) var mesh_tex1: texture_3d<f32>;
 @group(0) @binding(11) var mesh_tex2: texture_3d<f32>;
 @group(0) @binding(12) var mesh_tex3: texture_3d<f32>;
-fn mesh_dist_0(p: vec3f) -> f32 { let m = meshes[0]; return mesh_sdf_at(mesh_tex, (p - m.centre) / m.scale, m.origin, m.voxel) * m.scale; }
-fn mesh_dist_1(p: vec3f) -> f32 { let m = meshes[1]; return mesh_sdf_at(mesh_tex1, (p - m.centre) / m.scale, m.origin, m.voxel) * m.scale; }
-fn mesh_dist_2(p: vec3f) -> f32 { let m = meshes[2]; return mesh_sdf_at(mesh_tex2, (p - m.centre) / m.scale, m.origin, m.voxel) * m.scale; }
-fn mesh_dist_3(p: vec3f) -> f32 { let m = meshes[3]; return mesh_sdf_at(mesh_tex3, (p - m.centre) / m.scale, m.origin, m.voxel) * m.scale; }
+// A terrain (scale < 0): the texture holds heights in 2048 x 2048 tiles, one per layer, `centre.x` tiles per side, `origin.z`
+// samples per side and `voxel` the distance between samples. The field is the height above the ground, made a distance
+// to first order by the slope.
+fn land_h(t: texture_3d<f32>, x: i32, y: i32, n: i32, tiles: i32) -> f32 {
+    let cx = clamp(x, 0, n - 1);
+    let cy = clamp(y, 0, n - 1);
+    return textureLoad(t, vec3i(cx & 2047, cy & 2047, (cy >> 11) * tiles + (cx >> 11)), 0).x;
+}
+fn land_dist(t: texture_3d<f32>, p: vec3f, m: MeshInfo) -> f32 {
+    let n = i32(m.origin.z);
+    let tiles = i32(m.centre.x);
+    let g = clamp((p.xy - m.origin.xy) / m.voxel, vec2f(0.0), vec2f(f32(n - 1)));
+    let i = vec2i(floor(g));
+    let f = g - vec2f(i);
+    let h00 = land_h(t, i.x, i.y, n, tiles);
+    let h10 = land_h(t, i.x + 1, i.y, n, tiles);
+    let h01 = land_h(t, i.x, i.y + 1, n, tiles);
+    let h11 = land_h(t, i.x + 1, i.y + 1, n, tiles);
+    let h = mix(mix(h00, h10, f.x), mix(h01, h11, f.x), f.y);
+    let dx = mix(h10 - h00, h11 - h01, f.y) / m.voxel;
+    let dy = mix(h01 - h00, h11 - h10, f.x) / m.voxel;
+    return (p.z - h) * inverseSqrt(1.0 + dx * dx + dy * dy);
+}
+fn mesh_dist_0(p: vec3f) -> f32 { let m = meshes[0]; if (m.scale < 0.0) { return land_dist(mesh_tex, p, m); } return mesh_sdf_at(mesh_tex, (p - m.centre) / m.scale, m.origin, m.voxel) * m.scale; }
+fn mesh_dist_1(p: vec3f) -> f32 { let m = meshes[1]; if (m.scale < 0.0) { return land_dist(mesh_tex1, p, m); } return mesh_sdf_at(mesh_tex1, (p - m.centre) / m.scale, m.origin, m.voxel) * m.scale; }
+fn mesh_dist_2(p: vec3f) -> f32 { let m = meshes[2]; if (m.scale < 0.0) { return land_dist(mesh_tex2, p, m); } return mesh_sdf_at(mesh_tex2, (p - m.centre) / m.scale, m.origin, m.voxel) * m.scale; }
+fn mesh_dist_3(p: vec3f) -> f32 { let m = meshes[3]; if (m.scale < 0.0) { return land_dist(mesh_tex3, p, m); } return mesh_sdf_at(mesh_tex3, (p - m.centre) / m.scale, m.origin, m.voxel) * m.scale; }
 fn field_at(p: vec3f) -> f32 { return graph_density(p); }
 ";
 
@@ -255,7 +278,7 @@ impl MeshEvaluator {
     /// `Compiled::mesh_slots`. The field is in the units of the mesh files.
     pub fn new_graph(device: &wgpu::Device, queue: &wgpu::Queue, graph: &Graph, seed: u32, mut meshes: Vec<GraphMesh>) -> Result<Self, String> {
         // The Normal node steps over half a voxel of the finest loaded mesh, in the units of the mesh files.
-        let eps = meshes.iter().map(|m| 0.5 * m.voxel * m.scale).fold(f32::MAX, f32::min);
+        let eps = meshes.iter().map(|m| 0.5 * m.voxel * m.scale.abs()).fold(f32::MAX, f32::min);
         let eps = if eps.is_finite() && eps > 0.0 && eps < f32::MAX { eps } else { codegen::NORMAL_EPS };
         let c = codegen::compile_eps(graph, &Default::default(), eps)?;
         if meshes.len() > MAX_GRAPH_MESHES {
@@ -617,6 +640,47 @@ pub struct Job<'a> {
 
 /// Layers evaluated per GPU dispatch.
 const SLAB: usize = 8;
+
+/// One terrain chunk cut from a lattice every chunk shares: sample (i, j, k) is at `(x0 + (i - 1) h, y0 + (j - 1) h,
+/// z_origin + (k0 + k) h)` for the chunk's `x0`, `y0`, `h = size / q`.
+pub struct ChunkWindow {
+    pub x0: f32,
+    pub y0: f32,
+    pub size: f32,
+    /// Quads along each side of the chunk.
+    pub q: usize,
+    /// The lattice's lowest z, the same for every chunk, and the z range this chunk needs.
+    pub z_origin: f32,
+    pub z: (f32, f32),
+}
+
+impl MeshEvaluator {
+    /// The surface of the field inside the chunk's window as surface nets on the shared lattice: the same vertices
+    /// along a border as the neighbour's, normals from the field's gradient (so lighting has no seam), no remeshing.
+    /// Coordinates are the field's own. About `2 q^2` triangles for a terrain.
+    pub fn chunk_surface(&self, d: Displace, w: &ChunkWindow, progress: &Progress) -> RawMesh {
+        let h = w.size / w.q as f32;
+        let k0 = ((w.z.0 - w.z_origin) / h).floor().max(0.0) as usize;
+        let k1 = (((w.z.1 - w.z_origin) / h).ceil() as usize).max(k0 + 2);
+        let (nx, nz) = (w.q + 2, k1 - k0 + 1);
+        let grid = Grid { min: [w.x0 - h, w.y0 - h, w.z_origin + k0 as f32 * h], h, dims: [nx, nx, nz] };
+        let mut slab: (usize, Vec<f32>) = (usize::MAX, Vec::new());
+        let layer = |k: usize| {
+            if slab.0 == usize::MAX || k < slab.0 || k >= slab.0 + SLAB {
+                let count = SLAB.min(nz - k);
+                slab = (k, self.layers(&grid, d, f32::MAX, k, count));
+            }
+            progress.store((k * 1000 / nz) as u32, Ordering::Relaxed);
+            let at = (k - slab.0) * nx * nx;
+            slab.1[at..at + nx * nx].to_vec()
+        };
+        let mut mesh = crate::surface::surface_nets_in(nx, nx, nz, layer, Some((1, w.q + 1, 1, w.q + 1)));
+        for p in &mut mesh.positions {
+            *p = [grid.min[0] + p[0] * h, grid.min[1] + p[1] * h, grid.min[2] + p[2] * h];
+        }
+        mesh
+    }
+}
 
 impl Job<'_> {
     pub fn grid(&self) -> Grid {

@@ -541,6 +541,9 @@ impl MeshWorkspace {
                 let embedded = std::fs::read_to_string(&path).unwrap_or_default();
                 self.graph.add(NodeKind::NoiseGraph(crate::meshgraph::NoiseGraphParams { file: text, embedded, ..Default::default() }), at);
             }
+            "png" => {
+                self.graph.add(NodeKind::LoadMesh(crate::meshgraph::LoadMeshParams { path: text, unit_cm: 1.0, ..Default::default() }), at);
+            }
             _ if crate::meshformats::is_mesh_file(&path) => {
                 self.graph.add(NodeKind::LoadMesh(crate::meshgraph::LoadMeshParams { path: text, ..Default::default() }), at);
             }

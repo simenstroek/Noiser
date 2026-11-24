@@ -24,11 +24,14 @@ pub struct LoadMeshParams {
     pub unit_cm: f32,
     /// A Load SDF node: the same node, offering .sdf files.
     pub sdf: bool,
+    /// A heightmap (a PNG from the Landscape tab) as the file: the terrain is cut into this many chunks per side, and a
+    /// run makes every chunk. 1 is the whole terrain.
+    pub chunks: u32,
 }
 
 impl Default for LoadMeshParams {
     fn default() -> Self {
-        LoadMeshParams { path: String::new(), resolution: 128, padding: 0.5, combine: Default::default(), unit_cm: 100.0, sdf: false }
+        LoadMeshParams { path: String::new(), resolution: 128, padding: 0.5, combine: Default::default(), unit_cm: 100.0, sdf: false, chunks: 1 }
     }
 }
 
@@ -202,10 +205,16 @@ pub struct LoadedMesh {
     hi: [f32; 3],
     /// The mesh as the file has it, in its units, with its UVs (for Transfer UVs).
     raw: crate::mesh::Mesh,
+    /// A terrain: its heights (`norm.scale` is -1 for the shader, see `land_dist`).
+    land: Option<std::sync::Arc<crate::landscape_field::Heights>>,
 }
 
 #[derive(Default)]
 pub struct MeshCache {
+    /// The terrain chunk a run is making, (column, row).
+    chunk: Option<(u32, u32)>,
+    /// Where that chunk is: (x0, y0, size) in the field's units, for planar UVs.
+    chunk_box: Option<(f32, f32, f32)>,
     meshes: BTreeMap<String, std::sync::Arc<LoadedMesh>>,
     /// Keys of the meshes a batch run read from `{batch}`: dropped when the next file starts, so a long batch does not keep every mesh.
     batch_keys: Vec<String>,
@@ -249,6 +258,25 @@ impl Runner<'_> {
             return Ok(m.clone());
         }
         (self.log)(&format!("loading {}", path.display()));
+        if crate::landscape_field::is_heightmap(&p.path) {
+            let heights = std::sync::Arc::new(crate::landscape_field::load(&path, p.unit_cm)?);
+            (self.log)(&format!("  terrain {0} x {0} samples, {1:.1} units apart, heights {2:.1} to {3:.1}", heights.n, heights.cell, heights.z.0, heights.z.1));
+            let (texture, view) = heights.upload(self.device, self.queue);
+            let w = heights.world();
+            let loaded = std::sync::Arc::new(LoadedMesh {
+                _texture: texture,
+                view,
+                origin: [0.0, 0.0, heights.n as f32],
+                voxel: heights.cell,
+                norm: Normalization { center: [heights.tiles() as f32, 0.0, 0.0], scale: -1.0 },
+                lo: [0.0, 0.0, heights.z.0],
+                hi: [w, w, heights.z.1],
+                raw: heights.coarse_mesh(),
+                land: Some(heights),
+            });
+            self.cache.meshes.insert(key, loaded.clone());
+            return Ok(loaded);
+        }
         let raw = crate::meshformats::load(&path)?;
         let (mesh, norm) = raw.normalized();
         let topology = crate::meshquality::report(&crate::surface::RawMesh { positions: mesh.positions.clone(), normals: Vec::new(), triangles: mesh.triangles.clone() });
@@ -258,12 +286,41 @@ impl Runner<'_> {
         let sdf = crate::meshsdf::MeshSdf::build_with(&mesh, p.resolution, p.padding, &Default::default(), p.combine);
         let (texture, view) = sdf.upload(self.device, self.queue);
         let (nlo, nhi) = mesh.bounds();
-        let loaded = std::sync::Arc::new(LoadedMesh { _texture: texture, view, origin: sdf.origin, voxel: sdf.voxel, norm, lo: norm.to_object(nlo), hi: norm.to_object(nhi), raw });
+        let loaded = std::sync::Arc::new(LoadedMesh { _texture: texture, view, origin: sdf.origin, voxel: sdf.voxel, norm, lo: norm.to_object(nlo), hi: norm.to_object(nhi), raw, land: None });
         if p.path == "{batch}" {
             self.cache.batch_keys.push(key.clone());
         }
         self.cache.meshes.insert(key, loaded.clone());
         Ok(loaded)
+    }
+
+    /// One chunk of the terrain with at most `triangles` triangles (about that many: `2 q^2`), or the whole terrain at a coarse
+    /// budget for a preview.
+    fn terrain_chunk(&mut self, field: &FieldSource, land: &Land, triangles: usize) -> crate::surface::RawMesh {
+        use crate::meshexport::{ChunkWindow, Displace};
+        let (n, cx, cy) = if self.max_triangles.is_some() { (1, 0, 0) } else { (land.chunks.max(1), self.cache.chunk.map_or(0, |c| c.0), self.cache.chunk.map_or(0, |c| c.1)) };
+        let size = land.heights.world() / n as f32;
+        // Steep ground crosses more lattice edges than flat ground, so the budget is spent on the steepest chunk: every chunk
+        // shares one lattice spacing, which is what makes their borders meet.
+        let steepest = (0..n).flat_map(|j| (0..n).map(move |i| (i, j))).map(|(i, j)| land.heights.quads_per_column(i as f32 * size, (i + 1) as f32 * size, j as f32 * size, (j + 1) as f32 * size)).fold(1.0f32, f32::max);
+        let q = ((triangles as f32 / (2.0 * steepest)).sqrt().ceil() as usize).max(4);
+        let h = size / q as f32;
+        let (x0, y0) = (cx as f32 * size, cy as f32 * size);
+        // The surface can leave the ground by the reach, and objects stand wherever they stand.
+        let (lo, hi) = land.heights.z_range(x0 - 2.0 * h, x0 + size + 2.0 * h, y0 - 2.0 * h, y0 + size + 2.0 * h);
+        let mut z = (lo - field.reach - 3.0 * h, hi + field.reach + 3.0 * h);
+        for (blo, bhi) in &field.objects {
+            if blo[0] < x0 + size + h && bhi[0] > x0 - h && blo[1] < y0 + size + h && bhi[1] > y0 - h {
+                z = (z.0.min(blo[2] - field.reach - 3.0 * h), z.1.max(bhi[2] + field.reach + 3.0 * h));
+            }
+        }
+        let z_origin = field.lo[2] - field.reach - 3.0 * h;
+        self.cache.chunk_box = Some((x0, y0, size));
+        let t0 = std::time::Instant::now();
+        let d = Displace { amount: 0.0, tile_size: 1.0, prim_size: 1.0, mask: crate::meshmask::PackedMask::NONE };
+        let mesh = field.ev.chunk_surface(d, &ChunkWindow { x0, y0, size, q, z_origin, z }, &self.progress);
+        (self.log)(&format!("terrain chunk {cy},{cx}: {q} x {q} quads of {h:.2} units, z {:.1} to {:.1}, {} triangles in {:.1} s", z.0, z.1, mesh.triangles.len(), t0.elapsed().as_secs_f32()));
+        mesh
     }
 
     /// The evaluator of the field that feeds `source`, and the bounds and reach extraction needs.
@@ -278,14 +335,20 @@ impl Runner<'_> {
         let compiled = crate::codegen::compile(&g)?;
         let mut loaded = Vec::new();
         let mut graph_meshes = Vec::new();
+        let (mut land, mut objects) = (None, Vec::new());
         for id in &compiled.mesh_slots {
             let NodeKind::LoadMesh(p) = &g.nodes[id].kind else { continue };
             let m = self.mesh(p)?;
+            match &m.land {
+                Some(heights) => land = Some(Land { heights: heights.clone(), chunks: p.chunks }),
+                None => objects.push((m.lo, m.hi)),
+            }
             graph_meshes.push(GraphMesh { view: m.view.clone(), origin: m.origin, voxel: m.voxel, centre: m.norm.center, scale: m.norm.scale });
             loaded.push(m);
         }
 // A Load SDF node knows where its shape is, so it can stand in for a mesh as the place to look for the surface.
         let sdf_boxes: Vec<([f32; 3], [f32; 3])> = g.nodes.values().filter_map(|n| if let NodeKind::LoadSdf(p) = &n.kind { p.field_bounds() } else { None }).collect();
+        objects.extend(sdf_boxes.iter().copied());
         if loaded.is_empty() && sdf_boxes.is_empty() && require_mesh {
             return Err("the field has no Load Mesh or Load SDF node, so there is no surface to extract".into());
         }
@@ -313,7 +376,7 @@ let (mut lo, mut hi) = if loaded.is_empty() && sdf_boxes.is_empty() { ([0.0; 3],
         }
         let radius = (0..3).map(|a| hi[a] - lo[a]).fold(0.0, f32::max) * 0.5;
         // How far noise graphs can move the surface: their amplitudes times the largest value of their density, plus a margin.
-        let mut reach = 0.05 * radius;
+        let mut reach = if land.is_some() { 0.0 } else { 0.05 * radius };
         for n in original.nodes.values() {
             if let NodeKind::NoiseGraph(p) = &n.kind
                 && let Ok(sub) = noise_graph_source(p, &self.base) {
@@ -322,7 +385,7 @@ let (mut lo, mut hi) = if loaded.is_empty() && sdf_boxes.is_empty() { ([0.0; 3],
                     reach += p.amplitude.abs() * size;
                 }
         }
-        Ok(FieldSource { ev, lo, hi, reach: reach.min(2.0 * radius), _loaded: loaded })
+        Ok(FieldSource { ev, lo, hi, reach: reach.min(2.0 * radius), land, objects, _loaded: loaded })
     }
 
     fn output_path(&self, o: &OutParams, suffix: &str, ext: &str) -> PathBuf {
@@ -334,7 +397,8 @@ let (mut lo, mut hi) = if loaded.is_empty() && sdf_boxes.is_empty() { ([0.0; 3],
         };
         let _ = std::fs::create_dir_all(&dir);
         let stem = self.batch_file.as_ref().and_then(|f| f.file_stem()).map_or(String::new(), |s| s.to_string_lossy().into_owned());
-        let name = format!("{}{suffix}", o.name.replace("{name}", &stem));
+        let chunk = self.cache.chunk.map_or(String::new(), |(cx, cy)| format!("_{cy:02}_{cx:02}"));
+        let name = format!("{}{chunk}{suffix}", o.name.replace("{name}", &stem));
         // An existing file is overwritten: a rerun must keep the same names.
         dir.join(format!("{name}.{ext}"))
     }
@@ -377,7 +441,41 @@ let (mut lo, mut hi) = if loaded.is_empty() && sdf_boxes.is_empty() { ([0.0; 3],
     }
 
     /// Runs the operation nodes upstream of every output node and writes the files; returns the files written.
+    /// Runs the graph; with a terrain cut into chunks it runs once for every chunk, file names ending `_row_column`.
     pub fn run(&mut self, graph: &Graph) -> Result<Vec<PathBuf>, String> {
+        let n = graph.nodes.values().filter(|n| !n.muted).filter_map(|n| if let NodeKind::LoadMesh(p) = &n.kind { Some(p) } else { None }).filter(|p| crate::landscape_field::is_heightmap(&p.path)).map(|p| p.chunks).max().unwrap_or(1);
+        if n <= 1 {
+            self.cache.chunk = None;
+            return self.run_once(graph);
+        }
+        let mut written = Vec::new();
+        let mut manifest = Vec::new();
+        let result: Result<(), String> = (|| {
+            for cy in 0..n {
+                for cx in 0..n {
+                    self.cache.chunk = Some((cx, cy));
+                    (self.log)(&format!("chunk {} of {}: row {cy}, column {cx}", cy * n + cx + 1, n * n));
+                    let files = self.run_once(graph)?;
+                    let (x0, y0, size) = self.cache.chunk_box.unwrap_or_default();
+                    manifest.push(serde_json::json!({"row": cy, "column": cx, "origin": [x0, y0], "size": size, "files": files.iter().map(|f| f.file_name().map_or(String::new(), |n| n.to_string_lossy().into_owned())).collect::<Vec<_>>()}));
+                    written.extend(files);
+                }
+            }
+            Ok(())
+        })();
+        self.cache.chunk = None;
+        result?;
+        // Next to the files: where each chunk is (the meshes already hold their world positions, in the field's units).
+        if let Some(dir) = written.first().and_then(|f| f.parent()) {
+            let path = dir.join("terrain_chunks.json");
+            let json = serde_json::json!({"chunks_per_side": n, "chunks": manifest});
+            std::fs::write(&path, serde_json::to_string_pretty(&json).unwrap_or_default()).map_err(|e| format!("{}: {e}", path.display()))?;
+            (self.log)(&format!("wrote {}", path.display()));
+        }
+        Ok(written)
+    }
+
+    fn run_once(&mut self, graph: &Graph) -> Result<Vec<PathBuf>, String> {
         for key in std::mem::take(&mut self.cache.batch_keys) {
             self.cache.meshes.remove(&key);
         }
@@ -450,6 +548,9 @@ let (mut lo, mut hi) = if loaded.is_empty() && sdf_boxes.is_empty() { ([0.0; 3],
             NodeKind::Remesh { triangles, adaptivity } => {
                 let triangles = &self.max_triangles.map_or(*triangles, |m| (*triangles).min(m));
                 let field = self.field_for(original, lowered, input(0)?, true, fields)?;
+                if let Some(land) = &field.land {
+                    Value::Mesh(self.terrain_chunk(&field, land, *triangles as usize))
+                } else {
                 (self.log)(&format!("remeshing to {triangles} triangles"));
                 let d = Displace { amount: 0.0, tile_size: 1.0, prim_size: 1.0, mask: crate::meshmask::PackedMask::NONE };
                 let norm = Normalization { center: [0.0; 3], scale: 1.0 };
@@ -464,6 +565,7 @@ let (mut lo, mut hi) = if loaded.is_empty() && sdf_boxes.is_empty() { ([0.0; 3],
                     (self.log)(&format!("  {line}"));
                 }
                 Value::Mesh(mesh)
+                }
             }
             NodeKind::LoadMesh(p) => Value::Source(self.mesh(p)?.raw.clone()),
             NodeKind::TransferUv => {
@@ -487,8 +589,17 @@ let (mut lo, mut hi) = if loaded.is_empty() && sdf_boxes.is_empty() { ([0.0; 3],
             NodeKind::AutoUv(params) => {
                 let (src, _) = input(0)?;
                 let Value::Mesh(mesh) = self.value(original, lowered, src, memo, fields)? else { return Err(format!("node {id} (Auto UVs) needs a mesh")) };
-                (self.log)("unwrapping");
-                let uv = crate::uvgen::generate(&mesh, params)?;
+                let uv = match (params.planar, self.cache.chunk_box) {
+                    (true, Some((x0, y0, size))) => {
+                        (self.log)("planar UVs from above");
+                        crate::uvgen::planar(&mesh, x0, y0, size)
+                    }
+                    (true, None) => return Err(format!("node {id} (Auto UVs): Planar UVs need a terrain chunk (a Load Mesh node with a heightmap) before the Remesh")),
+                    _ => {
+                        (self.log)("unwrapping");
+                        crate::uvgen::generate(&mesh, params)?
+                    }
+                };
                 for line in crate::meshquality::uv_report(&uv, params.resolution as usize).to_string().lines() {
                     (self.log)(&format!("  {line}"));
                 }
@@ -584,11 +695,20 @@ impl FieldView {
     }
 }
 
+/// A terrain among the field's meshes.
+struct Land {
+    heights: std::sync::Arc<crate::landscape_field::Heights>,
+    chunks: u32,
+}
+
 struct FieldSource {
     ev: MeshEvaluator,
     lo: [f32; 3],
     hi: [f32; 3],
     reach: f32,
+    land: Option<Land>,
+    /// The boxes of the other meshes and SDFs, which can stand above or inside the terrain.
+    objects: Vec<([f32; 3], [f32; 3])>,
     /// Keeps the distance grids' textures alive as long as the evaluator.
     _loaded: Vec<std::sync::Arc<LoadedMesh>>,
 }

@@ -25,7 +25,14 @@ fn unit(a: V3) -> V3 {
 /// Surface nets: one vertex per cell the surface passes through (the average of where it crosses the
 /// cell's edges), and a quad for every grid edge it crosses. Normals are the field's gradient.
 /// Faces wind counter-clockwise seen from outside.
-pub fn surface_nets(nx: usize, ny: usize, nz: usize, mut layer: impl FnMut(usize) -> Vec<f32>) -> RawMesh {
+pub fn surface_nets(nx: usize, ny: usize, nz: usize, layer: impl FnMut(usize) -> Vec<f32>) -> RawMesh {
+    surface_nets_in(nx, ny, nz, layer, None)
+}
+
+/// `surface_nets`, keeping only the quads of the grid edges whose start lies in `own` = (i0, i1, j0, j1), half open.
+/// Neighbouring windows of one lattice share no edge and cover every one, and a cell's vertex depends on its eight
+/// corners alone, so their meshes meet with identical vertices (terrain chunks).
+pub fn surface_nets_in(nx: usize, ny: usize, nz: usize, mut layer: impl FnMut(usize) -> Vec<f32>, own: Option<(usize, usize, usize, usize)>) -> RawMesh {
     let mut mesh = RawMesh::default();
     if nx < 2 || ny < 2 || nz < 2 {
         return mesh;
@@ -79,6 +86,9 @@ pub fn surface_nets(nx: usize, ny: usize, nz: usize, mut layer: impl FnMut(usize
         let cell = |i: usize, j: usize, layer: usize| if layer == k { here[j * cx + i] } else { below[j * cx + i] };
         for j in 0..ny {
             for i in 0..nx {
+                if own.is_some_and(|(i0, i1, j0, j1)| i < i0 || i >= i1 || j < j0 || j >= j1) {
+                    continue;
+                }
                 let start = s0[j * nx + i];
                 let mut emit = |quad: [i32; 4], end: f32| {
                     if (start < 0.0) == (end < 0.0) {
@@ -107,6 +117,27 @@ pub fn surface_nets(nx: usize, ny: usize, nz: usize, mut layer: impl FnMut(usize
         }
         std::mem::swap(&mut below, &mut here);
         s0 = s1;
+    }
+    if own.is_some() {
+        // A window's quads leave the vertices of the cells around it unused: drop them.
+        let mut map = vec![u32::MAX; mesh.positions.len()];
+        for t in &mesh.triangles {
+            for &v in t {
+                map[v as usize] = 0;
+            }
+        }
+        let (mut positions, mut normals) = (Vec::new(), Vec::new());
+        for (v, m) in map.iter_mut().enumerate() {
+            if *m == 0 {
+                *m = positions.len() as u32;
+                positions.push(mesh.positions[v]);
+                normals.push(mesh.normals[v]);
+            }
+        }
+        for t in &mut mesh.triangles {
+            *t = t.map(|v| map[v as usize]);
+        }
+        (mesh.positions, mesh.normals) = (positions, normals);
     }
     mesh
 }

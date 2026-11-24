@@ -1,0 +1,180 @@
+//! A terrain heightmap as a field for the Mesh graph: a Load Mesh node given the PNG the Landscape tab exports (with its
+//! `.json` sidecar next to it) is the ground, `field = (z - height(x, y)) / sqrt(1 + slope^2)`, in the units of the node.
+//! The heights live in a 3D texture of 2048 x 2048 tiles (3D textures are limited to 2048 per side), and the shader
+//! reads them bilinearly (`land_dist` in `meshexport.rs`).
+
+use crate::mesh::Mesh;
+use std::path::Path;
+
+/// Texels per tile side.
+pub const TILE: usize = 2048;
+
+pub struct Heights {
+    /// Samples per side.
+    pub n: usize,
+    /// Distance between samples, in units.
+    pub cell: f32,
+    /// Row major (x fastest), in units.
+    pub h: Vec<f32>,
+    pub z: (f32, f32),
+}
+
+pub fn is_heightmap(path: &str) -> bool {
+    Path::new(path).extension().is_some_and(|e| e.eq_ignore_ascii_case("png"))
+}
+
+/// The heights of an exported heightmap in units of `unit_cm` centimetres.
+pub fn load(path: &Path, unit_cm: f32) -> Result<Heights, String> {
+    let img = image::open(path).map_err(|e| format!("{}: {e}", path.display()))?.to_luma16();
+    let n = img.width() as usize;
+    if img.height() as usize != n || n < 2 {
+        return Err(format!("{}: a heightmap must be square", path.display()));
+    }
+    let side = std::path::PathBuf::from(format!("{}.json", path.display()));
+    let text = std::fs::read_to_string(&side).map_err(|e| format!("{}: {e} (the sidecar the Landscape tab writes next to the heightmap)", side.display()))?;
+    let json: serde_json::Value = serde_json::from_str(&text).map_err(|e| format!("{}: {e}", side.display()))?;
+    let size_m = json["size_m"].as_f64().ok_or("the sidecar has no size_m")? as f32;
+    let step_cm = json["step_cm"].as_f64().ok_or("the sidecar has no step_cm")? as f32;
+    let centre_cm = json["unreal_import"]["location_cm"][2].as_f64().ok_or("the sidecar has no unreal_import.location_cm")? as f32;
+    // The inverse of `landscape::encode_unreal`: metres = (sample - 32768) * step + centre, in centimetres.
+    let k = 1.0 / unit_cm;
+    let h: Vec<f32> = img.as_raw().iter().map(|v| ((*v as f32 - 32768.0) * step_cm + centre_cm) * k).collect();
+    let z = h.iter().fold((f32::MAX, f32::MIN), |(lo, hi), v| (lo.min(*v), hi.max(*v)));
+    Ok(Heights { n, cell: size_m * 100.0 * k / (n - 1) as f32, h, z })
+}
+
+impl Heights {
+    /// Side of the terrain, in units.
+    pub fn world(&self) -> f32 {
+        self.cell * (self.n - 1) as f32
+    }
+
+    /// The lowest and highest height among the samples that touch the box `x0..x1` by `y0..y1`.
+    pub fn z_range(&self, x0: f32, x1: f32, y0: f32, y1: f32) -> (f32, f32) {
+        let idx = |v: f32, up: bool| {
+            let g = v / self.cell;
+            (if up { g.ceil() } else { g.floor() }).clamp(0.0, (self.n - 1) as f32) as usize
+        };
+        let (i0, i1, j0, j1) = (idx(x0, false), idx(x1, true), idx(y0, false), idx(y1, true));
+        let mut r = (f32::MAX, f32::MIN);
+        for j in j0..=j1 {
+            for v in &self.h[j * self.n + i0..=j * self.n + i1] {
+                r = (r.0.min(*v), r.1.max(*v));
+            }
+        }
+        r
+    }
+
+    /// Quads a surface-nets mesh of this terrain has per column of lattice cells, on average over the box: one for the top
+    /// plus the slope along x and along y (a surface climbing 1 m per metre crosses one more lattice edge per cell).
+    pub fn quads_per_column(&self, x0: f32, x1: f32, y0: f32, y1: f32) -> f32 {
+        let idx = |v: f32| ((v / self.cell).round().max(0.0) as usize).min(self.n - 2);
+        let (i0, i1, j0, j1) = (idx(x0), idx(x1).max(idx(x0) + 1), idx(y0), idx(y1).max(idx(y0) + 1));
+        let (mut sum, mut count) = (0.0f64, 0usize);
+        for j in j0..j1 {
+            for i in i0..i1 {
+                let h = self.h[j * self.n + i];
+                let (dx, dy) = ((self.h[j * self.n + i + 1] - h).abs(), (self.h[(j + 1) * self.n + i] - h).abs());
+                sum += (1.0 + (dx + dy) / self.cell) as f64;
+                count += 1;
+            }
+        }
+        (sum / count.max(1) as f64) as f32
+    }
+
+    /// Texture size: a square of `min(n, 2048)` texels, in `tiles()` by `tiles()` layers.
+    pub fn tile_size(&self) -> usize {
+        self.n.min(TILE)
+    }
+
+    pub fn tiles(&self) -> usize {
+        self.n.div_ceil(TILE)
+    }
+
+    /// The heights as the layers of the texture (tile (tx, ty) is layer ty * tiles + tx).
+    fn texels(&self) -> Vec<f32> {
+        let (t, tiles) = (self.tile_size(), self.tiles());
+        let mut out = vec![self.z.0; t * t * tiles * tiles];
+        for y in 0..self.n {
+            for x in 0..self.n {
+                let layer = (y / TILE) * tiles + x / TILE;
+                out[(layer * t + y % TILE) * t + x % TILE] = self.h[y * self.n + x];
+            }
+        }
+        out
+    }
+
+    pub fn upload(&self, device: &eframe::wgpu::Device, queue: &eframe::wgpu::Queue) -> (eframe::wgpu::Texture, eframe::wgpu::TextureView) {
+        use eframe::wgpu;
+        let (t, tiles) = (self.tile_size() as u32, self.tiles() as u32);
+        let size = wgpu::Extent3d { width: t, height: t, depth_or_array_layers: tiles * tiles };
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("terrain heights"),
+            size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D3,
+            format: wgpu::TextureFormat::R32Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo { texture: &texture, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+            bytemuck::cast_slice(&self.texels()),
+            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(t * 4), rows_per_image: Some(t) },
+            size,
+        );
+        let view = texture.create_view(&Default::default());
+        (texture, view)
+    }
+
+    /// The terrain as a coarse grid mesh (at most 129 x 129 vertices), for nodes that want a mesh from the file.
+    pub fn coarse_mesh(&self) -> Mesh {
+        let m = 129.min(self.n);
+        let at = |i: usize, j: usize| {
+            let (x, y) = (i * (self.n - 1) / (m - 1), j * (self.n - 1) / (m - 1));
+            [x as f32 * self.cell, y as f32 * self.cell, self.h[y * self.n + x]]
+        };
+        let mut mesh = Mesh::default();
+        for j in 0..m {
+            for i in 0..m {
+                mesh.positions.push(at(i, j));
+            }
+        }
+        for j in 0..m - 1 {
+            for i in 0..m - 1 {
+                let v = |a: usize, b: usize| (b * m + a) as u32;
+                mesh.triangles.push([v(i, j), v(i + 1, j), v(i + 1, j + 1)]);
+                mesh.triangles.push([v(i, j), v(i + 1, j + 1), v(i, j + 1)]);
+            }
+        }
+        mesh
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_exported_heightmap_reads_back_in_the_nodes_units() {
+        let n = 33;
+        let metres: Vec<f32> = (0..n * n).map(|k| 100.0 + (k % n) as f32 * 2.0 + (k / n) as f32 * 0.5).collect();
+        let enc = crate::landscape::encode_unreal(&metres);
+        let dir = std::env::temp_dir().join("noiser_heights_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("h.png");
+        crate::landscape::write_unreal(&path, n, 640.0, &enc).unwrap();
+        // Centimetres: a hundred times the metres, and 640 m is 64,000 units wide.
+        let h = load(&path, 1.0).unwrap();
+        assert!((h.world() - 64000.0).abs() < 1.0, "{}", h.world());
+        assert!(h.h.iter().zip(&metres).all(|(a, m)| (a - m * 100.0).abs() <= enc.step_cm), "within one height step");
+        let (lo, hi) = h.z_range(0.0, 64000.0, 0.0, 64000.0);
+        assert!((lo - h.z.0).abs() < 1e-3 && (hi - h.z.1).abs() < 1e-3);
+        // A single corner cell sees only its own samples.
+        let (clo, chi) = h.z_range(0.0, 1.0, 0.0, 1.0);
+        assert!(clo >= h.z.0 && chi <= h.h[n + 1].max(h.h[0]).max(h.h[1]).max(h.h[n]) + 1e-3);
+        assert_eq!(h.coarse_mesh().triangles.len(), 2 * 32 * 32);
+        assert_eq!(h.texels().len(), n * n);
+    }
+}

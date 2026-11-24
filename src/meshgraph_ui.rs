@@ -44,6 +44,14 @@ fn path_row(ui: &mut egui::Ui, id: &str, path: &mut String, hint: &str, filter: 
 pub fn props(ui: &mut egui::Ui, kind: &mut NodeKind) -> bool {
     let image = matches!(kind, NodeKind::OutImage(_));
     match kind {
+        NodeKind::LoadMesh(p) if crate::landscape_field::is_heightmap(&p.path) => {
+            ui.weak("A terrain: a heightmap PNG from the Landscape tab (its .json sidecar must sit next to it) as the ground, z up. The field is the height above it. Wire it to a Remesh: that makes the terrain in chunks of about the Remesh's triangle count each, cut from one lattice so neighbours meet exactly. Add Load Mesh / Load SDF nodes with a union to put objects on it, and a noise graph to add 3D detail.");
+            path_row(ui, "terrain path", &mut p.path, "heightmap .png", Some(("Heightmap", &["png"])));
+            let d = crate::meshgraph::LoadMeshParams::default();
+            crate::row(ui, &mut p.chunks, d.chunks, |ui, v| _ = ui.add(egui::DragValue::new(v).range(1..=32).prefix("chunks ").suffix(" per side")).on_hover_text("The terrain is cut into this many chunks along each side; a run writes one file per chunk and map, named ending _row_column."));
+            crate::row(ui, &mut p.unit_cm, d.unit_cm, |ui, v| _ = ui.add(egui::DragValue::new(v).range(0.0001..=1.0e6).speed(0.5).prefix("1 unit = ").suffix(" cm")).on_hover_text("The unit of the field: 100 for metres, 1 for centimetres (Unreal). Other meshes in the graph must use the same unit."));
+            true
+        }
         NodeKind::LoadMesh(p) => {
             if p.sdf || p.path.to_lowercase().ends_with(".sdf") {
                 ui.weak("An SDF Modeler composition (made in the SDF Composer tab) as a field: its signed distance, negative inside. It is sampled on a grid and turned into a mesh first, Z up like SDF Modeler's exports, so the file's own detail is limited by the samples below.");
@@ -51,7 +59,7 @@ pub fn props(ui: &mut egui::Ui, kind: &mut NodeKind) -> bool {
             } else {
                 ui.weak("A mesh file as a field: its signed distance, negative inside, in the units of the file.");
                 ui.weak("A path of {batch} reads the mesh file of a headless batch run (--mesh-graph with --batch-dir).");
-                path_row(ui, "mesh path", &mut p.path, "mesh file or {batch}", Some(("Mesh", &["obj", "ply", "stl", "gltf", "glb", "fbx", "sdf"])));
+                path_row(ui, "mesh path", &mut p.path, "mesh file or {batch}", Some(("Mesh", &["obj", "ply", "stl", "gltf", "glb", "fbx", "sdf", "png"])));
             }
             let d = crate::meshgraph::LoadMeshParams::default();
             crate::row(ui, &mut p.resolution, d.resolution, |ui, v| _ = ui.add(egui::DragValue::new(v).range(32..=512).suffix(" samples")).on_hover_text("Resolution of the distance grid the mesh is baked into."));
@@ -110,6 +118,7 @@ pub fn props(ui: &mut egui::Ui, kind: &mut NodeKind) -> bool {
             crate::row(ui, &mut uv.padding, d.padding, |ui, v| _ = ui.add(egui::DragValue::new(v).range(0..=64).prefix("padding ").suffix(" px")));
             crate::row(ui, &mut uv.smoothing, d.smoothing, |ui, v| _ = ui.add(egui::DragValue::new(v).range(0..=60).prefix("chart smoothing ")).on_hover_text("Rounds of smoothing of the surface the islands are cut from; the UVs still map the true surface. A few rounds merge small islands on a bumpy surface; many rounds stretch the texture on bumps."));
             crate::row(ui, &mut uv.absorb_tiny, d.absorb_tiny, |ui, v| _ = ui.checkbox(v, "fold tiny islands into neighbours"));
+            crate::row(ui, &mut uv.planar, d.planar, |ui, v| _ = ui.checkbox(v, "planar from above (terrain chunks)").on_hover_text("Projects the chunk straight down onto its 0 to 1 square: instant at any size, and chunk i is UDIM tile 1001 + i. Needs a terrain (Load Mesh with a heightmap) before the Remesh."));
             crate::row(ui, &mut uv.brute_force, d.brute_force, |ui, v| _ = ui.checkbox(v, "best packing (slower; up to 50k triangles)"));
             true
         }

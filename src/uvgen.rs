@@ -86,11 +86,14 @@ pub struct UvParams {
     pub merge_rounds: u32,
     /// Fold tiny islands into their neighbours by extending the neighbour's UVs over them (undone where it overlaps).
     pub absorb_tiny: bool,
+    /// A terrain chunk: project straight down onto its square instead of unwrapping (instant, and the chunks line up
+    /// as UDIM tiles).
+    pub planar: bool,
 }
 
 impl Default for UvParams {
     fn default() -> Self {
-        UvParams { resolution: 2048, padding: 4, max_cost: 4.0, normal_deviation: 2.0, brute_force: true, smoothing: 3, merge_rounds: 0, absorb_tiny: true }
+        UvParams { resolution: 2048, padding: 4, max_cost: 4.0, normal_deviation: 2.0, brute_force: true, smoothing: 3, merge_rounds: 0, absorb_tiny: true, planar: false }
     }
 }
 
@@ -568,6 +571,13 @@ fn absorb_tiny_islands(mesh: &mut UvMesh, min_faces: usize, res: usize, grow: f3
         eprintln!("tiny islands: no neighbour {no_border}, border conflict {conflicts}, density/winding {density}, undone for overlap {}, kept {kept}", tried - kept);
     }
     kept
+}
+
+/// UVs by projecting straight down: the square `x0`, `y0`, `size` is the whole 0 to 1 tile (V pointing down, like the
+/// rest of `UvMesh`); vertices past the square, which a chunk's jagged border has, are held on its edge.
+pub fn planar(mesh: &RawMesh, x0: f32, y0: f32, size: f32) -> UvMesh {
+    let uvs = mesh.positions.iter().map(|p| [((p[0] - x0) / size).clamp(0.0, 1.0), 1.0 - ((p[1] - y0) / size).clamp(0.0, 1.0)]).collect();
+    UvMesh { positions: mesh.positions.clone(), normals: mesh.normals.clone(), uvs, triangles: mesh.triangles.clone(), source: (0..mesh.positions.len() as u32).collect() }
 }
 
 /// UVs for `mesh`; every triangle of the input is a triangle of the output, with the same winding.
