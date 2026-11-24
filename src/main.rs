@@ -39,6 +39,7 @@ mod library;
 mod prefs;
 mod icons;
 mod composer_gpu;
+mod composer_reference;
 mod composer_render;
 mod sdf_file;
 mod sdf_mesh;
@@ -271,6 +272,7 @@ impl App {
         let mut show_mask = false;
         let mut lighting_arg: Option<String> = None;
         let mut select_arg: Option<u32> = None;
+        let mut reference_arg: Option<std::path::PathBuf> = None;
         let (mut shape_arg, mut cloud_arg, mut amount_arg): (Option<String>, bool, Option<f32>) = (None, false, None);
         let mut template_arg: Option<String> = None;
         while let Some(a) = args.next() {
@@ -278,6 +280,8 @@ impl App {
                 mesh_arg = args.next().map(std::path::PathBuf::from);
             } else if a == "--template" {
                 template_arg = args.next();
+            } else if a == "--reference" {
+                reference_arg = args.next().map(std::path::PathBuf::from);
             } else if a == "--select" {
                 select_arg = args.next().and_then(|n| n.parse::<u32>().ok());
             } else if a == "--shape" {
@@ -456,6 +460,9 @@ impl App {
             let modified = cc.storage.and_then(|s| s.get_string(COMPOSER_MODIFIED_KEY)).as_deref() == Some("1");
             app.composer.restore(&json, path, modified);
         }
+        if let Some(json) = cc.storage.and_then(|s| s.get_string(COMPOSER_REFERENCE_KEY)).filter(|j| !j.is_empty()) {
+            app.composer.restore_reference(&json);
+        }
         let graph_from_arg = mesh_graph_arg.is_some();
         app.drawer.open = show_library;
         if let Some(kind) = library_tab {
@@ -507,6 +514,10 @@ impl App {
         app.pv.cloud = cloud_arg;
         if let Some(a) = amount_arg {
             app.pv.amount = a;
+        }
+        if let Some(path) = reference_arg {
+            app.composer.load_reference(path);
+            app.workspace = meshworkspace::Workspace::Composer;
         }
         if let Some(n) = select_arg.filter(|_| app.workspace == meshworkspace::Workspace::Composer) {
             // `--select N` selects the Nth top-level shape of the composition.
@@ -875,6 +886,7 @@ const MESH_GRAPH_KEY: &str = "mesh_graph";
 const COMPOSER_KEY: &str = "composer_document";
 const COMPOSER_PATH_KEY: &str = "composer_path";
 const COMPOSER_MODIFIED_KEY: &str = "composer_modified";
+const COMPOSER_REFERENCE_KEY: &str = "composer_reference";
 const MESH_GRAPH_PATH_KEY: &str = "mesh_graph_path";
 const LANDSCAPE_GRAPH_KEY: &str = "landscape_graph";
 const LANDSCAPE_SETTINGS_KEY: &str = "landscape_settings";
@@ -939,6 +951,9 @@ impl App {
         }
         if changed(&|b| b.max_steps != self.prefs.max_steps) {
             self.pv.max_steps = self.prefs.max_steps;
+        }
+        if changed(&|b| b.composer_render_scale != self.prefs.composer_render_scale || b.composer_max_steps != self.prefs.composer_max_steps) {
+            self.composer.set_render_quality(self.prefs.composer_render_scale, self.prefs.composer_max_steps);
         }
         if changed(&|b| b.export_samples != self.prefs.export_samples) {
             self.composer.set_export_samples(self.prefs.export_samples as usize);
@@ -1070,6 +1085,7 @@ impl eframe::App for App {
             }
             None => storage.set_string(COMPOSER_KEY, String::new()),
         }
+        storage.set_string(COMPOSER_REFERENCE_KEY, self.composer.reference_storage());
         storage.set_string(MESH_GRAPH_KEY, self.mesh_ws.graph.to_json());
         storage.set_string(LANDSCAPE_PROJECT_KEY, self.landscape.to_project());
         storage.set_string(MESH_GRAPH_PATH_KEY, self.mesh_ws.path.as_ref().map_or(String::new(), |p| p.to_string_lossy().into_owned()));

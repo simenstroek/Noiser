@@ -86,6 +86,9 @@ pub struct Prefs {
     /// Starting values of the 3D preview.
     pub render_scale: f32,
     pub max_steps: u32,
+    /// Starting values of the SDF Composer's viewport.
+    pub composer_render_scale: f32,
+    pub composer_max_steps: u32,
     /// Samples along the longest side when a `.sdf` file is turned into a mesh.
     pub sdf_mesh_resolution: u32,
     /// Starting value of the Composer's mesh export.
@@ -106,6 +109,8 @@ impl Default for Prefs {
             accent: None,
             render_scale: 1.0,
             max_steps: 300,
+            composer_render_scale: 1.0,
+            composer_max_steps: 260,
             sdf_mesh_resolution: 160,
             export_samples: 224,
         }
@@ -117,6 +122,8 @@ impl Prefs {
         self.ui_scale = if self.ui_scale.is_finite() { self.ui_scale.clamp(0.75, 2.0) } else { 1.0 };
         self.render_scale = if [1.0, 0.5, 0.25].contains(&self.render_scale) { self.render_scale } else { 1.0 };
         self.max_steps = self.max_steps.clamp(32, 600);
+        self.composer_render_scale = if [1.0, 0.5, 0.25].contains(&self.composer_render_scale) { self.composer_render_scale } else { 1.0 };
+        self.composer_max_steps = self.composer_max_steps.clamp(32, 600);
         self.sdf_mesh_resolution = self.sdf_mesh_resolution.clamp(32, 400);
         self.export_samples = self.export_samples.clamp(48, 640);
         self
@@ -183,7 +190,7 @@ pub fn show(prefs: &mut Prefs, tab: &mut PrefsTab, ui: &mut egui::Ui, shortcuts:
             });
         }
         PrefsTab::Performance => {
-            heading(ui, "3D preview");
+            heading(ui, "Noise graph 3D preview");
             egui::Grid::new("prefs preview").num_columns(2).spacing([16.0, 6.0]).show(ui, |ui| {
                 ui.label("Starting render resolution");
                 ui.horizontal(|ui| {
@@ -197,6 +204,20 @@ pub fn show(prefs: &mut Prefs, tab: &mut PrefsTab, ui: &mut egui::Ui, shortcuts:
                 ui.end_row();
             });
             ui.weak("These are the values the preview starts from; changing them here also changes the open preview.");
+            heading(ui, "SDF Composer viewport");
+            egui::Grid::new("prefs composer preview").num_columns(2).spacing([16.0, 6.0]).show(ui, |ui| {
+                ui.label("Starting render resolution");
+                ui.horizontal(|ui| {
+                    for (scale, name) in [(1.0, "Full"), (0.5, "Half"), (0.25, "Quarter")] {
+                        ui.selectable_value(&mut prefs.composer_render_scale, scale, name);
+                    }
+                });
+                ui.end_row();
+                let label = ui.label("Starting max ray steps");
+                ui.add(egui::Slider::new(&mut prefs.composer_max_steps, 32..=600).logarithmic(true)).labelled_by(label.id);
+                ui.end_row();
+            });
+            ui.weak("The Composer ray marches the whole composition every frame: Half or Quarter resolution helps most when it gets sluggish. The viewport's own quality button changes it on the spot.");
             heading(ui, "SDF files");
             egui::Grid::new("prefs sdf").num_columns(2).spacing([16.0, 6.0]).show(ui, |ui| {
                 let label = ui.label("Mesh resolution");

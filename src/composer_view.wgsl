@@ -14,12 +14,27 @@ struct U {
     // the box around the drawn shapes: rays that miss it are not marched
     box_lo: vec4f,
     box_hi: vec4f,
+    // march step limit, reference opacity, reference drawn (0 or 1), 0
+    settings: vec4f,
 }
 
 @group(0) @binding(0) var<uniform> u: U;
 @group(0) @binding(1) var<storage, read> shapes: array<vec4f>;
 @group(0) @binding(2) var<storage, read> ops: array<vec4f>;
 @group(0) @binding(3) var<storage, read_write> test_points: array<vec4f>;
+// The reference model, rasterised at the same size: its colour (alpha 0 where there is none) and its distance from the eye.
+@group(0) @binding(4) var reference_color: texture_2d<f32>;
+@group(0) @binding(5) var reference_distance: texture_2d<f32>;
+
+var<private> reference_rgb: vec3f;
+var<private> reference_t: f32;
+
+// What a pixel shows given the composition's colour there (or the background) and how far along the ray it was: the
+// reference covers it when it is nearer, fully or through its opacity.
+fn composite(base: vec3f, base_t: f32) -> vec3f {
+    if (reference_t >= 1e8 || base_t < reference_t) { return base; }
+    return mix(base, reference_rgb, u.settings.y);
+}
 
 fn sdf_op_count() -> u32 {
     return u.counts.x;
@@ -111,6 +126,15 @@ fn surface_color(p: vec3f) -> vec3f {
 
 @fragment
 fn fs(in: VsOut) -> @location(0) vec4f {
+    reference_t = 1e30;
+    if (u.settings.z > 0.5) {
+        let pixel = vec2i(in.pos.xy);
+        let c = textureLoad(reference_color, pixel, 0);
+        if (c.a > 0.5) {
+            reference_rgb = c.rgb;
+            reference_t = textureLoad(reference_distance, pixel, 0).r;
+        }
+    }
     let ndc = vec2f(in.uv.x * 2.0 - 1.0, 1.0 - in.uv.y * 2.0);
     let hs = u.params.y;
     let direction = normalize(u.forward.xyz + u.right.xyz * (ndc.x * hs * u.params.x) + u.up.xyz * (ndc.y * hs));
@@ -121,11 +145,14 @@ fn fs(in: VsOut) -> @location(0) vec4f {
     let t1 = (u.box_hi.xyz - origin) * inverse;
     let near_t = max(max(min(t0.x, t1.x), min(t0.y, t1.y)), max(min(t0.z, t1.z), 0.0));
     let far_t = min(min(max(t0.x, t1.x), max(t0.y, t1.y)), max(t0.z, t1.z));
-    if (near_t > far_t) { return vec4f(vec3f(background), 1.0); }
-    let far = min(u.params.z, far_t);
+    if (near_t > far_t) { return vec4f(composite(vec3f(background), 1e30), 1.0); }
+    // A reference that hides everything behind it ends the march at its surface.
+    var far = min(u.params.z, far_t);
+    if (u.settings.y > 0.999) { far = min(far, reference_t); }
     var t = near_t;
     var hit = false;
-    for (var i = 0; i < 260; i++) {
+    let steps = i32(u.settings.x);
+    for (var i = 0; i < steps; i++) {
         let d = map(origin + direction * t);
         if (d < 0.0004 * (1.0 + t)) {
             hit = true;
@@ -135,7 +162,7 @@ fn fs(in: VsOut) -> @location(0) vec4f {
         if (t > far) { break; }
     }
     if (!hit) {
-        return vec4f(vec3f(background), 1.0);
+        return vec4f(composite(vec3f(background), 1e30), 1.0);
     }
     let p = origin + direction * t;
     let n = normal_at(p, t);
@@ -160,5 +187,5 @@ fn fs(in: VsOut) -> @location(0) vec4f {
         color = vec3f(0.98, 0.58, 0.18);
     }
     let light_amount = 0.28 * ao + 0.72 * diffuse * (0.5 + 0.5 * ao) + rim;
-    return vec4f(min(color * light_amount, vec3f(1.0)), 1.0);
+    return vec4f(composite(min(color * light_amount, vec3f(1.0)), t), 1.0);
 }

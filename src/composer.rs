@@ -1,7 +1,8 @@
 //! The SDF Composer tab: build a shape from SDF primitives the way SDF Modeler does, and save it as a `.sdf` file that
 //! the Noise graph and the Mesh graph can load. The document is an `SdfFile`, so what Noiser does not edit is kept.
 
-use crate::composer_gpu::{Uniforms, ViewCallback};
+use crate::composer_gpu::{DEFAULT_STEPS, ReferenceDraw, ReferenceUniforms, Uniforms, ViewCallback};
+use crate::composer_reference::{Reference, ReferenceMesh, ReferenceSettings};
 use crate::composer_render::{Camera, pick};
 use crate::sdf_file::{Assembly, Layer, Node, SdfFile};
 use crate::sdf_model::{GpuScene, LayerField, M3, V3, euler_matrix, file_scene, into_frame, layer_fields};
@@ -318,6 +319,16 @@ pub struct Composer {
     export_job: Option<std::sync::mpsc::Receiver<String>>,
     /// Where the viewport was drawn last (tests aim the pointer with it).
     last_view: egui::Rect,
+    /// The picture is rendered at this fraction of the viewport's pixels (1, 0.5 or 0.25).
+    render_scale: f32,
+    /// The most steps a ray of the viewport may take.
+    max_steps: u32,
+    /// The model drawn beside the composition to model on top of; not part of the document.
+    reference: Option<Reference>,
+    reference_load: Option<std::sync::mpsc::Receiver<Result<(PathBuf, ReferenceMesh), String>>>,
+    /// The placement a restored session asked for, applied when its mesh has loaded.
+    reference_settings_pending: Option<ReferenceSettings>,
+    reference_serial: u64,
     pub status: String,
 }
 
@@ -350,6 +361,12 @@ impl Default for Composer {
             export_samples: 224,
             export_job: None,
             last_view: egui::Rect::NOTHING,
+            render_scale: 1.0,
+            max_steps: DEFAULT_STEPS,
+            reference: None,
+            reference_load: None,
+            reference_settings_pending: None,
+            reference_serial: 0,
             status: String::new(),
         }
     }
@@ -481,6 +498,66 @@ impl Composer {
     /// Saves to the file it was opened from or saved to last (a dialog when it has none).
     pub fn save_current(&mut self) {
         self.save(false);
+    }
+
+    pub fn set_render_quality(&mut self, scale: f32, steps: u32) {
+        self.render_scale = if [1.0, 0.5, 0.25].contains(&scale) { scale } else { 1.0 };
+        self.max_steps = steps.clamp(32, 600);
+    }
+
+    /// Reads a mesh file on a worker thread and shows it beside the composition once it is ready.
+    pub fn load_reference(&mut self, path: PathBuf) {
+        self.reference_serial += 1;
+        let id = self.reference_serial;
+        let name = path.file_name().map_or(String::new(), |n| n.to_string_lossy().into_owned());
+        self.status = format!("Loading {name}…");
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = sender.send(ReferenceMesh::load(&path, id).map(|mesh| (path, mesh)));
+        });
+        self.reference_load = Some(receiver);
+    }
+
+    fn set_reference(&mut self, path: PathBuf, mesh: ReferenceMesh) {
+        let settings = match self.reference_settings_pending.take() {
+            Some(settings) => ReferenceSettings { path: path.clone(), ..settings },
+            None => ReferenceSettings { path: path.clone(), ..ReferenceSettings::default() },
+        };
+        let name = path.file_name().map_or(String::new(), |n| n.to_string_lossy().into_owned());
+        self.status = format!("Reference {name}: {} triangles", mesh.triangle_count());
+        self.reference = Some(Reference { settings, mesh: Arc::new(mesh) });
+        self.frame_pending = true;
+    }
+
+    fn poll_reference(&mut self, ctx: &egui::Context) {
+        let Some(receiver) = &self.reference_load else { return };
+        match receiver.try_recv() {
+            Ok(Ok((path, mesh))) => {
+                self.reference_load = None;
+                self.set_reference(path, mesh);
+            }
+            Ok(Err(message)) => {
+                self.reference_load = None;
+                self.reference_settings_pending = None;
+                self.status = message;
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => ctx.request_repaint_after(std::time::Duration::from_millis(100)),
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => self.reference_load = None,
+        }
+    }
+
+    /// The reference's placement as a string for the session, empty when there is none.
+    pub fn reference_storage(&self) -> String {
+        self.reference.as_ref().and_then(|r| serde_json::to_string(&r.settings).ok()).unwrap_or_default()
+    }
+
+    pub fn restore_reference(&mut self, json: &str) {
+        let Ok(settings) = serde_json::from_str::<ReferenceSettings>(json) else { return };
+        if settings.path.is_file() {
+            let path = settings.path.clone();
+            self.reference_settings_pending = Some(settings);
+            self.load_reference(path);
+        }
     }
 
     pub fn set_export_samples(&mut self, samples: usize) {
@@ -675,7 +752,21 @@ impl Composer {
         if index < list.len() {
             list.remove(index);
         }
-        self.selection = None;
+        // The shape above the deleted one, so a run of deletes can walk up the stack; the first of a list selects the
+        // one that took its place, and an emptied group selects the group.
+        let remaining = list.len();
+        let mut next = parent;
+        if index > 0 {
+            next.push(index - 1);
+            self.selection = Some(next);
+        } else if remaining > 0 {
+            next.push(0);
+            self.selection = Some(next);
+        } else if next.is_empty() {
+            self.selection = None;
+        } else {
+            self.selection = Some(next);
+        }
         self.touch();
     }
 
@@ -1329,6 +1420,80 @@ impl Composer {
 
     // ---- viewport ----
 
+    fn reference_menu(&mut self, button: &egui::Response) {
+        let mut load = false;
+        let mut remove = false;
+        let mut frame = false;
+        egui::Popup::menu(button).id(button.id.with("menu")).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
+            ui.set_min_width(280.0);
+            if ui.button("Load reference model…").on_hover_text("OBJ, PLY, STL, glTF or FBX").clicked() {
+                load = true;
+            }
+            let Some(reference) = &mut self.reference else {
+                ui.weak("Nothing loaded.");
+                return;
+            };
+            let name = reference.settings.path.file_name().map_or(String::new(), |n| n.to_string_lossy().into_owned());
+            ui.weak(format!("{name}: {} triangles", reference.mesh.triangle_count()));
+            ui.checkbox(&mut reference.settings.visible, "Show");
+            egui::Grid::new("reference placement").num_columns(2).spacing([12.0, 4.0]).show(ui, |ui| {
+                let label = ui.label("Opacity");
+                ui.add(egui::Slider::new(&mut reference.settings.opacity, 0.05..=1.0)).labelled_by(label.id);
+                ui.end_row();
+                let label = ui.label("Height");
+                ui.add(egui::DragValue::new(&mut reference.settings.height).range(0.05..=200.0).speed(0.01)).labelled_by(label.id);
+                ui.end_row();
+                ui.label("Feet at");
+                ui.horizontal(|ui| {
+                    for (axis, value) in reference.settings.offset.iter_mut().enumerate() {
+                        ui.add(egui::DragValue::new(value).speed(0.01)).on_hover_text(["x", "y", "z"][axis]);
+                    }
+                });
+                ui.end_row();
+                let label = ui.label("Turn");
+                ui.add(egui::DragValue::new(&mut reference.settings.yaw).range(-360.0..=360.0).speed(0.5).suffix("°")).labelled_by(label.id);
+                ui.end_row();
+            });
+            ui.horizontal(|ui| {
+                if ui.button("Frame all").clicked() {
+                    frame = true;
+                }
+                if ui.button("Remove").clicked() {
+                    remove = true;
+                }
+            });
+        });
+        if load
+            && let Some(path) = rfd::FileDialog::new().add_filter("Mesh", &["obj", "ply", "stl", "gltf", "glb", "fbx"]).pick_file()
+        {
+            self.load_reference(path);
+        }
+        if remove {
+            self.reference = None;
+            self.status.clear();
+        }
+        if frame {
+            self.frame_pending = true;
+        }
+    }
+
+    fn quality_menu(&mut self, button: &egui::Response) {
+        egui::Popup::menu(button).id(button.id.with("menu")).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
+            ui.set_min_width(260.0);
+            ui.horizontal(|ui| {
+                ui.label("Render resolution");
+                for (scale, name) in [(1.0, "Full"), (0.5, "Half"), (0.25, "Quarter")] {
+                    ui.selectable_value(&mut self.render_scale, scale, name);
+                }
+            });
+            ui.horizontal(|ui| {
+                let label = ui.label("Max ray steps");
+                ui.add(egui::Slider::new(&mut self.max_steps, 32..=600).logarithmic(true)).labelled_by(label.id);
+            });
+            ui.weak("Only this viewport. The starting values are in Preferences > Performance.");
+        });
+    }
+
     fn viewport(&mut self, ui: &mut egui::Ui, format: wgpu::TextureFormat) {
         let rect = ui.available_rect_before_wrap();
         self.last_view = rect;
@@ -1337,8 +1502,14 @@ impl Composer {
         let ctx = ui.ctx().clone();
         let size = rect.size();
         let scene = self.scene();
+        let reference_bounds = self.reference.as_ref().filter(|r| r.settings.visible).map(|r| r.bounds());
+        let frame_bounds = match (scene.bounds, reference_bounds) {
+            (Some((lo, hi)), Some((rlo, rhi))) => Some(([0, 1, 2].map(|k| lo[k].min(rlo[k])), [0, 1, 2].map(|k| hi[k].max(rhi[k])))),
+            (bounds, None) => bounds,
+            (None, bounds) => bounds,
+        };
         if self.frame_pending
-            && let Some((lo, hi)) = scene.bounds
+            && let Some((lo, hi)) = frame_bounds
         {
             self.camera = self.camera.framing(lo, hi);
             self.frame_pending = false;
@@ -1428,12 +1599,16 @@ impl Composer {
         painter.rect_filled(rect, 0.0, egui::Color32::from_gray(30));
         let fits = scene.shape_count <= crate::composer_gpu::MAX_SHAPES && scene.ops.len() <= crate::composer_gpu::MAX_OPS;
         if fits {
-            let uniforms = Uniforms::new(&self.camera, size.x / size.y.max(1.0), &scene, self.selection.is_some() && !crate::library::capturing()).with_colors(self.show_colors);
-            painter.add(egui_wgpu::Callback::new_paint_callback(rect, ViewCallback { uniforms, scene: scene.clone(), version: self.scene_serial, format }));
+            let aspect = size.x / size.y.max(1.0);
+            let uniforms = Uniforms::new(&self.camera, aspect, &scene, self.selection.is_some() && !crate::library::capturing()).with_colors(self.show_colors).with_steps(self.max_steps);
+            let reference = self.reference.as_ref().filter(|r| r.settings.visible).map(|r| ReferenceDraw { mesh: r.mesh.clone(), uniforms: ReferenceUniforms::new(&self.camera, aspect, r.model()), opacity: r.settings.opacity });
+            let scale = ctx.pixels_per_point() * self.render_scale;
+            let pixels = [(size.x * scale).round().max(1.0) as u32, (size.y * scale).round().max(1.0) as u32];
+            painter.add(egui_wgpu::Callback::new_paint_callback(rect, ViewCallback { uniforms, scene: scene.clone(), version: self.scene_serial, format, pixels, reference }));
         } else {
             painter.text(rect.center(), egui::Align2::CENTER_CENTER, "This composition is larger than the viewport can draw", egui::FontId::proportional(15.0), egui::Color32::from_rgb(230, 150, 90));
         }
-        if self.shapes().is_empty() {
+        if self.shapes().is_empty() && self.reference.is_none() {
             painter.text(rect.center(), egui::Align2::CENTER_CENTER, "Add a shape from the hierarchy panel", egui::FontId::proportional(15.0), egui::Color32::from_gray(150));
         }
         let capturing = crate::library::capturing();
@@ -1773,6 +1948,7 @@ impl Composer {
             }
         }
 
+        self.poll_reference(&ctx);
         if let Some(job) = &self.export_job
             && let Ok(message) = job.try_recv()
         {
@@ -1831,6 +2007,10 @@ impl Composer {
                 if crate::icons::button(ui, "frame", "Frame", None, true).on_hover_text("Fit the view to the scene (F)").clicked() {
                     self.frame_pending = true;
                 }
+                let reference_button = crate::icons::button(ui, "reference", "Reference model", Some(self.reference.is_some()), true).on_hover_text("A mesh to model on top of, such as a character from ZBrush: shown in the viewport, never saved or exported");
+                self.reference_menu(&reference_button);
+                let quality_button = crate::icons::button(ui, "quality", "Viewport quality", None, true).on_hover_text("Render resolution and ray steps of this viewport: lower them when a big composition gets slow");
+                self.quality_menu(&quality_button);
                 let title = self.path.as_ref().and_then(|p| p.file_name()).map_or("untitled".to_string(), |n| n.to_string_lossy().into_owned());
                 ui.weak(format!("{title}{}", if self.modified { " *" } else { "" }));
                 if !self.status.is_empty() {
@@ -1883,7 +2063,7 @@ mod tests {
         assert_eq!(c.shapes()[1].children().len(), 2);
         c.delete_selected();
         assert_eq!(c.shapes()[1].children().len(), 1);
-        assert_eq!(c.selection, None);
+        assert_eq!(c.selection, Some(vec![1, 0]));
         c.selection = Some(vec![1, 0]);
         c.duplicate_selected();
         c.selection = Some(vec![1, 1]);
@@ -1992,6 +2172,110 @@ mod tests {
 }
 
 #[cfg(test)]
+mod reference_tests {
+    use super::*;
+
+    const SIZE: u32 = 64;
+
+    fn sphere_reference(radius: f32, centre: V3) -> Reference {
+        let mesh = ReferenceMesh::from_mesh(&crate::mesh::shapes::icosphere(radius, 3), 1);
+        let settings = ReferenceSettings { height: 2.0 * radius as f64, offset: [centre[0], centre[1] - radius as f64, centre[2]], ..ReferenceSettings::default() };
+        Reference { settings, mesh: Arc::new(mesh) }
+    }
+
+    /// The centre pixel and a corner pixel of a frame drawn on the GPU, as RGB.
+    fn draw(c: &mut Composer, reference: Option<&Reference>) -> Option<([u8; 3], [u8; 3])> {
+        let gpu = crate::gpu_tests::gpu()?;
+        let scene = c.scene();
+        let aspect = 1.0;
+        let uniforms = Uniforms::new(&c.camera, aspect, &scene, false).with_colors(false).with_steps(c.max_steps);
+        let draw = reference.map(|r| ReferenceDraw { mesh: r.mesh.clone(), uniforms: ReferenceUniforms::new(&c.camera, aspect, r.model()), opacity: r.settings.opacity });
+        let mut view = crate::composer_gpu::ComposerGpu::new(&gpu.device, wgpu::TextureFormat::Rgba8Unorm);
+        let mut encoder = gpu.device.create_command_encoder(&Default::default());
+        view.render(&gpu.device, &gpu.queue, &mut encoder, &scene, 1, uniforms, draw.as_ref(), [SIZE, SIZE]);
+        gpu.queue.submit([encoder.finish()]);
+        let (_, pixels) = view.read_picture(&gpu.device, &gpu.queue);
+        let at = |x: u32, y: u32| {
+            let i = ((y * SIZE + x) * 4) as usize;
+            [pixels[i], pixels[i + 1], pixels[i + 2]]
+        };
+        Some((at(SIZE / 2, SIZE / 2), at(2, 2)))
+    }
+
+    fn is_blue(p: [u8; 3]) -> bool {
+        p[2] as i32 > p[0] as i32 + 25
+    }
+
+    fn composer_with_a_sphere(size: f64) -> Composer {
+        let mut c = Composer::default();
+        let mut node = new_shape("sphere");
+        node.scale = [size, size, size];
+        c.add_node(node);
+        c
+    }
+
+    #[test]
+    fn a_reference_alone_is_drawn_over_the_background() {
+        let mut c = Composer::default();
+        let reference = sphere_reference(1.0, [0.0; 3]);
+        let Some((centre, corner)) = draw(&mut c, Some(&reference)) else { return };
+        assert!(is_blue(centre), "centre {centre:?}");
+        assert!(!is_blue(corner), "corner {corner:?}");
+    }
+
+    #[test]
+    fn a_shape_in_front_of_the_reference_hides_it_and_one_behind_does_not() {
+        let mut c = composer_with_a_sphere(1.0);
+        // Inside the shape: the shape is nearer along every ray.
+        let inside = sphere_reference(0.4, [0.0; 3]);
+        let Some((centre, _)) = draw(&mut c, Some(&inside)) else { return };
+        assert!(!is_blue(centre), "the shape should hide a reference inside it: {centre:?}");
+        // Between the camera and the shape.
+        let eye = c.camera.eye();
+        let towards = |k: f64| [eye[0] * k, eye[1] * k, eye[2] * k];
+        let front = sphere_reference(0.4, towards(0.0625));
+        let Some((centre, _)) = draw(&mut c, Some(&front)) else { return };
+        assert!(is_blue(centre), "the reference in front should show: {centre:?}");
+    }
+
+    #[test]
+    fn opacity_lets_the_composition_show_through_the_reference() {
+        let mut c = composer_with_a_sphere(1.0);
+        let eye = c.camera.eye();
+        let mut front = sphere_reference(0.4, [eye[0] * 0.0625, eye[1] * 0.0625, eye[2] * 0.0625]);
+        let Some((solid, _)) = draw(&mut c, Some(&front)) else { return };
+        front.settings.opacity = 0.5;
+        let Some((ghost, _)) = draw(&mut c, Some(&front)) else { return };
+        let red = |p: [u8; 3]| p[0] as i32;
+        assert!(red(ghost) > red(solid) + 15, "half opaque shows more of the grey shape behind: {solid:?} {ghost:?}");
+        assert!(is_blue(ghost) || ghost[2] >= ghost[0], "{ghost:?}");
+    }
+
+    #[test]
+    fn a_session_remembers_the_placement() {
+        let mut c = Composer::default();
+        let mut reference = sphere_reference(1.0, [0.0; 3]);
+        reference.settings.opacity = 0.4;
+        reference.settings.yaw = 33.0;
+        c.reference = Some(reference);
+        let json = c.reference_storage();
+        let back: ReferenceSettings = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.opacity, 0.4);
+        assert_eq!(back.yaw, 33.0);
+        assert!(Composer::default().reference_storage().is_empty());
+    }
+
+    #[test]
+    fn the_quality_setting_only_takes_known_values() {
+        let mut c = Composer::default();
+        c.set_render_quality(0.5, 10_000);
+        assert_eq!((c.render_scale, c.max_steps), (0.5, 600));
+        c.set_render_quality(0.3, 1);
+        assert_eq!((c.render_scale, c.max_steps), (1.0, 32));
+    }
+}
+
+#[cfg(test)]
 mod drag_tests {
     use super::*;
 
@@ -2007,6 +2291,23 @@ mod drag_tests {
 
     fn names(c: &Composer) -> Vec<String> {
         c.shapes().iter().map(|n| n.name.clone()).collect()
+    }
+
+    #[test]
+    fn deleting_selects_the_shape_above_so_a_run_of_deletes_walks_up_the_stack() {
+        let mut c = composer_with(&["A", "B", "C", "D"]);
+        c.selection = Some(vec![3]);
+        c.delete_selected();
+        assert_eq!(c.selection, Some(vec![2]));
+        c.delete_selected();
+        assert_eq!(c.selection, Some(vec![1]));
+        c.selection = Some(vec![0]);
+        c.delete_selected();
+        assert_eq!(names(&c), ["B"]);
+        assert_eq!(c.selection, Some(vec![0]), "the first one hands the selection to the one that took its place");
+        c.delete_selected();
+        assert_eq!(c.selection, None);
+        assert!(c.shapes().is_empty());
     }
 
     #[test]
@@ -2155,6 +2456,26 @@ mod ui_tests {
         assert_eq!(h.state().shapes().len(), 1);
         click(&mut h, "Redo");
         assert_eq!(h.state().shapes().len(), 2);
+    }
+
+    #[test]
+    fn the_quality_button_lowers_the_viewport_resolution() {
+        let mut h = harness();
+        h.run();
+        click(&mut h, "Viewport quality");
+        click(&mut h, "Half");
+        assert_eq!(h.state().render_scale, 0.5);
+    }
+
+    #[test]
+    fn deleting_with_the_toolbar_button_selects_the_shape_above() {
+        let mut h = harness();
+        h.run();
+        click(&mut h, "Add cube");
+        click(&mut h, "Add sphere");
+        click(&mut h, "Delete");
+        assert_eq!(h.state().shapes().len(), 1);
+        assert_eq!(h.state().selection, Some(vec![0]));
     }
 
     #[test]
