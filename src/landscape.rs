@@ -418,12 +418,41 @@ impl LandscapeWorkspace {
     }
 }
 
+// The tab's colours: the earth tone of the tab itself, and one for each part of the panel.
+const TERRAIN: egui::Color32 = egui::Color32::from_rgb(200, 170, 115);
+const MASK_COLOR: egui::Color32 = egui::Color32::from_rgb(235, 135, 85);
+const WATER_COLOR: egui::Color32 = egui::Color32::from_rgb(95, 165, 230);
+const CHUNK_COLOR: egui::Color32 = egui::Color32::from_rgb(115, 205, 150);
+
+/// A collapsible section of the side panel: an icon and a title in the section's colour.
+fn section(ui: &mut egui::Ui, key: &str, icon: &str, title: &str, color: egui::Color32, open: bool, body: impl FnOnce(&mut egui::Ui)) {
+    egui_extras::install_image_loaders(ui.ctx());
+    let id = ui.make_persistent_id(("landscape section", key));
+    egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, open)
+        .show_header(ui, |ui| {
+            ui.add(crate::icons::image(icon, 16.0, color));
+            ui.label(egui::RichText::new(title).strong().color(color));
+        })
+        .body(body);
+}
+
+/// A button with an icon in front of its text (the icon in `tint` while enabled).
+fn action(ui: &mut egui::Ui, icon: &str, text: &str, tint: egui::Color32, enabled: bool) -> egui::Response {
+    egui_extras::install_image_loaders(ui.ctx());
+    let tint = if enabled { tint } else { ui.visuals().weak_text_color() };
+    ui.add_enabled(enabled, egui::Button::image_and_text(crate::icons::image(icon, 16.0, tint), text))
+}
+
 /// The 3D / Map switch in the corner of the top view (drawn last so nothing covers it).
 fn view_toggle(ui: &mut egui::Ui, rect: egui::Rect, map_mode: &mut bool) {
-    ui.put(egui::Rect::from_min_size(rect.min + egui::vec2(8.0, 6.0), egui::vec2(110.0, 22.0)), |ui: &mut egui::Ui| {
+    ui.put(egui::Rect::from_min_size(rect.min + egui::vec2(8.0, 6.0), egui::vec2(60.0, 26.0)), |ui: &mut egui::Ui| {
         ui.horizontal(|ui| {
-            ui.selectable_value(map_mode, false, "3D");
-            ui.selectable_value(map_mode, true, "Map");
+            if crate::icons::tinted_button(ui, "view_3d", "3D view", Some(!*map_mode), true, Some(TERRAIN)).on_hover_text("The terrain in 3D: drag to orbit, scroll to zoom").clicked() {
+                *map_mode = false;
+            }
+            if crate::icons::tinted_button(ui, "map", "Map view", Some(*map_mode), true, Some(MASK_COLOR)).on_hover_text("The terrain from above, for painting masks").clicked() {
+                *map_mode = true;
+            }
         })
         .response
     });
@@ -567,16 +596,16 @@ impl crate::App {
         let ls = &mut self.landscape;
         egui::Panel::right("landscape props").default_size(320.0).show(ui, |ui| {
             ui.horizontal(|ui| {
-                if ui.button("Open…").on_hover_text("Opens a landscape project (graph, settings and masks) or a noise graph as the terrain.").clicked() {
+                if crate::icons::button(ui, "open", "Open", None, true).on_hover_text("Open a landscape project (graph, settings and masks) or a noise graph as the terrain").clicked() {
                     ls.open();
                 }
-                if ui.button("Save…").on_hover_text("Saves the project: the graph, the settings and the painted masks, in one file.").clicked() {
+                if crate::icons::button(ui, "save", "Save", None, true).on_hover_text("Save the project: the graph, the settings and the painted masks, in one file").clicked() {
                     ls.save(true);
                 }
-                if ui.button("Graph…").on_hover_text("Saves the graph alone as a noise graph file.").clicked() {
+                if crate::icons::button(ui, "graph", "Save graph", None, true).on_hover_text("Save the graph alone as a noise graph file").clicked() {
                     ls.save(false);
                 }
-                if ui.button("New").clicked() {
+                if crate::icons::button(ui, "new", "New", None, true).on_hover_text("A new landscape: the starting graph and no masks").clicked() {
                     ls.graph = default_graph();
                     ls.path = None;
                     ls.masks.clear();
@@ -584,14 +613,15 @@ impl crate::App {
                 }
             });
             ui.separator();
+            let running = matches!(ls.job, Some(Job::Export(..) | Job::Chunks(..) | Job::Erode(..)));
+            section(ui, "terrain", "height", "Terrain", TERRAIN, true, |ui| {
             let d = Settings::default();
             crate::row(ui, &mut ls.settings.seed, d.seed, |ui, v| _ = ui.add(egui::DragValue::new(v).prefix("seed ")));
             crate::row(ui, &mut ls.settings.world_m, d.world_m, |ui, v| _ = ui.add(egui::DragValue::new(v).range(10.0..=100000.0).speed(10.0).prefix("size ").suffix(" m")).on_hover_text("Side of the square terrain."));
             crate::row(ui, &mut ls.settings.height_m, d.height_m, |ui, v| _ = ui.add(egui::DragValue::new(v).range(1.0..=20000.0).speed(1.0).prefix("height ").suffix(" m")));
             crate::row(ui, &mut ls.settings.fit, d.fit, |ui, v| _ = ui.checkbox(v, "fit the height range").on_hover_text("On: the lowest point is 0 and the highest is the height. Off: the graph's output times the height, around 0."));
             ui.weak("The terrain is one tile of the graph (x and y from 0 to 1) with the density output as height, so any noise graph works. Tiling graphs make a terrain whose edges match.");
-            let running = matches!(ls.job, Some(Job::Export(..) | Job::Chunks(..) | Job::Erode(..)));
-            if ui.add_enabled(!running && ls.values.is_some(), egui::Button::new("Export heightmap for Unreal…")).on_hover_text(format!("A 16-bit PNG at {UNREAL_RES} x {UNREAL_RES} (a valid landscape size) and a .json with the import settings.")).clicked()
+            if action(ui, "export", "Export heightmap for Unreal…", TERRAIN, !running && ls.values.is_some()).on_hover_text(format!("A 16-bit PNG at {UNREAL_RES} x {UNREAL_RES} (a valid landscape size) and a .json with the import settings.")).clicked()
                 && let Some(path) = rfd::FileDialog::new().add_filter("16-bit PNG", &["png"]).set_file_name("heightmap.png").save_file() {
                 let (graph, s) = (ls.graph.clone(), ls.settings.clone());
                 let (masks, base) = (ls.mask_map(), ls.base_dir());
@@ -625,12 +655,13 @@ impl crate::App {
             if let Some(Job::Chunks(_, p, _)) = &ls.job {
                 ui.add(egui::ProgressBar::new(p.load(Ordering::Relaxed) as f32 / 1000.0).show_percentage());
             }
-            egui::CollapsingHeader::new("Masks").default_open(true).show(ui, |ui| {
+            });
+            section(ui, "masks", "masks", "Masks", MASK_COLOR, true, |ui| {
                 ui.weak("Paint masks on the map (the top view's Map button), then read them in the graph with a Mask node: shape a canyon or a ridge, or choose where a noise graph applies. Shift erases; scroll changes the brush size.");
                 ui.horizontal(|ui| {
                     ui.add(egui::TextEdit::singleline(&mut ls.new_mask).hint_text("new mask").desired_width(120.0));
                     let name = ls.new_mask.trim().to_string();
-                    if ui.add_enabled(!name.is_empty() && !ls.masks.iter().any(|m| m.name == name), egui::Button::new("Add")).clicked() {
+                    if action(ui, "add", "Add", MASK_COLOR, !name.is_empty() && !ls.masks.iter().any(|m| m.name == name)).on_hover_text("Add a mask with this name").clicked() {
                         ls.masks.push(Mask::new(&name));
                         (ls.mask_selected, ls.map_mode) = (ls.masks.len() - 1, true);
                         ls.mask_live += 1;
@@ -657,24 +688,24 @@ impl crate::App {
                             rename = Some((old, name.clone()));
                             m.name = name;
                         }
-                        if ui.button("Delete").clicked() {
+                        if crate::icons::button(ui, "delete", "Delete mask", None, true).on_hover_text("Delete the selected mask").clicked() {
                             delete = true;
                         }
                     });
                     ui.horizontal(|ui| {
-                        if ui.button("Clear").clicked() {
+                        if crate::icons::tinted_button(ui, "clear_mask", "Clear", None, true, Some(MASK_COLOR)).on_hover_text("Empty the mask").clicked() {
                             m.fill(0.0);
                             edited = true;
                         }
-                        if ui.button("Fill").clicked() {
+                        if crate::icons::tinted_button(ui, "fill", "Fill", None, true, Some(MASK_COLOR)).on_hover_text("Fill the whole mask").clicked() {
                             m.fill(1.0);
                             edited = true;
                         }
-                        if ui.button("Invert").clicked() {
+                        if crate::icons::tinted_button(ui, "invert", "Invert", None, true, Some(MASK_COLOR)).on_hover_text("Swap painted and empty").clicked() {
                             m.invert();
                             edited = true;
                         }
-                        if ui.button("Blur").on_hover_text("Softens the whole mask (a few metres at a time on a 2 km terrain).").clicked() {
+                        if crate::icons::tinted_button(ui, "blur", "Blur", None, true, Some(MASK_COLOR)).on_hover_text("Soften the whole mask (a few metres at a time on a 2 km terrain)").clicked() {
                             m.blur(6);
                             edited = true;
                         }
@@ -700,9 +731,11 @@ impl crate::App {
                     ls.mask_live += 1;
                 }
                 ui.horizontal(|ui| {
-                    ui.selectable_value(&mut ls.tool, Tool::Paint, "Paint");
-                    ui.selectable_value(&mut ls.tool, Tool::Erase, "Erase");
-                    ui.selectable_value(&mut ls.tool, Tool::Smooth, "Smooth");
+                    for (tool, icon, name, hint) in [(Tool::Paint, "brush", "Paint", "Paint the mask in"), (Tool::Erase, "eraser", "Erase", "Take the mask out (Shift does this while held)"), (Tool::Smooth, "smooth", "Smooth", "Soften the mask under the brush")] {
+                        if crate::icons::tinted_button(ui, icon, name, Some(ls.tool == tool), true, Some(MASK_COLOR)).on_hover_text(format!("{name}: {hint}")).clicked() {
+                            ls.tool = tool;
+                        }
+                    }
                 });
                 let world = ls.settings.world_m;
                 let mut radius_m = ls.brush.radius * world;
@@ -712,7 +745,7 @@ impl crate::App {
                 ui.add(egui::DragValue::new(&mut ls.brush.strength).range(0.01..=1.0).speed(0.01).prefix("strength "));
                 ui.add(egui::DragValue::new(&mut ls.brush.hardness).range(0.0..=1.0).speed(0.01).prefix("hardness "));
             });
-            egui::CollapsingHeader::new("Erosion").default_open(true).show(ui, |ui| {
+            section(ui, "erosion", "erosion", "Erosion", WATER_COLOR, true, |ui| {
                 let d = crate::landscape_erosion::Erosion::default();
                 let max = crate::landscape_erosion::max_resolution(&device);
                 let up_to_date = ls.current_eroded().is_some();
@@ -731,7 +764,7 @@ impl crate::App {
                 crate::row(ui, &mut e.thermal_iterations, d.thermal_iterations, |ui, v| _ = ui.add(egui::DragValue::new(v).range(0..=5000).speed(1.0).prefix("thermal iterations ")));
                 crate::row(ui, &mut e.talus_deg, d.talus_deg, |ui, v| _ = ui.add(egui::DragValue::new(v).range(1.0..=89.0).speed(0.5).prefix("repose ").suffix(" deg")));
                 ui.horizontal(|ui| {
-                    if ui.add_enabled(!running && ls.values.is_some(), egui::Button::new("Run erosion")).on_hover_text("Erodes the terrain at the working resolution. The preview and both exports use the result until the graph or a setting changes.").clicked() {
+                    if action(ui, "play", "Run erosion", WATER_COLOR, !running && ls.values.is_some()).on_hover_text("Erodes the terrain at the working resolution. The preview and both exports use the result until the graph or a setting changes.").clicked() {
                         let s = ls.settings.clone();
                         let values = ls.values.clone().unwrap_or_default();
                         let (n, key) = (side(values.len()), ls.erosion_key());
@@ -747,7 +780,7 @@ impl crate::App {
                         ls.job = Some(Job::Erode(rx, progress, key));
                         ls.status = "Eroding...".into();
                     }
-                    if ui.add_enabled(ls.eroded.is_some(), egui::Button::new("Clear")).clicked() {
+                    if crate::icons::button(ui, "delete", "Clear erosion", None, ls.eroded.is_some()).on_hover_text("Drop the eroded terrain and use the plain graph again").clicked() {
                         ls.eroded = None;
                     }
                 });
@@ -760,7 +793,7 @@ impl crate::App {
                     _ => "Not eroded. The working resolution is the grid the preview and the erosion use.",
                 });
             });
-            egui::CollapsingHeader::new("Nanite chunks").default_open(true).show(ui, |ui| {
+            section(ui, "chunks", "chunks", "Nanite chunks", CHUNK_COLOR, true, |ui| {
                 let d = crate::landscape_chunks::Options::default();
                 let o = &mut ls.chunks;
                 ui.horizontal(|ui| {
@@ -769,7 +802,7 @@ impl crate::App {
                 });
                 ui.horizontal(|ui| {
                     ui.add(egui::TextEdit::singleline(&mut o.folder).hint_text("folder").desired_width(190.0));
-                    if ui.button("Browse…").clicked() && let Some(f) = rfd::FileDialog::new().pick_folder() {
+                    if crate::icons::button(ui, "open", "Browse", None, true).on_hover_text("Choose the folder").clicked() && let Some(f) = rfd::FileDialog::new().pick_folder() {
                         o.folder = f.display().to_string();
                     }
                 });
@@ -789,7 +822,7 @@ impl crate::App {
                 ui.checkbox(&mut o.pack_udim, "also pack into a UDIM tileset").on_hover_text("Runs UDIM pack into a UDIM folder: one combined mesh, one material, the maps as .1001, .1002 ...");
                 let plan = crate::landscape_chunks::plan(ls.settings.world_m, o.chunk_m, o.budget);
                 ui.weak(format!("{0} x {0} chunks of {1} m, {2} x {2} quads (about {3} triangles) each; tiles 1001 to {4}.", plan.chunks, plan.chunk_m, plan.quads, 2 * plan.quads * plan.quads, crate::udim::udim(plan.chunks * plan.chunks - 1)));
-                if ui.add_enabled(!running && !o.folder.is_empty(), egui::Button::new("Export chunks")).on_hover_text("Writes every chunk's mesh (centimetres, the chunk's corner at its origin), its normal, occlusion and curvature maps, and a manifest with each chunk's location.").clicked() {
+                if action(ui, "chunks", "Export chunks", CHUNK_COLOR, !running && !o.folder.is_empty()).on_hover_text("Writes every chunk's mesh (centimetres, the chunk's corner at its origin), its normal, occlusion and curvature maps, and a manifest with each chunk's location.").clicked() {
                     let (graph, s, opts) = (ls.graph.clone(), ls.settings.clone(), o.clone());
                     let (masks, base) = (ls.mask_map(), ls.base_dir());
                     let eroded = ls.current_eroded().cloned();
@@ -930,6 +963,13 @@ mod tests {
         assert_eq!((b.graph.to_json(), b.settings.world_m, b.masks.len(), b.masks[0].name.as_str()), (a.graph.to_json(), 3000.0, 1, "canyon"));
         assert!(a.masks[0].data.iter().zip(&b.masks[0].data).all(|(x, y)| (x - y).abs() < 2e-5));
         assert!(b.from_project("{\"nothing\": 1}").is_err());
+    }
+
+    #[test]
+    fn every_icon_the_tab_draws_exists() {
+        for name in ["height", "masks", "erosion", "chunks", "graph", "map", "view_3d", "brush", "eraser", "smooth", "blur", "invert", "fill", "clear_mask", "play", "delete", "add", "export", "open", "save", "new", "landscape"] {
+            assert!(crate::icons::source(name).is_some(), "no icon called {name}");
+        }
     }
 
     #[test]

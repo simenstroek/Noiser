@@ -230,7 +230,10 @@ fn input_label(kind: &NodeKind, port: usize) -> &'static str {
 fn header_tint(kind: &NodeKind) -> Color32 {
     match kind {
         NodeKind::Noise(_) | NodeKind::Pattern(_) | NodeKind::Grid { .. } => Color32::from_rgb(50, 95, 70),
-        NodeKind::Math { .. } | NodeKind::Remap { .. } | NodeKind::Mix { .. } | NodeKind::Curve { .. } | NodeKind::Normal { .. } | NodeKind::Slope { .. } | NodeKind::Mask { .. } => Color32::from_rgb(55, 70, 110),
+        NodeKind::Math { .. } | NodeKind::Remap { .. } | NodeKind::Mix { .. } | NodeKind::Curve { .. } | NodeKind::Normal { .. } => Color32::from_rgb(55, 70, 110),
+        // The Landscape tab's own nodes: earth tones, like the tab.
+        NodeKind::Mask { .. } => Color32::from_rgb(130, 82, 52),
+        NodeKind::Slope { .. } => Color32::from_rgb(112, 96, 58),
         NodeKind::OutDensity | NodeKind::OutNormal | NodeKind::OutMesh(_) | NodeKind::OutImage(_) => Color32::from_rgb(80, 60, 95),
         NodeKind::LoadMesh(_) | NodeKind::LoadSdf(_) | NodeKind::NoiseGraph(_) => Color32::from_rgb(50, 95, 70),
         NodeKind::Remesh { .. } | NodeKind::AutoUv(_) | NodeKind::Bake(_) | NodeKind::TransferUv | NodeKind::ImageSplit | NodeKind::ImageCombine | NodeKind::ImageLevels { .. } => Color32::from_rgb(50, 100, 110),
