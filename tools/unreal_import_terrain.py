@@ -30,7 +30,7 @@ import sys
 import unreal
 
 MESH_EXTENSIONS = (".obj", ".glb", ".gltf", ".fbx")
-LINEAR_WORDS = ("normal", "occlusion", "curvature", "height", "depth", "position", "thickness")
+LINEAR_WORDS = ("normal", "occlusion", "curvature", "height", "depth", "position", "thickness", "objects")
 FOLDER = "NoiserTerrain"
 
 
