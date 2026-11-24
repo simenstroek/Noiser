@@ -23,6 +23,7 @@ mod meshgraph;
 mod meshgraph_ui;
 mod meshworkspace;
 mod landscape;
+mod landscape_chunks;
 mod udim;
 mod uvtransfer;
 mod meshformats;

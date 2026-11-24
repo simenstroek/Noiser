@@ -11,10 +11,15 @@ use std::path::{Path, PathBuf};
 
 const IMAGE_EXTENSIONS: [&str; 7] = ["png", "exr", "tga", "jpg", "jpeg", "tif", "tiff"];
 
+#[derive(Default)]
 pub struct Settings {
     pub name: String,
     pub folder: PathBuf,
     pub files: Vec<PathBuf>,
+    /// Skip the combined mesh (for very heavy meshes: a proxy can make it instead).
+    pub no_combined: bool,
+    /// Only the combined mesh: no per-mesh files and no maps (the files are a lighter stand-in for the real ones).
+    pub only_combined: bool,
 }
 
 /// The UDIM number of tile `i` (counted from 0): 1001 + column + 10 * row.
@@ -144,13 +149,18 @@ pub fn pack(s: &Settings, log: &mut dyn FnMut(&str)) -> Result<String, String> {
         // The part's footprint centred in its cell, standing on Z = 0.
         let (col, row) = ((i % columns) as f32, (i / columns) as f32);
         let shift = [(col + 0.5) * cell - (lo[0] + hi[0]) * 0.5, (row + 0.5) * cell - (lo[1] + hi[1]) * 0.5, -lo[2]];
-        let part = tiled(mesh, i, shift);
-        let base = combined.positions.len() as u32;
-        combined.triangles.extend(part.triangles.iter().map(|t| [t[0] + base, t[1] + base, t[2] + base]));
-        combined.positions.extend(part.positions);
-        combined.normals.extend(part.normals);
-        combined.uvs.extend(part.uvs);
-        combined.source.extend(part.source);
+        if !s.no_combined {
+            let part = tiled(mesh, i, shift);
+            let base = combined.positions.len() as u32;
+            combined.triangles.extend(part.triangles.iter().map(|t| [t[0] + base, t[1] + base, t[2] + base]));
+            combined.positions.extend(part.positions);
+            combined.normals.extend(part.normals);
+            combined.uvs.extend(part.uvs);
+            combined.source.extend(part.source);
+        }
+        if s.only_combined {
+            continue;
+        }
 
         // The part on its own, under its own file name, in its tile.
         let own = tiled(mesh, i, [0.0; 3]);
@@ -180,8 +190,10 @@ pub fn pack(s: &Settings, log: &mut dyn FnMut(&str)) -> Result<String, String> {
             log(&format!("  {} -> {}", path.file_name().unwrap_or_default().to_string_lossy(), to.file_name().unwrap_or_default().to_string_lossy()));
         }
     }
-    let combined_path = s.folder.join(format!("{name}.obj"));
-    combined.write_obj_as(&combined_path, &name).map_err(|e| format!("{}: {e}", combined_path.display()))?;
+    if !s.no_combined {
+        let combined_path = s.folder.join(format!("{name}.obj"));
+        combined.write_obj_as(&combined_path, &name).map_err(|e| format!("{}: {e}", combined_path.display()))?;
+    }
     if !tiles_out_of_range.is_empty() {
         log(&format!("warning: UVs outside 0..1 in {}: they spill into other tiles", tiles_out_of_range.join(", ")));
     }
@@ -242,7 +254,7 @@ impl Tool {
             });
             let ready = self.job.is_none() && !clean_name(&self.name).is_empty() && !self.folder.is_empty() && !self.files.is_empty();
             if ui.add_enabled(ready, egui::Button::new("Pack")).clicked() {
-                let settings = Settings { name: self.name.clone(), folder: PathBuf::from(&self.folder), files: self.files.clone() };
+                let settings = Settings { name: self.name.clone(), folder: PathBuf::from(&self.folder), files: self.files.clone(), ..Default::default() };
                 let (tx, rx) = std::sync::mpsc::channel();
                 let log = self.log.clone();
                 log.lock().unwrap().clear();
@@ -290,7 +302,7 @@ mod tests {
             std::fs::write(dir.join(format!("{stem}_normal_base.png")), stem).unwrap();
         }
         let out = dir.join("packed");
-        let s = Settings { name: "Rocks".into(), folder: out.clone(), files: vec![dir.join("rock.obj"), dir.join("rock_big.obj")] };
+        let s = Settings { name: "Rocks".into(), folder: out.clone(), files: vec![dir.join("rock.obj"), dir.join("rock_big.obj")], ..Default::default() };
         let msg = pack(&s, &mut |_| {}).unwrap();
         assert!(msg.contains("1001") && msg.contains("1002"), "{msg}");
         assert_eq!(std::fs::read_to_string(out.join("Rocks_normal_base.1001.png")).unwrap(), "rock");

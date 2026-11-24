@@ -2,7 +2,7 @@
 
 Status: proposal, 2026-11-24, agreed with these defaults: world 2 km x 2 km, 4 x 4 chunks of 500 m, 1M triangles per chunk, heightfields up to 4k, the Unreal import script as an extra after the first Unreal test (the chunk export writes a manifest for it), Unreal's own Nanite Landscape left as a plain option.
 
-**Progress.** P0 started: the tab, sampling a noise graph over the terrain, a 3D preview, and the Unreal heightmap export (16-bit 4033 PNG plus a sidecar) are in. P0 deviates from section 4 on purpose: the terrain is the existing noise graph evaluated over one tile (so every noise, pattern and math node already works), not yet a separate heightfield-pass engine. That engine arrives with erosion in P2, where grid passes are needed.
+**Progress.** P0 started: the tab, sampling a noise graph over the terrain, a 3D preview, and the Unreal heightmap export (16-bit 4033 PNG plus a sidecar) are in. P1's chunk export is in too (regular-grid chunks up to the triangle budget, planar UVs, per-chunk normal / occlusion / curvature maps, the manifest, and the UDIM pack with light stand-ins for the combined mesh). Still open from P1: the *Load Landscape* node for the Mesh graph (3D detail on top of the terrain), adaptive meshing and the Unreal import script. P0 deviates from section 4 on purpose: the terrain is the existing noise graph evaluated over one tile (so every noise, pattern and math node already works), not yet a separate heightfield-pass engine. That engine arrives with erosion in P2, where grid passes are needed.
 
 ## 1. Goal
 

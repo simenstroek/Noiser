@@ -65,15 +65,34 @@ pub fn sample(ev: &Evaluator, n: usize, progress: &Progress) -> Vec<f32> {
     out
 }
 
+/// How the graph's values become heights in metres: `value * k + offset`.
+#[derive(Clone, Copy, Debug)]
+pub struct Mapping {
+    pub k: f32,
+    pub offset: f32,
+}
+
+impl Mapping {
+    /// With `fit`, the lowest of `values` becomes 0 and the highest `height_m`; otherwise `value * height_m`.
+    pub fn from_values(values: &[f32], s: &Settings) -> Mapping {
+        if s.fit {
+            let (lo, hi) = values.iter().fold((f32::MAX, f32::MIN), |(lo, hi), v| (lo.min(*v), hi.max(*v)));
+            let k = if hi > lo { s.height_m / (hi - lo) } else { 0.0 };
+            Mapping { k, offset: -lo * k }
+        } else {
+            Mapping { k: s.height_m, offset: 0.0 }
+        }
+    }
+
+    pub fn apply(&self, v: f32) -> f32 {
+        v * self.k + self.offset
+    }
+}
+
 /// Heights in metres for the graph's values.
 pub fn to_metres(values: &[f32], s: &Settings) -> Vec<f32> {
-    if s.fit {
-        let (lo, hi) = values.iter().fold((f32::MAX, f32::MIN), |(lo, hi), v| (lo.min(*v), hi.max(*v)));
-        let k = if hi > lo { s.height_m / (hi - lo) } else { 0.0 };
-        values.iter().map(|v| (v - lo) * k).collect()
-    } else {
-        values.iter().map(|v| v * s.height_m).collect()
-    }
+    let m = Mapping::from_values(values, s);
+    values.iter().map(|v| m.apply(*v)).collect()
 }
 
 /// An Unreal landscape's heights: 16-bit samples (32768 is the actor's own height), and the actor's Z scale and
@@ -142,7 +161,6 @@ fn render(metres: &[f32], n: usize, world_m: f32, (yaw, pitch, zoom): (f32, f32,
     let fwd = norm([target[0] - eye[0], target[1] - eye[1], target[2] - eye[2]]);
     let right = norm([fwd[1], -fwd[0], 0.0]);
     let up = [right[1] * fwd[2] - right[2] * fwd[1], right[2] * fwd[0] - right[0] * fwd[2], right[0] * fwd[1] - right[1] * fwd[0]];
-    let up = [-up[0], -up[1], -up[2]];
     let tan_half = (40.0f32.to_radians() * 0.5).tan();
     let light = norm([0.5, 0.35, 0.8]);
     let mut pixels = vec![egui::Color32::BLACK; w * h];
@@ -200,6 +218,8 @@ fn render(metres: &[f32], n: usize, world_m: f32, (yaw, pitch, zoom): (f32, f32,
 enum Job {
     Preview(mpsc::Receiver<Result<Vec<f32>, String>>),
     Export(mpsc::Receiver<Result<String, String>>, Progress),
+    /// The chunk export, with its log.
+    Chunks(mpsc::Receiver<Result<String, String>>, Progress, std::sync::Arc<std::sync::Mutex<Vec<String>>>),
 }
 
 pub struct LandscapeWorkspace {
@@ -212,13 +232,15 @@ pub struct LandscapeWorkspace {
     sampled_key: Option<u64>,
     job: Option<Job>,
     status: String,
+    pub chunks: crate::landscape_chunks::Options,
+    chunk_log: Vec<String>,
     view: (f32, f32, f32),
     picture: Option<(u64, egui::TextureHandle)>,
 }
 
 impl Default for LandscapeWorkspace {
     fn default() -> Self {
-        LandscapeWorkspace { graph: default_graph(), editor: Editor::default(), path: None, settings: Settings::default(), values: None, sampled_key: None, job: None, status: String::new(), view: (0.8, 0.6, 1.0), picture: None }
+        LandscapeWorkspace { graph: default_graph(), editor: Editor::default(), path: None, settings: Settings::default(), values: None, sampled_key: None, job: None, status: String::new(), chunks: Default::default(), chunk_log: Vec::new(), view: (0.8, 0.6, 1.0), picture: None }
     }
 }
 
@@ -270,6 +292,14 @@ impl crate::App {
                 Err(mpsc::TryRecvError::Empty) => ctx.request_repaint_after(std::time::Duration::from_millis(100)),
                 Err(mpsc::TryRecvError::Disconnected) => finished = Some(Err("the sampler stopped unexpectedly".into())),
             },
+            Some(Job::Chunks(rx, _, log)) => {
+                ls.chunk_log = log.lock().unwrap().clone();
+                match rx.try_recv() {
+                    Ok(r) => finished = Some(r.map(|m| (None, Some(m)))),
+                    Err(mpsc::TryRecvError::Empty) => ctx.request_repaint_after(std::time::Duration::from_millis(200)),
+                    Err(mpsc::TryRecvError::Disconnected) => finished = Some(Err("the chunk export stopped unexpectedly".into())),
+                }
+            }
             Some(Job::Export(rx, _)) => match rx.try_recv() {
                 Ok(r) => finished = Some(r.map(|m| (None, Some(m)))),
                 Err(mpsc::TryRecvError::Empty) => ctx.request_repaint_after(std::time::Duration::from_millis(100)),
@@ -329,13 +359,14 @@ impl crate::App {
             crate::row(ui, &mut ls.settings.height_m, d.height_m, |ui, v| _ = ui.add(egui::DragValue::new(v).range(1.0..=20000.0).speed(1.0).prefix("height ").suffix(" m")));
             crate::row(ui, &mut ls.settings.fit, d.fit, |ui, v| _ = ui.checkbox(v, "fit the height range").on_hover_text("On: the lowest point is 0 and the highest is the height. Off: the graph's output times the height, around 0."));
             ui.weak("The terrain is one tile of the graph (x and y from 0 to 1) with the density output as height, so any noise graph works. Tiling graphs make a terrain whose edges match.");
-            let running = matches!(ls.job, Some(Job::Export(..)));
+            let running = matches!(ls.job, Some(Job::Export(..) | Job::Chunks(..)));
             if ui.add_enabled(!running && ls.values.is_some(), egui::Button::new("Export heightmap for Unreal…")).on_hover_text(format!("A 16-bit PNG at {UNREAL_RES} x {UNREAL_RES} (a valid landscape size) and a .json with the import settings.")).clicked()
                 && let Some(path) = rfd::FileDialog::new().add_filter("16-bit PNG", &["png"]).set_file_name("heightmap.png").save_file() {
                 let (graph, s) = (ls.graph.clone(), ls.settings.clone());
                 let (tx, rx) = mpsc::channel();
                 let progress = Progress::default();
                 let p = progress.clone();
+                let (device, queue) = (device.clone(), queue.clone());
                 std::thread::spawn(move || {
                     let r = Evaluator::new(&device, &queue, &graph, s.seed).and_then(|ev| {
                         let metres = to_metres(&sample(&ev, UNREAL_RES, &p), &s);
@@ -349,6 +380,57 @@ impl crate::App {
             if let Some(Job::Export(_, p)) = &ls.job {
                 ui.add(egui::ProgressBar::new(p.load(Ordering::Relaxed) as f32 / 1000.0).show_percentage());
             }
+            if let Some(Job::Chunks(_, p, _)) = &ls.job {
+                ui.add(egui::ProgressBar::new(p.load(Ordering::Relaxed) as f32 / 1000.0).show_percentage());
+            }
+            egui::CollapsingHeader::new("Nanite chunks").default_open(true).show(ui, |ui| {
+                let d = crate::landscape_chunks::Options::default();
+                let o = &mut ls.chunks;
+                ui.horizontal(|ui| {
+                    ui.label("name");
+                    ui.text_edit_singleline(&mut o.name);
+                });
+                ui.horizontal(|ui| {
+                    ui.add(egui::TextEdit::singleline(&mut o.folder).hint_text("folder").desired_width(190.0));
+                    if ui.button("Browse…").clicked() && let Some(f) = rfd::FileDialog::new().pick_folder() {
+                        o.folder = f.display().to_string();
+                    }
+                });
+                crate::row(ui, &mut o.chunk_m, d.chunk_m, |ui, v| _ = ui.add(egui::DragValue::new(v).range(10.0..=20000.0).speed(5.0).prefix("chunk ").suffix(" m")));
+                crate::row(ui, &mut o.budget, d.budget, |ui, v| _ = ui.add(egui::DragValue::new(v).range(2000..=4_000_000).speed(1000.0).prefix("triangles ").suffix(" per chunk")));
+                crate::row(ui, &mut o.tex, d.tex, |ui, v| {
+                    for t in [1024usize, 2048, 4096] {
+                        ui.selectable_value(v, t, format!("{t} px"));
+                    }
+                });
+                crate::row(ui, &mut o.ao_m, d.ao_m, |ui, v| _ = ui.add(egui::DragValue::new(v).range(1.0..=500.0).prefix("AO reach ").suffix(" m")));
+                crate::row(ui, &mut o.glb, d.glb, |ui, v| {
+                    ui.selectable_value(v, true, "GLB");
+                    ui.selectable_value(v, false, "OBJ");
+                });
+                ui.checkbox(&mut o.green_up, "normal map green up (OpenGL)");
+                ui.checkbox(&mut o.pack_udim, "also pack into a UDIM tileset").on_hover_text("Runs UDIM pack into a UDIM folder: one combined mesh, one material, the maps as .1001, .1002 ...");
+                let plan = crate::landscape_chunks::plan(ls.settings.world_m, o.chunk_m, o.budget);
+                ui.weak(format!("{0} x {0} chunks of {1} m, {2} x {2} quads (about {3} triangles) each; tiles 1001 to {4}.", plan.chunks, plan.chunk_m, plan.quads, 2 * plan.quads * plan.quads, crate::udim::udim(plan.chunks * plan.chunks - 1)));
+                if ui.add_enabled(!running && !o.folder.is_empty(), egui::Button::new("Export chunks")).on_hover_text("Writes every chunk's mesh (centimetres, the chunk's corner at its origin), its normal, occlusion and curvature maps, and a manifest with each chunk's location.").clicked() {
+                    let (graph, s, opts) = (ls.graph.clone(), ls.settings.clone(), o.clone());
+                    let (tx, rx) = mpsc::channel();
+                    let (progress, log) = (Progress::default(), std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new())));
+                    let (p, l) = (progress.clone(), log.clone());
+                    let (device, queue) = (device.clone(), queue.clone());
+                    std::thread::spawn(move || {
+                        let r = Evaluator::new(&device, &queue, &graph, s.seed).and_then(|ev| crate::landscape_chunks::export(&ev, &s, &opts, &p, &mut |m| l.lock().unwrap().push(m.to_string())));
+                        let _ = tx.send(r);
+                    });
+                    ls.job = Some(Job::Chunks(rx, progress, log));
+                    ls.status = "Exporting chunks…".into();
+                }
+                egui::ScrollArea::vertical().id_salt("chunk log").max_height(120.0).stick_to_bottom(true).show(ui, |ui| {
+                    for l in &ls.chunk_log {
+                        ui.weak(l);
+                    }
+                });
+            });
             if !ls.status.is_empty() {
                 ui.label(&ls.status);
             }
