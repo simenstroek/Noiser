@@ -250,7 +250,7 @@ fn summary(kind: &NodeKind) -> String {
     match kind {
         NodeKind::Float(v) => format!("{v:.3}"),
         NodeKind::Vec3(v) => format!("{:.2}, {:.2}, {:.2}", v[0], v[1], v[2]),
-        NodeKind::Position { .. } => "world position".into(),
+        NodeKind::Position { .. } => String::new(), // its X, Y and Z rows are the body
         NodeKind::Reroute => "passes its input on".into(),
         NodeKind::NamedReroute { .. } => "named: usable anywhere".into(),
         NodeKind::NamedRerouteUse { .. } => "reads a named reroute".into(),

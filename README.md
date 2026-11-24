@@ -102,6 +102,8 @@ SDF Modeler's `.sdf` files (0.6.x, without splines) and keeps what it does not e
 OBJ or PLY mesh. The shapes were matched against meshes exported from SDF Modeler itself
 ([`docs/sdf-modeler-notes.md`](docs/sdf-modeler-notes.md)). The tab's document is restored when Noiser starts again.
 
+**Landscape.** A fourth tab (first step of [`docs/landscape-plan.md`](docs/landscape-plan.md)): a noise graph is the terrain. Its density output over one tile (x and y from 0 to 1) is the height, drawn in 3D (drag to orbit, scroll to zoom) and edited with the same nodes as the Noise graph tab (open and save `.noisegraph` files). *Size* and *height* are in metres; *fit the height range* stretches the output to 0..height. *Export heightmap for Unreal…* writes a 16-bit PNG at 4033 x 4033 (a valid Landscape size) and a `.json` with the location and scale to type into Unreal's Landscape import: the Z scale is chosen so the 16 bits cover exactly the terrain's height range. Erosion, masks and the 3D chunks for Nanite are the next steps of the plan; `--landscape-tab` opens the tab at launch.
+
 **Load SDF.** A node (Noise graph and Mesh graph) that reads a `.sdf` file and outputs its signed distance, negative inside,
 for the position it is given: a live field, evaluated in the graph's shader, with no grid. By default the shape is fitted
 into the unit tile (its longest side is `size`, its centre at `offset`); switch *Fit to the tile* off to keep the file's own

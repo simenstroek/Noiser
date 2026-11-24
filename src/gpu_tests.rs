@@ -2832,3 +2832,24 @@ fn a_position_node_scales_its_axes() {
     let old = r#"{"nodes": {"0": {"kind": "Position", "pos": [0,0]}}, "edges": []}"#;
     assert!(matches!(Graph::from_json(old).unwrap().nodes[&0].kind, NodeKind::Position { scale } if scale == [1.0; 3]));
 }
+
+#[test]
+fn the_landscape_samples_a_graph_over_the_terrain() {
+    let Some(gpu) = gpu() else { return eprintln!("no GPU adapter; skipping") };
+    // Position x as the height: a ramp along x, constant along y.
+    let mut g = Graph::default();
+    let p = g.add(NodeKind::position(), [0.0; 2]);
+    let sep = g.add(NodeKind::Separate, [0.0; 2]);
+    let out = g.add(NodeKind::OutDensity, [0.0; 2]);
+    g.connect(p, sep, 0);
+    g.connect_from(sep, 0, out, 0);
+    let ev = crate::export::Evaluator::new(&gpu.device, &gpu.queue, &g, 0).unwrap();
+    let n = 33;
+    let v = crate::landscape::sample(&ev, n, &Default::default());
+    assert_eq!(v.len(), n * n);
+    for j in [0, 10, 32] {
+        for i in [0, 5, 32] {
+            near(v[j * n + i], i as f32 / (n - 1) as f32, "ramp along x, both edges included");
+        }
+    }
+}

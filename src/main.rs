@@ -22,6 +22,7 @@ mod bake;
 mod meshgraph;
 mod meshgraph_ui;
 mod meshworkspace;
+mod landscape;
 mod udim;
 mod uvtransfer;
 mod meshformats;
@@ -159,6 +160,7 @@ struct App {
     /// Which graph the window shows, and the mesh graph's state.
     workspace: meshworkspace::Workspace,
     mesh_ws: meshworkspace::MeshWorkspace,
+    landscape: landscape::LandscapeWorkspace,
     composer: composer::Composer,
     /// File the graph was last opened from / saved to.
     path: Option<std::path::PathBuf>,
@@ -249,6 +251,7 @@ impl App {
         let mut args = std::env::args().skip(1);
         let (mut graph_arg, mut mesh_arg, mut open_mesh_export) = (None, None, false);
         let mut mesh_tab = false;
+        let mut landscape_tab = false;
         let mut library_root_arg: Option<String> = None;
         let mut show_library = false;
         let mut library_tab: Option<library::Kind> = None;
@@ -309,6 +312,8 @@ impl App {
                 });
             } else if a == "--mesh-tab" {
                 mesh_tab = true;
+            } else if a == "--landscape-tab" {
+                landscape_tab = true;
             } else if a == "--window" {
                 args.next(); // read below
             } else if a == "--mesh-graph" {
@@ -384,6 +389,7 @@ impl App {
             editor,
             workspace: Default::default(),
             mesh_ws: Default::default(),
+            landscape: Default::default(),
             composer: Default::default(),
             path,
             status,
@@ -457,6 +463,9 @@ impl App {
         if mesh_tab || mesh_graph_arg.is_some() {
             app.workspace = meshworkspace::Workspace::Mesh;
         }
+        if landscape_tab {
+            app.workspace = meshworkspace::Workspace::Landscape;
+        }
         if let Some(p) = mesh_graph_arg {
             match std::fs::read_to_string(&p).map_err(|e| e.to_string()).and_then(|s| Graph::from_json(&s)) {
                 Ok(g) => app.mesh_ws.open_graph(g, p),
@@ -475,6 +484,11 @@ impl App {
         if let Some(g) = cc.storage.and_then(|s| s.get_string(MESH_GRAPH_KEY)).and_then(|s| Graph::from_json(&s).ok()).filter(|_| !graph_from_arg) {
             let path = cc.storage.and_then(|s| s.get_string(MESH_GRAPH_PATH_KEY)).filter(|p| !p.is_empty()).map(std::path::PathBuf::from);
             app.mesh_ws.restore(g, path);
+        }
+        // The landscape as it was left.
+        if let Some(g) = cc.storage.and_then(|s| s.get_string(LANDSCAPE_GRAPH_KEY)).and_then(|s| Graph::from_json(&s).ok()) {
+            let settings = cc.storage.and_then(|s| s.get_string(LANDSCAPE_SETTINGS_KEY)).and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
+            app.landscape.restore(g, settings, None);
         }
         app.mesh_mask.terms = mask_terms;
         app.pv.show_mask = show_mask;
@@ -853,6 +867,8 @@ const COMPOSER_KEY: &str = "composer_document";
 const COMPOSER_PATH_KEY: &str = "composer_path";
 const COMPOSER_MODIFIED_KEY: &str = "composer_modified";
 const MESH_GRAPH_PATH_KEY: &str = "mesh_graph_path";
+const LANDSCAPE_GRAPH_KEY: &str = "landscape_graph";
+const LANDSCAPE_SETTINGS_KEY: &str = "landscape_settings";
 const SHORTCUTS: [(&str, &str); 18] = [
     ("Ctrl+S / Ctrl+Shift+S / Ctrl+O / Ctrl+N", "Save / Save As / Open / New"),
     ("Ctrl+Z", "Undo"),
@@ -1045,6 +1061,8 @@ impl eframe::App for App {
             None => storage.set_string(COMPOSER_KEY, String::new()),
         }
         storage.set_string(MESH_GRAPH_KEY, self.mesh_ws.graph.to_json());
+        storage.set_string(LANDSCAPE_GRAPH_KEY, self.landscape.graph.to_json());
+        storage.set_string(LANDSCAPE_SETTINGS_KEY, serde_json::to_string(&self.landscape.settings).unwrap_or_default());
         storage.set_string(MESH_GRAPH_PATH_KEY, self.mesh_ws.path.as_ref().map_or(String::new(), |p| p.to_string_lossy().into_owned()));
         if let Ok(s) = serde_json::to_string(&self.recent) {
             storage.set_string(RECENT_KEY, s);
@@ -1391,6 +1409,10 @@ impl eframe::App for App {
             }
             meshworkspace::Workspace::Composer => {
                 self.composer.show(ui, self.rs.target_format);
+                return;
+            }
+            meshworkspace::Workspace::Landscape => {
+                self.landscape_ui(ui);
                 return;
             }
             meshworkspace::Workspace::Noise => {}

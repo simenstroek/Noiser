@@ -14,16 +14,18 @@ pub enum Workspace {
     Noise,
     Mesh,
     Composer,
+    Landscape,
 }
 
 impl Workspace {
-    pub const ALL: [Workspace; 3] = [Workspace::Composer, Workspace::Noise, Workspace::Mesh];
+    pub const ALL: [Workspace; 4] = [Workspace::Composer, Workspace::Noise, Workspace::Mesh, Workspace::Landscape];
 
     pub fn label(self) -> &'static str {
         match self {
             Workspace::Noise => "Noise graph",
             Workspace::Mesh => "Mesh graph",
             Workspace::Composer => "SDF Composer",
+            Workspace::Landscape => "Landscape",
         }
     }
 
@@ -32,6 +34,7 @@ impl Workspace {
             Workspace::Noise => "noise",
             Workspace::Mesh => "mesh_graph",
             Workspace::Composer => "shape_cube",
+            Workspace::Landscape => "landscape",
         }
     }
 
@@ -41,6 +44,7 @@ impl Workspace {
             Workspace::Noise => egui::Color32::from_rgb(90, 190, 120),
             Workspace::Mesh => egui::Color32::from_rgb(100, 150, 240),
             Workspace::Composer => egui::Color32::from_rgb(235, 150, 70),
+            Workspace::Landscape => egui::Color32::from_rgb(190, 160, 110),
         }
     }
 }

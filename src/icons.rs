@@ -29,6 +29,7 @@ pub fn source(name: &str) -> Option<egui::ImageSource<'static>> {
         "info" => include_bytes!("../assets/ui_icons/info.svg"),
         "intersect" => include_bytes!("../assets/ui_icons/intersect.svg"),
         "keyboard" => include_bytes!("../assets/ui_icons/keyboard.svg"),
+        "landscape" => include_bytes!("../assets/ui_icons/landscape.svg"),
         "library" => include_bytes!("../assets/ui_icons/library.svg"),
         "lighting" => include_bytes!("../assets/ui_icons/lighting.svg"),
         "local" => include_bytes!("../assets/ui_icons/local.svg"),
