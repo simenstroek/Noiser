@@ -39,7 +39,7 @@ pub fn ops(g: &Graph, seed: u32) -> Result<Value, String> {
     if order.iter().any(|id| matches!(g.nodes[id].kind, NodeKind::Radial(_))) {
         return Err("a Radial Position node has no .noiser form".into());
     }
-    if order.iter().any(|id| matches!(g.nodes[id].kind, NodeKind::Mask { .. } | NodeKind::Slope { .. } | NodeKind::Erosion(_))) {
+    if order.iter().any(|id| matches!(g.nodes[id].kind, NodeKind::Mask { .. } | NodeKind::Slope { .. } | NodeKind::Erosion(_) | NodeKind::Select { .. } | NodeKind::Layer(_))) {
         return Err("a Mask or Slope node (Landscape tab) has no .noiser form".into());
     }
     if order.iter().any(|id| matches!(g.nodes[id].kind, NodeKind::Random { .. })) {
@@ -72,7 +72,7 @@ pub fn ops(g: &Graph, seed: u32) -> Result<Value, String> {
             let ty = if g.yields_vector(id) { "vector" } else { "float" };
             let mut op = match &g.nodes[&id].kind {
                 NodeKind::Position { .. } => json!({"op": "position"}), // a scaled one is refused above
-                NodeKind::Radial(_) | NodeKind::Random { .. } | NodeKind::Mask { .. } | NodeKind::Slope { .. } | NodeKind::Erosion(_) => unreachable!("refused above"),
+                NodeKind::Radial(_) | NodeKind::Random { .. } | NodeKind::Mask { .. } | NodeKind::Slope { .. } | NodeKind::Erosion(_) | NodeKind::Select { .. } | NodeKind::Layer(_) => unreachable!("refused above"),
                 NodeKind::LoadMesh(_) | NodeKind::LoadSdf(_) | NodeKind::Scatter(_) | NodeKind::NoiseGraph(_) | NodeKind::Remesh { .. } | NodeKind::AutoUv(_) | NodeKind::Bake(_) | NodeKind::OutMesh(_) | NodeKind::OutImage(_) | NodeKind::ImageSplit | NodeKind::ImageCombine | NodeKind::ImageLevels { .. } | NodeKind::TransferUv => json!({"op": "value", "value": 0.0}), // mesh graph nodes have no .noiser form
                 // A passthrough, written as adding zero.
                 NodeKind::NamedReroute { .. } | NodeKind::NamedRerouteUse { .. } => unreachable!("readers look through named reroutes"),

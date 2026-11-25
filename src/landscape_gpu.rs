@@ -18,6 +18,8 @@ pub struct Grid {
     pub hi: f32,
     /// Metres up per metre across, with a margin for diagonals and interpolation.
     pub steepest: f32,
+    /// The paint layers' colours over the grid (RGBA8, `n` x `n`), when the terrain has layers.
+    pub colours: Option<Arc<Vec<u8>>>,
 }
 
 impl Grid {
@@ -26,7 +28,14 @@ impl Grid {
         let (lo, hi) = heights.iter().fold((f32::MAX, f32::MIN), |(lo, hi), v| (lo.min(*v), hi.max(*v)));
         let cell = world_m / (n - 1) as f32;
         let steepest = steepest_slope(&heights, n, level) / cell * 1.5;
-        Grid { key, heights: Arc::new(heights), n, lo, hi, steepest }
+        Grid { key, heights: Arc::new(heights), n, lo, hi, steepest, colours: None }
+    }
+
+    /// The same grid painted with `colours` (RGBA8, `n` x `n`).
+    pub fn with_colours(mut self, colours: Vec<u8>) -> Grid {
+        assert_eq!(colours.len(), self.n * self.n * 4, "one colour per height sample");
+        self.colours = Some(Arc::new(colours));
+        self
     }
 }
 
@@ -79,6 +88,8 @@ pub struct ViewUniforms {
     light: [f32; 4],
     range: [f32; 4],
     extra: [f32; 4],
+    /// x: 1 when the grid has paint layer colours.
+    paint: [f32; 4],
 }
 
 impl ViewUniforms {
@@ -99,6 +110,7 @@ impl ViewUniforms {
             light: [l[0], l[1], l[2], steepest],
             range: [grid.lo, grid.hi, level, if srgb { 1.0 } else { 0.0 }],
             extra: [grid.n as f32, floor, top, min_step_cells],
+            paint: [if grid.colours.is_some() { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0],
         }
     }
 }
@@ -110,7 +122,7 @@ pub struct LandscapeGpu {
     uniforms: wgpu::Buffer,
     format: wgpu::TextureFormat,
     /// The key of the heights uploaded, their texture and the bind group that reads them.
-    heights: Option<(u64, wgpu::Texture, wgpu::BindGroup)>,
+    heights: Option<(u64, wgpu::Texture, wgpu::Texture, wgpu::BindGroup)>,
 }
 
 impl LandscapeGpu {
@@ -122,6 +134,12 @@ impl LandscapeGpu {
                 wgpu::BindGroupLayoutEntry { binding: 0, visibility: wgpu::ShaderStages::FRAGMENT, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None }, count: None },
                 wgpu::BindGroupLayoutEntry {
                     binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Float { filterable: false }, view_dimension: wgpu::TextureViewDimension::D2, multisampled: false },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Float { filterable: false }, view_dimension: wgpu::TextureViewDimension::D2, multisampled: false },
                     count: None,
@@ -144,10 +162,31 @@ impl LandscapeGpu {
     }
 
     /// Uploads the heights when they are not the ones already there.
-    fn upload(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, key: u64, heights: &[f32], n: usize) {
-        if self.heights.as_ref().is_some_and(|(k, _, _)| *k == key) {
+    fn upload(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, key: u64, heights: &[f32], colours: Option<&[u8]>, n: usize) {
+        if self.heights.as_ref().is_some_and(|(k, _, _, _)| *k == key) {
             return;
         }
+        // The paint layers' colours: a texture the size of the heights, or one white texel when there are none.
+        let cn = if colours.is_some() { n as u32 } else { 1 };
+        let csize = wgpu::Extent3d { width: cn, height: cn, depth_or_array_layers: 1 };
+        let colour_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("landscape colours"),
+            size: csize,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let white = [255u8; 4];
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo { texture: &colour_texture, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+            colours.unwrap_or(&white),
+            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(4 * cn), rows_per_image: Some(cn) },
+            csize,
+        );
+        let colour_view = colour_texture.create_view(&Default::default());
         let size = wgpu::Extent3d { width: n as u32, height: n as u32, depth_or_array_layers: 1 };
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("landscape heights"),
@@ -169,13 +208,17 @@ impl LandscapeGpu {
         let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("landscape view"),
             layout: &self.layout,
-            entries: &[wgpu::BindGroupEntry { binding: 0, resource: self.uniforms.as_entire_binding() }, wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&view) }],
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: self.uniforms.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&view) },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&colour_view) },
+            ],
         });
-        self.heights = Some((key, texture, group));
+        self.heights = Some((key, texture, colour_texture, group));
     }
 
     fn draw(&self, pass: &mut wgpu::RenderPass<'_>) {
-        let Some((_, _, group)) = &self.heights else { return };
+        let Some((_, _, _, group)) = &self.heights else { return };
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, group, &[]);
         pass.draw(0..3, 0..1);
@@ -187,6 +230,7 @@ pub struct ViewCallback {
     pub uniforms: ViewUniforms,
     pub key: u64,
     pub heights: Arc<Vec<f32>>,
+    pub colours: Option<Arc<Vec<u8>>>,
     pub n: usize,
     pub format: wgpu::TextureFormat,
 }
@@ -197,7 +241,7 @@ impl egui_wgpu::CallbackTrait for ViewCallback {
             resources.insert(LandscapeGpu::new(device, self.format));
         }
         let gpu: &mut LandscapeGpu = resources.get_mut().expect("just inserted");
-        gpu.upload(device, queue, self.key, &self.heights, self.n);
+        gpu.upload(device, queue, self.key, &self.heights, self.colours.as_ref().map(|c| c.as_slice()), self.n);
         queue.write_buffer(&gpu.uniforms, 0, bytemuck::bytes_of(&self.uniforms));
         Vec::new()
     }
@@ -209,12 +253,11 @@ impl egui_wgpu::CallbackTrait for ViewCallback {
     }
 }
 
-/// Renders the view into a `w` x `h` RGBA picture (for tests).
-#[cfg(test)]
+/// Renders the view into a `w` x `h` RGBA picture (for tests and the command line preview).
 pub fn render_image(device: &wgpu::Device, queue: &wgpu::Queue, grid: &Grid, uniforms: &ViewUniforms, (w, h): (u32, u32)) -> Vec<[u8; 4]> {
     let format = wgpu::TextureFormat::Rgba8Unorm;
     let mut gpu = LandscapeGpu::new(device, format);
-    gpu.upload(device, queue, grid.key, &grid.heights, grid.n);
+    gpu.upload(device, queue, grid.key, &grid.heights, grid.colours.as_ref().map(|c| c.as_slice()), grid.n);
     queue.write_buffer(&gpu.uniforms, 0, bytemuck::bytes_of(uniforms));
     let target = device.create_texture(&wgpu::TextureDescriptor {
         label: None,

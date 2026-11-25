@@ -161,6 +161,8 @@ pub fn title(kind: &NodeKind) -> String {
         NodeKind::Normal { .. } => "Normal".into(),
         NodeKind::Mask { name } => if name.is_empty() { "Map".into() } else { format!("Map: {name}") },
         NodeKind::Slope { .. } => "Slope".into(),
+        NodeKind::Select { .. } => "Select".into(),
+        NodeKind::Layer(l) => if l.name.is_empty() { "Layer".into() } else { format!("Layer: {}", l.name) },
         NodeKind::Erosion(e) => if e.preset.is_empty() { "Erosion".into() } else { format!("Erosion: {}", e.preset) },
         NodeKind::Noise(n) => n.kind.name().into(),
         NodeKind::OutDensity => "Density Output".into(),
@@ -213,6 +215,8 @@ fn input_label(kind: &NodeKind, port: usize) -> &'static str {
         (NodeKind::Normal { .. } | NodeKind::Slope { .. }, _) => "Field",
         (NodeKind::Mask { .. }, _) => "Position",
         (NodeKind::Erosion(_), _) => "Height",
+        (NodeKind::Select { .. }, _) => "Value",
+        (NodeKind::Layer(_), _) => "Weight",
         (NodeKind::OutDensity, _) => "Density",
         (NodeKind::OutNormal, _) => "Normal",
         (NodeKind::LoadMesh(_) | NodeKind::LoadSdf(_) | NodeKind::NoiseGraph(_), _) => "Position",
@@ -244,6 +248,8 @@ fn header_tint(kind: &NodeKind) -> Color32 {
         NodeKind::Mask { .. } => Color32::from_rgb(130, 82, 52),
         NodeKind::Slope { .. } => Color32::from_rgb(112, 96, 58),
         NodeKind::Erosion(_) => Color32::from_rgb(70, 110, 150),
+        NodeKind::Select { .. } => Color32::from_rgb(120, 100, 60),
+        NodeKind::Layer(l) => Color32::from_rgb((l.color[0] * 160.0) as u8 + 40, (l.color[1] * 160.0) as u8 + 40, (l.color[2] * 160.0) as u8 + 40),
         NodeKind::OutDensity | NodeKind::OutNormal | NodeKind::OutMesh(_) | NodeKind::OutImage(_) => Color32::from_rgb(80, 60, 95),
         NodeKind::LoadMesh(_) | NodeKind::LoadSdf(_) | NodeKind::NoiseGraph(_) => Color32::from_rgb(50, 95, 70),
         NodeKind::Scatter(_) => Color32::from_rgb(70, 110, 60),
@@ -258,7 +264,7 @@ fn node_button(ui: &mut egui::Ui, label: &str, kind: &NodeKind) -> egui::Respons
 }
 
 pub fn has_output(kind: &NodeKind) -> bool {
-    !matches!(kind, NodeKind::OutDensity | NodeKind::OutNormal | NodeKind::OutMesh(_) | NodeKind::OutImage(_))
+    !matches!(kind, NodeKind::OutDensity | NodeKind::OutNormal | NodeKind::OutMesh(_) | NodeKind::OutImage(_) | NodeKind::Layer(_))
 }
 
 static LANDSCAPE_MODE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -287,7 +293,9 @@ fn palette() -> Vec<(&'static str, NodeKind)> {
         all.extend([
             ("Map", NodeKind::Mask { name: String::new() }),
             ("Slope", NodeKind::Slope { scale: 1.0 }),
+            ("Select", NodeKind::Select { lo: 0.0, hi: 1.0, soft: 0.1 }),
             ("Erosion", NodeKind::Erosion(Default::default())),
+            ("Layer", NodeKind::Layer(Default::default())),
             ("Noise Graph", NodeKind::NoiseGraph(Default::default())),
         ]);
     }

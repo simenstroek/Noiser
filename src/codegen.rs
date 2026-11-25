@@ -153,6 +153,7 @@ fn compile_inner(g: &Graph, caches: &BTreeMap<NodeId, u32>, eps: f32, preview: b
                 params.extend([0.0, 2.0]);
             }
             NodeKind::Slope { scale } => params.push(*scale),
+            NodeKind::Select { lo, hi, soft } => params.extend([*lo, *hi, *soft]),
             NodeKind::Radial(r) => {
                 params.push(if r.mode == crate::graph::RadialMode::Spherical { 1.0 } else { 0.0 });
                 params.extend(r.center);
@@ -482,6 +483,7 @@ impl Gen<'_> {
             }
             NodeKind::NoiseGraph(_) => return Err("a Noise Graph node must be lowered first (meshgraph::lowered_mesh)".into()),
             NodeKind::Remesh { .. } | NodeKind::AutoUv(_) | NodeKind::Bake(_) | NodeKind::OutMesh(_) | NodeKind::OutImage(_) | NodeKind::ImageSplit | NodeKind::ImageCombine | NodeKind::ImageLevels { .. } | NodeKind::TransferUv => return Err("this node does not produce a field".into()),
+            NodeKind::Layer(_) => return Err("a Layer node is an output of the Landscape graph, not part of a field".into()),
             NodeKind::Erosion(_) => return Err("an Erosion node works only in the Landscape graph, on a terrain".into()),
             // Never reached (readers look through them), but the match must be complete.
             NodeKind::NamedReroute { .. } | NodeKind::NamedRerouteUse { .. } => (Ty::F, "0.0".into()),
@@ -564,6 +566,10 @@ impl Gen<'_> {
                     PatternKind::Honeycomb => "honeycomb",
                 };
                 (Ty::F, format!("{function}({q}, {s}u)"))
+            }
+            NodeKind::Select { .. } => {
+                let x = self.operand(id, 0, Ty::F, "0.0");
+                (Ty::F, format!("select_range({x}, P[{s}], P[{}], P[{}])", s + 1, s + 2))
             }
             NodeKind::Mask { .. } => {
                 let q = self.operand(id, 0, Ty::V, "p");

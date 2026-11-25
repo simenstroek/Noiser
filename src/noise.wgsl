@@ -310,6 +310,12 @@ fn mix_ab(t: f32, a: f32, b: f32, clamped: bool) -> f32 {
     return a + (b - a) * select(t, clamp(t, 0.0, 1.0), clamped);
 }
 
+// 1 for x from lo to hi, falling smoothly to 0 over `soft` beyond either end.
+fn select_range(x: f32, lo: f32, hi: f32, soft: f32) -> f32 {
+    let s = max(soft, 1e-6);
+    return smoothstep(lo - s, lo, x) * (1.0 - smoothstep(hi, hi + s, x));
+}
+
 fn remap(x: f32, a: f32, b: f32, c: f32, d: f32, clamped: bool) -> f32 {
     let t = select(0.0, (x - a) / (b - a), b != a);
     let r = c + t * (d - c);

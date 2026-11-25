@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, BTreeSet};
 pub type NodeId = u32;
 
 pub use crate::graph_params::*;
-use crate::graph_params::{default_smooth, default_true, migrate_noise_kinds, one};
+use crate::graph_params::{default_smooth, default_true, migrate_noise_kinds, one, tenth};
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum NodeKind {
@@ -72,6 +72,19 @@ pub enum NodeKind {
     /// Outputs: the eroded height (in the input's units), then flow, deposition and wear (0 to 1). Not a function: the
     /// Landscape tab runs it before compiling and puts terrain maps in its place (see `landscape_erosion_node`).
     Erosion(crate::landscape_erosion::Erosion),
+    /// Landscape graph: keeps a range of its input with soft edges: 1 from `lo` to `hi`, falling to 0 over `soft` beyond
+    /// either end (smoothly). The selector terrain artists know from other tools; wire a height, slope or map in.
+    Select {
+        #[serde(default)]
+        lo: f32,
+        #[serde(default = "one")]
+        hi: f32,
+        #[serde(default = "tenth")]
+        soft: f32,
+    },
+    /// Landscape graph output: a paint layer. Its input is the layer's weight (0 to 1); exports normalise all layers to
+    /// sum to 1 per cell and write one weightmap each.
+    Layer(crate::landscape_layers::LayerParams),
     /// A waypoint on a wire: passes its input through (every reader skips it, like a muted node).
     Reroute,
     /// The named end of a wire (Unreal's named reroute): passes its input on, and any `NamedRerouteUse` with the
@@ -128,7 +141,7 @@ impl NodeKind {
             // The second output of a generator is its displacement vector.
             NodeKind::LoadMesh(_) | NodeKind::Noise(_) | NodeKind::Pattern(_) | NodeKind::Grid { .. } => 2,
             NodeKind::Bake(s) => (s.channels.len() + s.custom.len()).max(1),
-            NodeKind::OutDensity | NodeKind::OutNormal | NodeKind::OutMesh(_) | NodeKind::OutImage(_) => 0,
+            NodeKind::OutDensity | NodeKind::OutNormal | NodeKind::OutMesh(_) | NodeKind::OutImage(_) | NodeKind::Layer(_) => 0,
             _ => 1,
         }
     }
@@ -161,7 +174,7 @@ impl NodeKind {
             NodeKind::Separate => 1,
             NodeKind::Curve { .. } => 1,
             NodeKind::Noise(_) | NodeKind::Grid { .. } | NodeKind::Pattern(_) => 1 + self.param_pins().len(),
-            NodeKind::Normal { .. } | NodeKind::Radial(_) | NodeKind::Mask { .. } | NodeKind::Slope { .. } | NodeKind::Erosion(_) | NodeKind::OutDensity | NodeKind::OutNormal => 1,
+            NodeKind::Normal { .. } | NodeKind::Radial(_) | NodeKind::Mask { .. } | NodeKind::Slope { .. } | NodeKind::Erosion(_) | NodeKind::Select { .. } | NodeKind::Layer(_) | NodeKind::OutDensity | NodeKind::OutNormal => 1,
             NodeKind::Scatter(_) => 2,
             NodeKind::LoadMesh(_) | NodeKind::LoadSdf(_) | NodeKind::NoiseGraph(_) | NodeKind::Remesh { .. } | NodeKind::AutoUv(_) | NodeKind::OutMesh(_) | NodeKind::OutImage(_) | NodeKind::ImageSplit | NodeKind::ImageLevels { .. } => 1,
             NodeKind::Bake(s) => 2 + s.custom.len(),
@@ -886,7 +899,8 @@ impl Graph {
                 Coord => Const, // gradient of a linear position map is constant
                 t => t,
             },
-            NodeKind::OutDensity | NodeKind::OutNormal => match input(0, memo, stack).unwrap_or(Const) {
+            NodeKind::Select { .. } => input(0, memo, stack).unwrap_or(Const),
+            NodeKind::OutDensity | NodeKind::OutNormal | NodeKind::Layer(_) => match input(0, memo, stack).unwrap_or(Const) {
                 Coord => Broken("output depends directly on position".into()),
                 t => t,
             },
@@ -1115,7 +1129,8 @@ impl Graph {
             }
             NodeKind::Grid { amount, .. } => scaled((-1.0, 1.0), *amount),
             NodeKind::Pattern(p) => scaled((-1.0, 1.0), p.amount),
-            NodeKind::OutDensity | NodeKind::OutNormal => UNBOUNDED,
+            NodeKind::Select { .. } => (0.0, 1.0),
+            NodeKind::OutDensity | NodeKind::OutNormal | NodeKind::Layer(_) => UNBOUNDED,
         };
         stack.pop();
         if self.pin_wired(id, Some("amount")) { UNBOUNDED } else { r }

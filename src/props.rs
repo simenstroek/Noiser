@@ -351,6 +351,13 @@ pub(crate) fn node_props(ui: &mut egui::Ui, kind: &mut NodeKind, pins: &mut Vec<
             });
             ui.weak("A terrain map from the Landscape tab (a painted mask, for now), 0 to 1. Its input is the position (x and y across the terrain); without one it is the world position.");
         }
+        NodeKind::Select { lo, hi, soft } => {
+            row(ui, lo, 0.0, |ui, v| _ = ui.add(egui::DragValue::new(v).speed(0.01).prefix("from ")));
+            row(ui, hi, 1.0, |ui, v| _ = ui.add(egui::DragValue::new(v).speed(0.01).prefix("to ")));
+            row(ui, soft, 0.1, |ui, v| _ = ui.add(egui::DragValue::new(v).speed(0.005).range(0.0..=1.0e6).prefix("soft edge ")));
+            ui.weak("1 where the input is from..to, falling smoothly to 0 over the soft edge beyond either end. Heights are in the height setting's units (1 = the full height), slopes in degrees, maps 0 to 1.");
+        }
+        NodeKind::Layer(l) => crate::landscape_layers::node_ui(ui, l),
         NodeKind::Slope { .. } => _ = ui.weak("The slope of the input in degrees. In the Landscape tab one unit of the input is one height (the height setting), spread over the size setting; wire the terrain's height in."),
         NodeKind::Noise(n) => {
             let d = graph::NoiseParams::default();

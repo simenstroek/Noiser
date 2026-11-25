@@ -260,6 +260,10 @@ pub(crate) fn one() -> f32 {
     1.0
 }
 
+pub(crate) fn tenth() -> f32 {
+    0.1
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct NoiseParams {
     pub kind: NoiseKind,

@@ -32,6 +32,8 @@ fn catalogue() -> Vec<(&'static str, NodeKind, &'static str)> {
         ("Radial", K::Radial(Default::default()), "Position in cylindrical or spherical coordinates. Input 0: position."),
         ("Mask", K::Mask { name: "mask".into() }, "Landscape tab: the terrain map `name` (a painted mask today; shown as Map in the app), 0..1, at the position. Input 0: position."),
         ("Slope", K::Slope { scale: 1.0 }, "The slope in degrees of the input field over x and y."),
+        ("Select", K::Select { lo: 0.0, hi: 1.0, soft: 0.1 }, "Landscape tab: 1 where input 0 lies between `lo` and `hi`, falling smoothly to 0 over `soft` beyond either end. Wire a height, a slope (degrees) or a map in; feeds a Layer."),
+        ("Layer", K::Layer(Default::default()), "Landscape tab output: a paint layer named `name` (preview `color` as 0..1 RGB) whose weight is input 0 (0..1). Exports normalise all layers to sum to 1 per cell and write one 8-bit weightmap each."),
         ("Erosion", K::Erosion(Default::default()), "Landscape tab only: hydraulic and thermal erosion of input 0 (the height) on the terrain's working grid. Output 0: eroded height (input's units); 1: flow, 2: deposition, 3: wear (0..1). `auto` reruns it when the input changes."),
         ("Reroute", K::Reroute, "A waypoint on a wire; passes its input on."),
         ("NamedReroute", K::NamedReroute { name: "name".into() }, "The named end of a wire; read it with NamedRerouteUse."),
@@ -325,6 +327,7 @@ pub fn preview(file: &Path, out: &Path, size: u32, y_up: bool) -> Result<String,
     let ext = file.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
     let img = match ext.as_str() {
         "noisegraph" => preview_noise(file, size)?,
+        "landscape" => crate::landscape::preview_project(file, size)?,
         "sdf" => preview_sdf(file, size)?,
         _ if crate::meshformats::is_mesh_file(file) => preview_mesh(file, size, y_up)?,
         _ => return Err(format!("{}: --preview takes a .noisegraph, .sdf or a mesh file (.obj, .ply, .glb, ...)", file.display())),
@@ -496,14 +499,40 @@ pub fn try_run() -> Option<i32> {
         }
         "--describe" => {
             let file = PathBuf::from(arg(1, "a .noisegraph or .meshgraph file")?);
-            let g = Graph::from_json(&std::fs::read_to_string(&file).map_err(|e| format!("{}: {e}", file.display()))?)?;
-            println!("{}", serde_json::to_string_pretty(&describe(&g)).unwrap());
+            let text = std::fs::read_to_string(&file).map_err(|e| format!("{}: {e}", file.display()))?;
+            let (g, settings) = if file.extension().is_some_and(|e| e.eq_ignore_ascii_case("landscape")) {
+                let v: Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+                (Graph::from_json(v["graph"].as_str().ok_or("not a landscape project")?)?, Some(v["settings"].clone()))
+            } else {
+                (Graph::from_json(&text)?, None)
+            };
+            let mut d = describe(&g);
+            if let (Some(settings), Some(obj)) = (settings, d.as_object_mut()) {
+                obj.insert("settings".into(), settings);
+            }
+            println!("{}", serde_json::to_string_pretty(&d).unwrap());
             Ok(0)
         }
         "--build" => {
             let (spec, out) = (PathBuf::from(arg(1, "a spec file")?), PathBuf::from(arg(2, "an output .noisegraph or .meshgraph")?));
             let g = build(&serde_json::from_str(&std::fs::read_to_string(&spec).map_err(|e| format!("{}: {e}", spec.display()))?).map_err(|e| format!("{}: {e}", spec.display()))?)?;
-            std::fs::write(&out, g.to_json()).map_err(|e| format!("{}: {e}", out.display()))?;
+            let text = if out.extension().is_some_and(|e| e.eq_ignore_ascii_case("landscape")) {
+                // A Landscape project: the graph, the spec's optional "settings" over the defaults, no painted masks.
+                let spec: Value = serde_json::from_str(&std::fs::read_to_string(&spec).map_err(|e| format!("{}: {e}", spec.display()))?).map_err(|e| e.to_string())?;
+                let mut settings = serde_json::to_value(crate::landscape::Settings::default()).map_err(|e| e.to_string())?;
+                if let (Some(mine), Some(given)) = (settings.as_object_mut(), spec.get("settings").and_then(|s| s.as_object())) {
+                    for (k, v) in given {
+                        if !mine.contains_key(k) {
+                            return Err(format!("unknown setting \"{k}\" (the settings are {})", mine.keys().cloned().collect::<Vec<_>>().join(", ")));
+                        }
+                        mine.insert(k.clone(), v.clone());
+                    }
+                }
+                serde_json::json!({ "noiser_landscape": 1, "graph": g.to_json(), "settings": settings, "masks": [] }).to_string()
+            } else {
+                g.to_json()
+            };
+            std::fs::write(&out, text).map_err(|e| format!("{}: {e}", out.display()))?;
             let (errors, warnings) = validate(&out)?;
             report(&errors, &warnings);
             println!("wrote {}", out.display());
@@ -553,9 +582,9 @@ mod tests {
         }
         // Adding a NodeKind variant breaks this match until the catalogue lists it.
         let _ = |k: &NodeKind| match k {
-            NodeKind::Float(_) | NodeKind::Vec3(_) | NodeKind::Math { .. } | NodeKind::Remap { .. } | NodeKind::Separate | NodeKind::Combine { .. } | NodeKind::Random { .. } | NodeKind::Mix { .. } | NodeKind::Curve { .. } | NodeKind::Grid { .. } | NodeKind::Pattern(_) | NodeKind::Position { .. } | NodeKind::Radial(_) | NodeKind::Mask { .. } | NodeKind::Slope { .. } | NodeKind::Erosion(_) | NodeKind::Reroute | NodeKind::NamedReroute { .. } | NodeKind::NamedRerouteUse { .. } | NodeKind::Normal { .. } | NodeKind::Noise(_) | NodeKind::OutDensity | NodeKind::OutNormal | NodeKind::LoadMesh(_) | NodeKind::LoadSdf(_) | NodeKind::Scatter(_) | NodeKind::NoiseGraph(_) | NodeKind::Remesh { .. } | NodeKind::AutoUv(_) | NodeKind::Bake(_) | NodeKind::OutMesh(_) | NodeKind::OutImage(_) | NodeKind::TransferUv | NodeKind::ImageSplit | NodeKind::ImageCombine | NodeKind::ImageLevels { .. } => {}
+            NodeKind::Float(_) | NodeKind::Vec3(_) | NodeKind::Math { .. } | NodeKind::Remap { .. } | NodeKind::Separate | NodeKind::Combine { .. } | NodeKind::Random { .. } | NodeKind::Mix { .. } | NodeKind::Curve { .. } | NodeKind::Grid { .. } | NodeKind::Pattern(_) | NodeKind::Position { .. } | NodeKind::Radial(_) | NodeKind::Mask { .. } | NodeKind::Slope { .. } | NodeKind::Erosion(_) | NodeKind::Select { .. } | NodeKind::Layer(_) | NodeKind::Reroute | NodeKind::NamedReroute { .. } | NodeKind::NamedRerouteUse { .. } | NodeKind::Normal { .. } | NodeKind::Noise(_) | NodeKind::OutDensity | NodeKind::OutNormal | NodeKind::LoadMesh(_) | NodeKind::LoadSdf(_) | NodeKind::Scatter(_) | NodeKind::NoiseGraph(_) | NodeKind::Remesh { .. } | NodeKind::AutoUv(_) | NodeKind::Bake(_) | NodeKind::OutMesh(_) | NodeKind::OutImage(_) | NodeKind::TransferUv | NodeKind::ImageSplit | NodeKind::ImageCombine | NodeKind::ImageLevels { .. } => {}
         };
-        assert_eq!(seen.len(), 36);
+        assert_eq!(seen.len(), 38);
     }
 
     #[test]

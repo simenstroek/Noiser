@@ -343,8 +343,64 @@ pub(crate) fn terrain_evaluator(
     run: &std::collections::BTreeSet<crate::graph::NodeId>,
     progress: &Progress,
 ) -> Result<(Evaluator, std::collections::HashMap<crate::graph::NodeId, crate::landscape_terrain::State>), String> {
+    let (ev, prepared) = terrain_parts(device, queue, graph, s, maps, maps_key, base, cache, run, progress)?;
+    Ok((ev, prepared.states))
+}
+
+/// `terrain_evaluator`, with the prepared graph and maps too (the layers are sampled from them).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn terrain_parts(
+    device: &eframe::wgpu::Device,
+    queue: &eframe::wgpu::Queue,
+    graph: &Graph,
+    s: &Settings,
+    maps: &crate::terrain_maps::TerrainMaps,
+    maps_key: u64,
+    base: &Path,
+    cache: &crate::landscape_terrain::ErosionCache,
+    run: &std::collections::BTreeSet<crate::graph::NodeId>,
+    progress: &Progress,
+) -> Result<(Evaluator, crate::landscape_terrain::Prepared), String> {
     let prepared = crate::landscape_terrain::prepare(device, queue, graph, s, maps, maps_key, base, cache, run, progress)?;
-    Ok((build_evaluator(device, queue, &prepared.graph, s, &prepared.maps, base)?, prepared.states))
+    Ok((build_evaluator(device, queue, &prepared.graph, s, &prepared.maps, base)?, prepared))
+}
+
+/// Writes the Unreal heightmap at `path` (the Erosion nodes run or come from the cache), and one weightmap per Layer
+/// node beside it, listed in the sidecar. Shared by the app's export and the headless one.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn export_terrain(
+    device: &eframe::wgpu::Device,
+    queue: &eframe::wgpu::Queue,
+    graph: &Graph,
+    s: &Settings,
+    maps: &crate::terrain_maps::TerrainMaps,
+    maps_key: u64,
+    base: &Path,
+    cache: &crate::landscape_terrain::ErosionCache,
+    run: &std::collections::BTreeSet<crate::graph::NodeId>,
+    progress: &Progress,
+    path: &Path,
+) -> Result<String, String> {
+    let (ev, prepared) = terrain_parts(device, queue, graph, s, maps, maps_key, base, cache, run, progress)?;
+    let metres = to_metres(&sample(&ev, UNREAL_RES, progress), s);
+    let mut message = write_unreal(path, UNREAL_RES, s.world_m, &encode_unreal_with(&metres, s.water_m))?;
+    if crate::landscape_layers::has_layers(&prepared.graph) {
+        let layers = crate::landscape_layers::sample_layers(device, queue, &prepared, s, base, UNREAL_RES, progress)?;
+        let files = crate::landscape_layers::write_weightmaps(path, UNREAL_RES, &layers)?;
+        add_layers_to_sidecar(path, &files)?;
+        message += &format!("; {} weightmaps ({})", files.len(), files.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>().join(", "));
+    }
+    Ok(message)
+}
+
+/// Adds the weightmaps (layer name, file name) to the heightmap's sidecar.
+fn add_layers_to_sidecar(heightmap: &Path, files: &[(String, String)]) -> Result<(), String> {
+    let side = PathBuf::from(format!("{}.json", heightmap.display()));
+    let text = std::fs::read_to_string(&side).map_err(|e| format!("{}: {e}", side.display()))?;
+    let mut json: serde_json::Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+    json["layers"] = files.iter().map(|(name, file)| serde_json::json!({ "name": name, "file": file })).collect();
+    json["layers_note"] = "8-bit grayscale weightmaps, one per layer, same size as the heightmap; they add up to 255 in every cell. Landscape mode > Import from File > Paint layers: one file per layer.".into();
+    std::fs::write(&side, serde_json::to_string_pretty(&json).unwrap_or_default()).map_err(|e| format!("{}: {e}", side.display()))
 }
 
 /// The evaluator for the terrain: Noise Graph nodes inlined, the slope scale set from the size and height, the terrain
@@ -380,10 +436,23 @@ fn hillshade(metres: &[f32], m: usize, world_m: f32, water: Option<f32>) -> egui
     egui::ColorImage { size: [m, m], source_size: egui::vec2(m as f32, m as f32), pixels }
 }
 
+/// RGBA8 colours on an `n` x `n` grid, taken (nearest) onto an `m` x `m` grid across the same area.
+fn resample_colours(rgba: &[u8], n: usize, m: usize) -> Vec<u8> {
+    let mut out = Vec::with_capacity(m * m * 4);
+    for y in 0..m {
+        for x in 0..m {
+            let (sx, sy) = ((x * (n - 1) + (m - 1) / 2) / (m - 1).max(1), (y * (n - 1) + (m - 1) / 2) / (m - 1).max(1));
+            let k = (sy.min(n - 1) * n + sx.min(n - 1)) * 4;
+            out.extend_from_slice(&rgba[k..k + 4]);
+        }
+    }
+    out
+}
+
 /// What a finished job hands back.
 enum Done {
     /// The sampled values and how each Erosion node's result stood.
-    Values(Vec<f32>, std::collections::HashMap<crate::graph::NodeId, crate::landscape_terrain::State>),
+    Values(Vec<f32>, std::collections::HashMap<crate::graph::NodeId, crate::landscape_terrain::State>, Option<Vec<crate::landscape_layers::Layer>>),
     Message(String),
 }
 
@@ -406,6 +475,9 @@ pub struct LandscapeWorkspace {
     erosion_cache: crate::landscape_terrain::ErosionCache,
     erosion_states: std::collections::HashMap<crate::graph::NodeId, crate::landscape_terrain::State>,
     erosion_run: std::collections::BTreeSet<crate::graph::NodeId>,
+    /// The paint layers' weights on the working grid (when the graph has Layer nodes), and a counter for the 3D view.
+    layers: Option<Vec<crate::landscape_layers::Layer>>,
+    layers_rev: u64,
     /// A change waiting to be sampled, and when it was made (sampling waits a moment when there is erosion).
     pending: Option<(u64, std::time::Instant)>,
     job: Option<Job>,
@@ -435,7 +507,7 @@ pub struct LandscapeWorkspace {
 
 impl Default for LandscapeWorkspace {
     fn default() -> Self {
-        LandscapeWorkspace { graph: default_graph(), editor: Editor::default(), path: None, settings: Settings::default(), values: None, sampled_key: None, erosion_cache: Default::default(), erosion_states: Default::default(), erosion_run: Default::default(), pending: None, job: None, status: String::new(), to_mesh: None, view: (0.8, 0.6, 1.0), view_grid: None, history: crate::history::History::new(&default_graph()), masks: Vec::new(), mask_selected: 0, mask_rev: 0, mask_live: 0, brush: Brush::default(), tool: Tool::Paint, map_mode: false, stroke_from: None, new_mask: String::new(), overlay: None, map_picture: None }
+        LandscapeWorkspace { graph: default_graph(), editor: Editor::default(), path: None, settings: Settings::default(), values: None, sampled_key: None, erosion_cache: Default::default(), erosion_states: Default::default(), erosion_run: Default::default(), layers: None, layers_rev: 0, pending: None, job: None, status: String::new(), to_mesh: None, view: (0.8, 0.6, 1.0), view_grid: None, history: crate::history::History::new(&default_graph()), masks: Vec::new(), mask_selected: 0, mask_rev: 0, mask_live: 0, brush: Brush::default(), tool: Tool::Paint, map_mode: false, stroke_from: None, new_mask: String::new(), overlay: None, map_picture: None }
     }
 }
 
@@ -453,10 +525,7 @@ impl LandscapeWorkspace {
         std::thread::spawn(move || {
             // Erosion nodes run (or come from the cache) at the working resolution; what follows them is sampled at
             // the Unreal size.
-            let r = terrain_evaluator(&device, &queue, &graph, &s, &masks, maps_key, &base, &cache, &run, &p).and_then(|(ev, _)| {
-                let metres = to_metres(&sample(&ev, UNREAL_RES, &p), &s);
-                write_unreal(&path, UNREAL_RES, s.world_m, &encode_unreal_with(&metres, s.water_m))
-            });
+            let r = export_terrain(&device, &queue, &graph, &s, &masks, maps_key, &base, &cache, &run, &p, &path);
             let _ = tx.send(r);
         });
         ls.job = Some(Job::Export(rx, progress));
@@ -822,8 +891,10 @@ impl crate::App {
                 ls.to_mesh = None;
             }
             match r {
-                Ok(Done::Values(v, states)) => {
+                Ok(Done::Values(v, states, layers)) => {
                     ls.values = Some(v);
+                    ls.layers = layers;
+                    ls.layers_rev += 1;
                     if states.values().any(|s| *s == crate::landscape_terrain::State::Ran) {
                         ls.status = "Erosion done".into();
                     }
@@ -880,7 +951,15 @@ impl crate::App {
             let progress = Progress::default();
             let p = progress.clone();
             std::thread::spawn(move || {
-                let r = terrain_evaluator(&device, &queue, &graph, &settings, &masks, maps_key, &base, &cache, &run, &p).map(|(ev, states)| Done::Values(sample(&ev, settings.resolution, &Progress::default()), states));
+                let r = terrain_parts(&device, &queue, &graph, &settings, &masks, maps_key, &base, &cache, &run, &p).and_then(|(ev, prepared)| {
+                    let values = sample(&ev, settings.resolution, &Progress::default());
+                    let layers = if crate::landscape_layers::has_layers(&prepared.graph) {
+                        Some(crate::landscape_layers::sample_layers(&device, &queue, &prepared, &settings, &base, settings.resolution, &Progress::default())?)
+                    } else {
+                        None
+                    };
+                    Ok(Done::Values(values, prepared.states, layers))
+                });
                 let _ = tx.send(r);
             });
             ls.job = Some(Job::Preview(rx, progress));
@@ -1093,19 +1172,23 @@ impl crate::App {
             }
             if let Some(values) = &ls.values {
                 let mut hasher = std::collections::hash_map::DefaultHasher::new();
-                (ls.sampled_key, settings.world_m.to_bits(), settings.height_m.to_bits(), settings.fit, settings.water_m.map(f32::to_bits)).hash(&mut hasher);
+                (ls.sampled_key, ls.layers_rev, settings.world_m.to_bits(), settings.height_m.to_bits(), settings.fit, settings.water_m.map(f32::to_bits)).hash(&mut hasher);
                 let grid_key = hasher.finish();
                 // The terrain (with its erosion, which is part of the graph), at most VIEW_SAMPLES a side: worked out
                 // (and uploaded to the GPU) once per terrain, not on every camera move.
                 if ls.view_grid.as_ref().is_none_or(|g| g.key != grid_key) {
                     let metres = to_metres(values, &settings);
                     let (grid, m) = shrink(&metres, side(metres.len()), VIEW_SAMPLES);
-                    ls.view_grid = Some(crate::landscape_gpu::Grid::new(grid_key, grid, m, settings.world_m, settings.water_m));
+                    let mut view_grid = crate::landscape_gpu::Grid::new(grid_key, grid, m, settings.world_m, settings.water_m);
+                    if let Some(layers) = ls.layers.as_ref().filter(|l| !l.is_empty()) {
+                        view_grid = view_grid.with_colours(resample_colours(&crate::landscape_layers::colours(layers), side(layers[0].weights.len()), m));
+                    }
+                    ls.view_grid = Some(view_grid);
                 }
                 let grid = ls.view_grid.as_ref().expect("just made");
                 // Drawn on the GPU at the panel's full resolution, straight into egui's pass for this rectangle.
                 let uniforms = crate::landscape_gpu::ViewUniforms::new(grid, settings.world_m, settings.water_m, new_view, rect.width() / rect.height().max(1.0), format.is_srgb(), crate::landscape_gpu::MIN_STEP_CELLS, true);
-                let callback = crate::landscape_gpu::ViewCallback { uniforms, key: grid.key, heights: grid.heights.clone(), n: grid.n, format };
+                let callback = crate::landscape_gpu::ViewCallback { uniforms, key: grid.key, heights: grid.heights.clone(), colours: grid.colours.clone(), n: grid.n, format };
                 ui.painter().add(eframe::egui_wgpu::Callback::new_paint_callback(rect, callback));
             } else {
                 ui.painter().rect_filled(rect, 0.0, egui::Color32::from_gray(30));
@@ -1122,6 +1205,53 @@ impl crate::App {
         let settled = !ui.input(|i| i.pointer.any_down());
         ls.history.commit(&ls.graph, settled);
     }
+}
+
+/// `noiser --preview P.landscape OUT.png`: the terrain (its Erosion nodes run) as a map from above and as a 3D view side
+/// by side, painted in the layers' colours when the graph has Layer nodes.
+pub fn preview_project(project: &Path, size: u32) -> Result<image::RgbImage, String> {
+    let text = std::fs::read_to_string(project).map_err(|e| format!("{}: {e}", project.display()))?;
+    let mut ls = LandscapeWorkspace::default();
+    ls.from_project(&text)?;
+    ls.path = Some(project.to_path_buf());
+    let (device, queue) = crate::meshgraph::headless_gpu()?;
+    let (s, base, masks) = (ls.settings.clone(), ls.base_dir(), ls.mask_map());
+    let run: std::collections::BTreeSet<_> = ls.graph.nodes.iter().filter(|(_, n)| matches!(n.kind, NodeKind::Erosion(_))).map(|(id, _)| *id).collect();
+    let progress = Progress::default();
+    let (ev, prepared) = terrain_parts(&device, &queue, &ls.graph, &s, &masks, ls.mask_rev, &base, &ls.erosion_cache, &run, &progress)?;
+    let n = s.resolution.max(2);
+    let metres = to_metres(&sample(&ev, n, &progress), &s);
+    let layers = if crate::landscape_layers::has_layers(&prepared.graph) { Some(crate::landscape_layers::sample_layers(&device, &queue, &prepared, &s, &base, n, &progress)?) } else { None };
+    let size = size.clamp(128, 2048);
+    // The 3D view at the size's height; the map beside it.
+    let (grid, m) = shrink(&metres, n, VIEW_SAMPLES);
+    let mut view_grid = crate::landscape_gpu::Grid::new(1, grid, m, s.world_m, s.water_m);
+    if let Some(layers) = layers.as_ref().filter(|l| !l.is_empty()) {
+        view_grid = view_grid.with_colours(resample_colours(&crate::landscape_layers::colours(layers), n, m));
+    }
+    let uniforms = crate::landscape_gpu::ViewUniforms::new(&view_grid, s.world_m, s.water_m, (0.8, 0.6, 1.0), 1.0, false, crate::landscape_gpu::MIN_STEP_CELLS, true);
+    let pixels = crate::landscape_gpu::render_image(&device, &queue, &view_grid, &uniforms, (size, size));
+    let map = hillshade(&metres, n, s.world_m, s.water_m);
+    let mut img = image::RgbImage::new(size * 2, size);
+    for (k, p) in pixels.iter().enumerate() {
+        img.put_pixel((k as u32) % size + size, (k as u32) / size, image::Rgb([p[0], p[1], p[2]]));
+    }
+    let tint = layers.as_ref().filter(|l| !l.is_empty()).map(|l| crate::landscape_layers::colours(l));
+    for y in 0..size {
+        for x in 0..size {
+            let (sx, sy) = ((x as usize * (n - 1)) / (size as usize - 1), (y as usize * (n - 1)) / (size as usize - 1));
+            let k = sy * n + sx;
+            let c = map.pixels[k];
+            let mut rgb = [c.r() as f32, c.g() as f32, c.b() as f32];
+            if let Some(t) = &tint {
+                // Hillshade brightness, layer colours as the hue.
+                let lum = (rgb[0] + rgb[1] + rgb[2]) / (3.0 * 190.0);
+                rgb = [t[k * 4] as f32 * lum, t[k * 4 + 1] as f32 * lum, t[k * 4 + 2] as f32 * lum];
+            }
+            img.put_pixel(x, y, image::Rgb(rgb.map(|v| v.clamp(0.0, 255.0) as u8)));
+        }
+    }
+    Ok(img)
 }
 
 /// Exports a landscape project's heightmap for Unreal without a window (`noiser --headless --landscape-export P.landscape
@@ -1149,9 +1279,7 @@ pub fn export_headless(project: &Path, out: &Path, erode: bool, log: &mut dyn Fn
         log(&format!("eroding on the {0} x {0} working grid ({1} Erosion node(s))", s.resolution, run.len()));
     }
     let progress = Progress::default();
-    let (ev, _) = terrain_evaluator(&device, &queue, &ls.graph, &s, &masks, ls.mask_rev, &base, &ls.erosion_cache, &run, &progress)?;
-    let metres = to_metres(&sample(&ev, UNREAL_RES, &progress), &s);
-    write_unreal(out, UNREAL_RES, s.world_m, &encode_unreal_with(&metres, s.water_m))
+    export_terrain(&device, &queue, &ls.graph, &s, &masks, ls.mask_rev, &base, &ls.erosion_cache, &run, &progress, out)
 }
 
 #[cfg(test)]

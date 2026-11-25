@@ -10,10 +10,12 @@ struct U {
     light: vec4f,    // w: steepest slope (metres up per metre across, with margin)
     range: vec4f,    // lowest and highest ground, water level (very low for none), 1 when the target is sRGB
     extra: vec4f,    // samples per side, box floor, box top, smallest step in cells
+    paint: vec4f,    // x: 1 when `colours` holds the paint layers' colours
 }
 
 @group(0) @binding(0) var<uniform> u: U;
 @group(0) @binding(1) var heights: texture_2d<f32>;
+@group(0) @binding(2) var colours: texture_2d<f32>;
 
 struct VsOut {
     @builtin(position) pos: vec4f,
@@ -111,6 +113,12 @@ fn fs(in: VsOut) -> @location(0) vec4f {
             let low = mix(green, rock, clamp((height - 0.25) * 3.0, 0.0, 1.0));
             var base = mix(low, snow, clamp((height - 0.78) * 8.0, 0.0, 1.0));
             base = mix(base, rock, clamp((1.0 - nrm.z) * 3.5 - 0.35, 0.0, 1.0) * (1.0 - clamp((height - 0.78) * 8.0, 0.0, 0.6)));
+            if (u.paint.x > 0.5) {
+                // The paint layers' colours (nearest cell), shaded like the ground.
+                let n = u.extra.x;
+                let ci = vec2i(i32(clamp(q.x / cell + 0.5, 0.0, n - 1.0)), i32(clamp(q.y / cell + 0.5, 0.0, n - 1.0)));
+                base = textureLoad(colours, ci, 0).rgb * 255.0;
+            }
             let shade = 0.25 + 0.85 * diffuse;
             if (ground(q.x, q.y) < level) { base = vec3f(45.0, 95.0, 165.0); }
             return to_target(min(base * shade, vec3f(255.0)) / 255.0);
