@@ -1,6 +1,7 @@
 ﻿// No console window behind the release build on Windows.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod agent_cli;
 mod backup;
 mod bluenoise;
 mod cache;
@@ -1698,6 +1699,9 @@ fn main() -> eframe::Result {
     // `--window 1600x1000` sets the window size (for screenshots).
     let args: Vec<String> = std::env::args().collect();
     let window = args.iter().position(|a| a == "--window").and_then(|i| args.get(i + 1)).and_then(|v| v.split_once('x')).and_then(|(w, h)| Some([w.parse::<f32>().ok()?, h.parse::<f32>().ok()?])).unwrap_or([1280.0, 800.0]);
+    if let Some(code) = agent_cli::try_run() {
+        std::process::exit(code);
+    }
     if let Some(code) = headless::try_run() {
         std::process::exit(code);
     }

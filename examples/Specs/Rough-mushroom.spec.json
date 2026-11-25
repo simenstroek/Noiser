@@ -1,0 +1,18 @@
+{
+  "about": "A .meshgraph from a spec: a Composer shape (../SDFs/Mushroom.sdf) roughened by a noise graph, remeshed to about 30000 triangles, unwrapped and written to out/mushroom_rough.obj. The field is the shape's signed distance plus the noise: Add. Build next to the SDFs/Noises folders (this file's folder works). Run it with: noiser --headless --mesh-graph out.meshgraph",
+  "nodes": {
+    "shape":  { "LoadSdf": { "file": "../SDFs/Mushroom.sdf" } },
+    "rough":  { "NoiseGraph": { "file": "../Noises/Cracked rock.noisegraph", "amplitude": 0.02, "frequency": 4.0 } },
+    "add":    { "Math": { "op": "Add" } },
+    "remesh": { "Remesh": { "triangles": 30000 } },
+    "uv":     "AutoUv",
+    "save":   { "OutMesh": { "folder": "out", "name": "mushroom_rough" } }
+  },
+  "edges": [
+    ["shape", "add", 0],
+    ["rough", "add", 1],
+    ["add", "remesh", 0],
+    ["remesh", "uv", 0],
+    ["uv", "save", 0]
+  ]
+}

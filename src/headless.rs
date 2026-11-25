@@ -451,7 +451,7 @@ impl Log {
 }
 
 /// The release build is a GUI-subsystem program with no console of its own; borrow the one it was started from.
-fn attach_console() {
+pub fn attach_console() {
     #[cfg(windows)]
     {
         unsafe extern "system" {

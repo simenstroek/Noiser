@@ -153,3 +153,9 @@ cargo test          # unit tests, plus GPU tests that skip when there is no adap
 - [`docs/pattern-nodes-plan.md`](docs/pattern-nodes-plan.md): the plan for more pattern nodes.
 
 Ideas: splines in the SDF Composer, colours in the Load SDF node and exported meshes, a Load Landscape node and adaptive terrain meshing, an Unreal import script, more pattern nodes, Linux and macOS builds.
+
+## For scripts and agents
+
+Everything runs from the command line without the app: `noiser --schema` (node kinds and settings), `--build spec.json out.meshgraph`
+(a graph from a short name-based spec), `--validate`, `--describe`, `--headless --mesh-graph` (run) and `--preview` (a PNG of a noise
+graph, `.sdf` or mesh). See [AGENTS.md](AGENTS.md), the specs in `examples/Specs/`, and the MCP server in `tools/mcp/`.

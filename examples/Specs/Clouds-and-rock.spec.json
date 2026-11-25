@@ -1,0 +1,14 @@
+{
+  "about": "A .noisegraph from a spec: fractal Perlin clouds multiplied into a cellular (Worley) pattern, scaled to the 0..1 range. Build it with: noiser --build Clouds-and-rock.spec.json out.noisegraph, then look with: noiser --preview out.noisegraph out.png",
+  "nodes": {
+    "clouds": { "Noise": { "kind": "Perlin", "scale": 3.0, "octaves": 5 } },
+    "cells":  { "Noise": { "kind": "Worley", "scale": 6.0 } },
+    "mix":    { "Math": { "op": "Multiply" } },
+    "out":    "OutDensity"
+  },
+  "edges": [
+    ["clouds", "mix", 0],
+    ["cells", "mix", 1],
+    ["mix", "out", 0]
+  ]
+}
