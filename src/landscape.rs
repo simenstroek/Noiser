@@ -449,6 +449,11 @@ fn resample_colours(rgba: &[u8], n: usize, m: usize) -> Vec<u8> {
     out
 }
 
+thread_local! {
+    /// The height setting in metres, for node panels that show what an image becomes (set each frame by the tab).
+    pub(crate) static HEIGHT_FOR_UI: std::cell::Cell<f32> = const { std::cell::Cell::new(400.0) };
+}
+
 /// What a finished job hands back.
 enum Done {
     /// The sampled values and how each Erosion node's result stood.
@@ -625,7 +630,7 @@ impl LandscapeWorkspace {
     fn key(&self) -> u64 {
         let s = &self.settings;
         let mut h = std::collections::hash_map::DefaultHasher::new();
-        (self.graph.to_json(), s.seed, s.resolution, self.mask_rev, &self.erosion_run).hash(&mut h);
+        (self.graph.to_json(), s.seed, s.resolution, self.mask_rev, &self.erosion_run, crate::landscape_heightmap::files_stamp(&self.graph, &self.base_dir())).hash(&mut h);
         if crate::landscape_terrain::has_erosion(&self.graph) {
             (s.world_m.to_bits(), s.height_m.to_bits()).hash(&mut h);
         }
@@ -1126,6 +1131,7 @@ impl crate::App {
             ui.separator();
             // The selected node's settings, as in the noise graph tab.
             let names = ls.graph.declared_names();
+            let base_for_ui = ls.base_dir();
             if let [id] = ls.editor.selected.iter().copied().collect::<Vec<_>>().as_slice()
                 && let Some(node) = ls.graph.nodes.get_mut(id) {
                 ui.heading(crate::editor::title(&node.kind));
@@ -1147,6 +1153,8 @@ impl crate::App {
                         ui.weak("Runs only when you press Run.");
                     }
                 }
+                HEIGHT_FOR_UI.with(|h| h.set(ls.settings.height_m));
+                crate::meshgraph_ui::set_base(base_for_ui.clone());
                 crate::node_props(ui, &mut node.kind, &mut node.pins, &names);
             }
         }));

@@ -28,6 +28,7 @@ mod landscape_field;
 mod landscape_gpu;
 mod landscape_terrain;
 mod landscape_layers;
+mod landscape_heightmap;
 mod terrain_maps;
 mod scatter;
 mod landscape_masks;

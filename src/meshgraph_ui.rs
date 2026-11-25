@@ -29,12 +29,12 @@ pub fn set_base(dir: std::path::PathBuf) {
     BASE.with(|b| *b.borrow_mut() = dir);
 }
 
-fn base() -> std::path::PathBuf {
+pub(crate) fn base() -> std::path::PathBuf {
     BASE.with(|b| b.borrow().clone())
 }
 
 /// A text field with a Browse button; `filter` is the file dialog's name and extensions, empty for a folder.
-fn path_row(ui: &mut egui::Ui, id: &str, path: &mut String, hint: &str, filter: Option<(&str, &[&str])>) {
+pub(crate) fn path_row(ui: &mut egui::Ui, id: &str, path: &mut String, hint: &str, filter: Option<(&str, &[&str])>) {
     ui.horizontal(|ui| {
         ui.add(egui::TextEdit::singleline(path).hint_text(hint).desired_width(150.0).id_salt(id));
         if ui.button("Browse…").clicked() {

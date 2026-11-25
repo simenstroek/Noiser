@@ -32,6 +32,7 @@ fn catalogue() -> Vec<(&'static str, NodeKind, &'static str)> {
         ("Radial", K::Radial(Default::default()), "Position in cylindrical or spherical coordinates. Input 0: position."),
         ("Mask", K::Mask { name: "mask".into() }, "Landscape tab: the terrain map `name` (a painted mask today; shown as Map in the app), 0..1, at the position. Input 0: position."),
         ("Slope", K::Slope { scale: 1.0 }, "The slope in degrees of the input field over x and y."),
+        ("Heightmap", K::Heightmap(Default::default()), "Landscape tab: an image (PNG or EXR) as terrain, read at the position (x and y across the terrain, 0 to 1), in the graph's units. A PNG the Landscape tab exported (with its .json beside it) returns in metres; another PNG is 0..1 of the height setting; `scale` and `offset` adjust it; relative paths are looked for next to the project. Shrunk to 2049 a side at most. Input 0: position."),
         ("Select", K::Select { lo: 0.0, hi: 1.0, soft: 0.1 }, "Landscape tab: 1 where input 0 lies between `lo` and `hi`, falling smoothly to 0 over `soft` beyond either end. Wire a height, a slope (degrees) or a map in; feeds a Layer."),
         ("Layer", K::Layer(Default::default()), "Landscape tab output: a paint layer named `name` (preview `color` as 0..1 RGB) whose weight is input 0 (0..1). Exports normalise all layers to sum to 1 per cell and write one 8-bit weightmap each."),
         ("Erosion", K::Erosion(Default::default()), "Landscape tab only: hydraulic and thermal erosion of input 0 (the height) on the terrain's working grid. Output 0: eroded height (input's units); 1: flow, 2: deposition, 3: wear (0..1). `auto` reruns it when the input changes."),
@@ -582,9 +583,9 @@ mod tests {
         }
         // Adding a NodeKind variant breaks this match until the catalogue lists it.
         let _ = |k: &NodeKind| match k {
-            NodeKind::Float(_) | NodeKind::Vec3(_) | NodeKind::Math { .. } | NodeKind::Remap { .. } | NodeKind::Separate | NodeKind::Combine { .. } | NodeKind::Random { .. } | NodeKind::Mix { .. } | NodeKind::Curve { .. } | NodeKind::Grid { .. } | NodeKind::Pattern(_) | NodeKind::Position { .. } | NodeKind::Radial(_) | NodeKind::Mask { .. } | NodeKind::Slope { .. } | NodeKind::Erosion(_) | NodeKind::Select { .. } | NodeKind::Layer(_) | NodeKind::Reroute | NodeKind::NamedReroute { .. } | NodeKind::NamedRerouteUse { .. } | NodeKind::Normal { .. } | NodeKind::Noise(_) | NodeKind::OutDensity | NodeKind::OutNormal | NodeKind::LoadMesh(_) | NodeKind::LoadSdf(_) | NodeKind::Scatter(_) | NodeKind::NoiseGraph(_) | NodeKind::Remesh { .. } | NodeKind::AutoUv(_) | NodeKind::Bake(_) | NodeKind::OutMesh(_) | NodeKind::OutImage(_) | NodeKind::TransferUv | NodeKind::ImageSplit | NodeKind::ImageCombine | NodeKind::ImageLevels { .. } => {}
+            NodeKind::Float(_) | NodeKind::Vec3(_) | NodeKind::Math { .. } | NodeKind::Remap { .. } | NodeKind::Separate | NodeKind::Combine { .. } | NodeKind::Random { .. } | NodeKind::Mix { .. } | NodeKind::Curve { .. } | NodeKind::Grid { .. } | NodeKind::Pattern(_) | NodeKind::Position { .. } | NodeKind::Radial(_) | NodeKind::Mask { .. } | NodeKind::Slope { .. } | NodeKind::Erosion(_) | NodeKind::Select { .. } | NodeKind::Layer(_) | NodeKind::Heightmap(_) | NodeKind::Reroute | NodeKind::NamedReroute { .. } | NodeKind::NamedRerouteUse { .. } | NodeKind::Normal { .. } | NodeKind::Noise(_) | NodeKind::OutDensity | NodeKind::OutNormal | NodeKind::LoadMesh(_) | NodeKind::LoadSdf(_) | NodeKind::Scatter(_) | NodeKind::NoiseGraph(_) | NodeKind::Remesh { .. } | NodeKind::AutoUv(_) | NodeKind::Bake(_) | NodeKind::OutMesh(_) | NodeKind::OutImage(_) | NodeKind::TransferUv | NodeKind::ImageSplit | NodeKind::ImageCombine | NodeKind::ImageLevels { .. } => {}
         };
-        assert_eq!(seen.len(), 38);
+        assert_eq!(seen.len(), 39);
     }
 
     #[test]

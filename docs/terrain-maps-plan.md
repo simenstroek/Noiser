@@ -103,3 +103,6 @@ Each phase is usable on its own and tested before the next.
   `noiser --build spec.json out.landscape` (with an optional `"settings"` object) and `--preview X.landscape OUT.png`
   (map and 3D view side by side) work from the command line. Weightmap import into Unreal is checked in the end-to-end
   run (UE 5.8 is at `C:\UnrealEngine\UE_5.8` on this machine, not `E:`).
+- **Phase 3:** done. *Heightmap* node (PNG exported by the tab with its sidecar returns in metres; other 8/16-bit PNGs
+  are 0..1 of the height; EXR as is; `scale`, `offset`; up to 2049 a side; relative to the project's folder). It is read
+  when the graph is prepared and becomes a Map (`heightmap#<id>#<hash>`), so erosion caches see a changed image.

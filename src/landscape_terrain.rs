@@ -92,6 +92,7 @@ pub fn prepare(
     let mut maps = maps.clone();
     let mut states = HashMap::new();
     let n = s.resolution.max(2);
+    lower_heightmaps(&mut g, &mut maps, base, s.height_m)?;
     loop {
         let erosion: Vec<NodeId> = g.nodes.iter().filter(|(_, node)| !node.muted && matches!(node.kind, NodeKind::Erosion(_))).map(|(id, _)| *id).collect();
         // The first whose input has no Erosion node of its own before it.
@@ -150,6 +151,22 @@ pub fn prepare(
         g.remove(id);
     }
     Ok(Prepared { graph: g, maps, states })
+}
+
+/// Heightmap nodes read their images and become Map nodes over them. The map's name carries a hash of what was read, so
+/// everything keyed by the graph (the cached erosion results) sees a changed image.
+fn lower_heightmaps(g: &mut Graph, maps: &mut TerrainMaps, base: &Path, height_m: f32) -> Result<(), String> {
+    let ids: Vec<NodeId> = g.nodes.iter().filter(|(_, n)| !n.muted && matches!(n.kind, NodeKind::Heightmap(_))).map(|(id, _)| *id).collect();
+    for id in ids {
+        let NodeKind::Heightmap(p) = g.nodes[&id].kind.clone() else { continue };
+        let loaded = crate::landscape_heightmap::load(&p, base, height_m).map_err(|e| format!("Heightmap node {id}: {e}"))?;
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        loaded.data.iter().for_each(|v| v.to_bits().hash(&mut h));
+        let name = format!("heightmap#{id}#{:x}", h.finish());
+        maps.insert(name.clone(), loaded.side, Arc::new(loaded.data), Source::Imported);
+        g.nodes.get_mut(&id).expect("listed").kind = NodeKind::Mask { name };
+    }
+    Ok(())
 }
 
 /// Samples what feeds an Erosion node onto the grid and erodes it.
@@ -249,5 +266,38 @@ mod tests {
         assert_eq!(prep(&gpu, &g, &cache, &BTreeSet::new()).states[&ero], State::OutOfDate, "never ran: out of date, maps are zero");
         assert_eq!(prep(&gpu, &g, &cache, &BTreeSet::from([ero])).states[&ero], State::Ran, "Run runs it");
         assert_eq!(prep(&gpu, &g, &cache, &BTreeSet::new()).states[&ero], State::Cached);
+    }
+
+    #[test]
+    fn a_heightmap_node_brings_an_exported_terrain_back() {
+        use crate::landscape_heightmap::HeightmapParams;
+        let Some(gpu) = gpu() else { return eprintln!("no GPU adapter; skipping") };
+        let s = Settings { resolution: 33, height_m: 400.0, ..Default::default() };
+        // A terrain whose height is x, from 0 to 0.5 of the height setting, written the way the export does it.
+        let units: Vec<f32> = (0..33 * 33).map(|k| (k % 33) as f32 / 32.0 * 0.5).collect();
+        let metres: Vec<f32> = units.iter().map(|u| u * s.height_m).collect();
+        let dir = std::env::temp_dir().join(format!("noiser_hm_node_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        crate::landscape::write_unreal(&dir.join("t.png"), 33, s.world_m, &crate::landscape::encode_unreal(&metres)).unwrap();
+        let mut g = Graph::default();
+        let pos = g.add(NodeKind::position(), [0.0; 2]);
+        let hm = g.add(NodeKind::Heightmap(HeightmapParams { file: "t.png".into(), ..Default::default() }), [0.0; 2]);
+        let out = g.add(NodeKind::OutDensity, [0.0; 2]);
+        g.connect(pos, hm, 0);
+        g.connect(hm, out, 0);
+        let prepared = prepare(&gpu.device, &gpu.queue, &g, &s, &TerrainMaps::default(), 0, &dir, &ErosionCache::default(), &BTreeSet::new(), &Default::default()).unwrap();
+        assert!(!prepared.graph.nodes.values().any(|n| matches!(n.kind, NodeKind::Heightmap(_))), "lowered to a map");
+        let ev = build_evaluator(&gpu.device, &gpu.queue, &prepared.graph, &s, &prepared.maps, &dir).unwrap();
+        let got = sample(&ev, 33, &Default::default());
+        let worst = got.iter().zip(&units).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
+        assert!(worst < 0.01, "worst difference {worst} units");
+        // A missing file is an error naming the node.
+        let mut bad = g.clone();
+        if let Some(NodeKind::Heightmap(p)) = bad.nodes.get_mut(&hm).map(|n| &mut n.kind) {
+            p.file = "gone.png".into();
+        }
+        let err = prepare(&gpu.device, &gpu.queue, &bad, &s, &TerrainMaps::default(), 0, &dir, &ErosionCache::default(), &BTreeSet::new(), &Default::default()).err().unwrap();
+        assert!(err.contains("Heightmap node"), "{err}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

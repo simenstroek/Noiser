@@ -358,6 +358,7 @@ pub(crate) fn node_props(ui: &mut egui::Ui, kind: &mut NodeKind, pins: &mut Vec<
             ui.weak("1 where the input is from..to, falling smoothly to 0 over the soft edge beyond either end. Heights are in the height setting's units (1 = the full height), slopes in degrees, maps 0 to 1.");
         }
         NodeKind::Layer(l) => crate::landscape_layers::node_ui(ui, l),
+        NodeKind::Heightmap(h) => crate::landscape_heightmap::node_ui(ui, h),
         NodeKind::Slope { .. } => _ = ui.weak("The slope of the input in degrees. In the Landscape tab one unit of the input is one height (the height setting), spread over the size setting; wire the terrain's height in."),
         NodeKind::Noise(n) => {
             let d = graph::NoiseParams::default();
