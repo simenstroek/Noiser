@@ -42,9 +42,9 @@ impl Default for Settings {
 }
 
 /// The names of the masks, for the Mask node's menu (set by the Landscape tab every frame).
-static MASK_NAMES: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+static MASK_NAMES: std::sync::Mutex<Vec<(String, crate::terrain_maps::Source)>> = std::sync::Mutex::new(Vec::new());
 
-pub fn mask_names() -> Vec<String> {
+pub fn mask_names() -> Vec<(String, crate::terrain_maps::Source)> {
     MASK_NAMES.lock().map(|n| n.clone()).unwrap_or_default()
 }
 
@@ -302,15 +302,16 @@ fn render_steps(metres: &[f32], n: usize, world_m: f32, water: Option<f32>, (yaw
     egui::ColorImage { size: [w, h], source_size: egui::vec2(w as f32, h as f32), pixels }
 }
 
-/// The evaluator for the terrain: Noise Graph nodes inlined, the slope scale set from the size and height, the masks in.
-pub(crate) fn build_evaluator(device: &eframe::wgpu::Device, queue: &eframe::wgpu::Queue, graph: &Graph, s: &Settings, masks: &std::collections::BTreeMap<String, Vec<f32>>, base: &Path) -> Result<Evaluator, String> {
+/// The evaluator for the terrain: Noise Graph nodes inlined, the slope scale set from the size and height, the terrain
+/// maps in.
+pub(crate) fn build_evaluator(device: &eframe::wgpu::Device, queue: &eframe::wgpu::Queue, graph: &Graph, s: &Settings, masks: &crate::terrain_maps::TerrainMaps, base: &Path) -> Result<Evaluator, String> {
     let mut g = crate::meshgraph::lowered_mesh(graph, base)?;
     for n in g.nodes.values_mut() {
         if let NodeKind::Slope { scale } = &mut n.kind {
             *scale = s.height_m / s.world_m.max(1.0);
         }
     }
-    Evaluator::with_masks(device, queue, &g, s.seed, masks)
+    Evaluator::with_maps(device, queue, &g, s.seed, masks)
 }
 
 /// The map: the terrain from above, lit from the north-west (`m` x `m` metres, `world_m` across).
@@ -516,8 +517,13 @@ impl LandscapeWorkspace {
         Ok(())
     }
 
-    fn mask_map(&self) -> std::collections::BTreeMap<String, Vec<f32>> {
-        self.masks.iter().map(|m| (m.name.clone(), m.data.clone())).collect()
+    /// The terrain maps the graph can read: the painted masks (and, as later phases add them, the other maps).
+    fn mask_map(&self) -> crate::terrain_maps::TerrainMaps {
+        let mut maps = crate::terrain_maps::TerrainMaps::default();
+        for m in &self.masks {
+            maps.insert(m.name.clone(), crate::codegen::MASK_RES, std::sync::Arc::new(m.data.clone()), crate::terrain_maps::Source::Painted);
+        }
+        maps
     }
 
     /// Where a Noise Graph node's relative file names are looked for: the project's folder.
@@ -836,7 +842,7 @@ impl crate::App {
         }
         let ls = &mut self.landscape;
         if let Ok(mut names) = MASK_NAMES.lock() {
-            *names = ls.masks.iter().map(|m| m.name.clone()).collect();
+            *names = ls.masks.iter().map(|m| (m.name.clone(), crate::terrain_maps::Source::Painted)).collect();
         }
         ls.editor.landscape_mode = true;
         // Sample the preview again when the graph, the seed or a mask changed and nothing else is running.

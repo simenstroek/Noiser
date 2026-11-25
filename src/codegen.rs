@@ -40,14 +40,16 @@ pub struct Compiled {
     pub params: Vec<f32>,
     /// The loaded-mesh nodes (mesh graph), in the order of the `mesh_dist_0`, `mesh_dist_1`... functions they call.
     pub mesh_slots: Vec<NodeId>,
-    /// The painted masks the graph reads (Landscape tab), in index order: mask `i` is `MASK_RES` x `MASK_RES` values
-    /// stored in the parameter buffer from `MASK_BASE + i * MASK_RES^2` on.
+    /// The terrain maps the graph's Map (Mask) nodes read, by name, sorted (see `terrain_maps`).
     pub masks: Vec<String>,
+    /// Where each Map node's two parameters sit in `params`, and the map it reads: the evaluator writes the map's
+    /// offset (in units of `terrain_maps::ALIGN` from `MASK_BASE`) and side there once the maps are packed.
+    pub map_params: Vec<(usize, String)>,
 }
 
-/// Samples along a painted mask's side.
+/// Samples along a painted mask's side (other terrain maps have sides of their own).
 pub const MASK_RES: usize = 1024;
-/// Where the mask data starts in the parameter buffer (the same number as `MASK_BASE` in noise.wgsl).
+/// Where the terrain maps start in the parameter buffer (the same number as `MASK_BASE` in noise.wgsl).
 pub const MASK_BASE: usize = 1 << 20;
 
 /// The distinct names of the graph's Mask nodes, sorted.
@@ -123,6 +125,7 @@ fn compile_inner(g: &Graph, caches: &BTreeMap<NodeId, u32>, eps: f32, preview: b
     let mut slots = BTreeMap::new();
     let mut params = Vec::new();
     let mask_names = mask_names(g);
+    let mut map_params = Vec::new();
     for (&id, n) in &g.nodes {
         slots.insert(id, params.len());
         match &n.kind {
@@ -144,7 +147,11 @@ fn compile_inner(g: &Graph, caches: &BTreeMap<NodeId, u32>, eps: f32, preview: b
             NodeKind::Combine { vals } => params.extend(vals),
             NodeKind::Position { scale } => params.extend(scale),
             NodeKind::Random { vals, seed } => params.extend([vals[0], vals[1], seed.map_or(-1.0, |s| s as f32)]),
-            NodeKind::Mask { name } => params.extend([mask_names.iter().position(|n| n == name).unwrap_or(0) as f32, MASK_RES as f32]),
+            NodeKind::Mask { name } => {
+                // Filled in by the evaluator: the map's offset and side.
+                map_params.push((params.len(), name.clone()));
+                params.extend([0.0, 2.0]);
+            }
             NodeKind::Slope { scale } => params.push(*scale),
             NodeKind::Radial(r) => {
                 params.push(if r.mode == crate::graph::RadialMode::Spherical { 1.0 } else { 0.0 });
@@ -288,7 +295,7 @@ fn sdf{id}_top(q: vec2f, off: vec3f, s: f32, c: vec3f, zhi: f32, zlo: f32) -> f3
         }
     }
     wgsl += &cg.out;
-    Ok(Compiled { wgsl, params, mesh_slots, masks: mask_names })
+    Ok(Compiled { wgsl, params, mesh_slots, masks: mask_names, map_params })
 }
 
 /// Body of a function returning the normalized tetrahedral gradient (IQ) of the float field `sample(q)`.
@@ -559,7 +566,7 @@ impl Gen<'_> {
             }
             NodeKind::Mask { .. } => {
                 let q = self.operand(id, 0, Ty::V, "p");
-                (Ty::F, format!("painted_mask(P[{s}], P[{}], {q})", s + 1))
+                (Ty::F, format!("terrain_map(P[{s}], P[{}], {q})", s + 1))
             }
             NodeKind::Slope { .. } => match self.g.input_from(id, 0) {
                 Some((src, from_port)) => {

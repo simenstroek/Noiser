@@ -214,6 +214,33 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
 }
 ";
 
+/// The compiled graph's parameters with the terrain maps its Map nodes read packed in from `codegen::MASK_BASE` on,
+/// and each Map node's offset and side written into its parameters. An error, saying what to shrink, when it all would
+/// not fit in one storage binding of `limit` bytes.
+pub fn map_params(c: &codegen::Compiled, maps: &crate::terrain_maps::TerrainMaps, limit: u64) -> Result<Vec<f32>, String> {
+    let mut params = c.params.clone();
+    if c.map_params.is_empty() {
+        return Ok(params);
+    }
+    let packed = maps.pack(&c.masks);
+    let bytes = ((codegen::MASK_BASE + packed.data.len()) * 4) as u64;
+    if bytes > limit {
+        return Err(format!(
+            "the terrain maps this graph reads need {} MB, more than the GPU allows in one buffer ({} MB): use fewer or smaller maps",
+            bytes / (1 << 20),
+            limit / (1 << 20)
+        ));
+    }
+    for (at, name) in &c.map_params {
+        let (offset, side) = packed.slots[name];
+        params[*at] = offset;
+        params[*at + 1] = side;
+    }
+    params.resize(codegen::MASK_BASE, 0.0);
+    params.extend_from_slice(&packed.data);
+    Ok(params)
+}
+
 /// Evaluates a graph's outputs on boxes of the N³ grid.
 pub struct Evaluator {
     device: wgpu::Device,
@@ -227,24 +254,15 @@ pub struct Evaluator {
 
 impl Evaluator {
     pub fn new(device: &wgpu::Device, queue: &wgpu::Queue, graph: &Graph, seed: u32) -> Result<Self, String> {
-        Self::with_masks(device, queue, graph, seed, &Default::default())
+        Self::with_maps(device, queue, graph, seed, &Default::default())
     }
 
-    /// `new` with the painted masks the graph's Mask nodes read, by name (each `codegen::MASK_RES` squared values;
-    /// a missing mask reads 0). They sit in the parameter buffer from `codegen::MASK_BASE` on.
-    pub fn with_masks(device: &wgpu::Device, queue: &wgpu::Queue, graph: &Graph, seed: u32, masks: &std::collections::BTreeMap<String, Vec<f32>>) -> Result<Self, String> {
+    /// `new` with the terrain maps the graph's Map (Mask) nodes read, by name (a missing map reads 0). They sit in the
+    /// parameter buffer from `codegen::MASK_BASE` on, each at its own offset with its own side.
+    pub fn with_maps(device: &wgpu::Device, queue: &wgpu::Queue, graph: &Graph, seed: u32, maps: &crate::terrain_maps::TerrainMaps) -> Result<Self, String> {
         use wgpu::util::DeviceExt;
         let c = codegen::compile(graph)?;
-        let mut params = c.params.clone();
-        if !c.masks.is_empty() {
-            params.resize(codegen::MASK_BASE, 0.0);
-            for name in &c.masks {
-                match masks.get(name) {
-                    Some(m) if m.len() == codegen::MASK_RES * codegen::MASK_RES => params.extend_from_slice(m),
-                    _ => params.resize(params.len() + codegen::MASK_RES * codegen::MASK_RES, 0.0),
-                }
-            }
-        }
+        let params = map_params(&c, maps, device.limits().max_storage_buffer_binding_size as u64)?;
         let src = format!("{NOISE_LIB}\n{}\n{EVAL_BINDINGS}\n{EXPORT_WGSL}", c.wgsl);
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("export"), source: wgpu::ShaderSource::Wgsl(src.into()) });
         // Explicit layout: an automatic one would drop bindings that this graph doesn't use.

@@ -2935,8 +2935,8 @@ fn mask_and_slope_nodes() {
     g.connect(pos, mask, 0);
     g.connect(mask, out, 0);
     let data: Vec<f32> = (0..MASK_RES * MASK_RES).map(|k| if (k % MASK_RES) < MASK_RES / 2 { 1.0 } else { 0.0 }).collect();
-    let masks = std::collections::BTreeMap::from([("cliffs".to_string(), data)]);
-    let ev = crate::export::Evaluator::with_masks(&gpu.device, &gpu.queue, &g, 0, &masks).unwrap();
+    let masks = crate::terrain_maps::TerrainMaps::painted(&std::collections::BTreeMap::from([("cliffs".to_string(), data)]), MASK_RES);
+    let ev = crate::export::Evaluator::with_maps(&gpu.device, &gpu.queue, &g, 0, &masks).unwrap();
     let v = ev.eval_points(&[[0.1, 0.5, 0.0], [0.9, 0.5, 0.0], [0.25, 0.9, 0.0]]);
     near(v[0], 1.0, "inside the painted half");
     near(v[1], 0.0, "outside it");
@@ -2944,6 +2944,23 @@ fn mask_and_slope_nodes() {
     // An unknown mask name reads 0 and a graph without masks is unaffected.
     let none = crate::export::Evaluator::new(&gpu.device, &gpu.queue, &g, 0).unwrap();
     near(none.eval_points(&[[0.1, 0.5, 0.0]])[0], 0.0, "no data, no mask");
+
+    // Maps of different sides in one graph: a 1024 mask plus a 5 x 5 map that rises along y (0 to 1). Each is read at
+    // its own offset with its own side.
+    let ramp = g.add(NodeKind::Mask { name: "ramp".into() }, [0.0; 2]);
+    let sum = g.add(NodeKind::Math { op: crate::graph::MathOp::Add, a: 0.0, b: 0.0, c: 0.0 }, [0.0; 2]);
+    g.connect(pos, ramp, 0);
+    g.connect(mask, sum, 0);
+    g.connect(ramp, sum, 1);
+    g.connect(sum, out, 0);
+    let mut maps = masks.clone();
+    maps.insert("ramp", 5, std::sync::Arc::new((0..25).map(|k| (k / 5) as f32 / 4.0).collect()), crate::terrain_maps::Source::Erosion);
+    let ev = crate::export::Evaluator::with_maps(&gpu.device, &gpu.queue, &g, 0, &maps).unwrap();
+    let v = ev.eval_points(&[[0.1, 0.0, 0.0], [0.9, 0.5, 0.0], [0.9, 1.0, 0.0], [0.1, 0.25, 0.0]]);
+    near(v[0], 1.0, "painted half, bottom of the ramp");
+    near(v[1], 0.5, "unpainted, half way up");
+    near(v[2], 1.0, "unpainted, top");
+    near(v[3], 1.25, "painted, a quarter up");
 
     // Slope: a field that rises by 1 across the tile (x), with scale 0.2 (a height of a fifth of the size): atan(0.2).
     let mut g = Graph::default();
@@ -2981,7 +2998,7 @@ fn the_landscape_binds_the_slope_scale_and_the_masks() {
     let s = crate::landscape::Settings { world_m: 2000.0, height_m: 400.0, ..Default::default() };
     let n = crate::codegen::MASK_RES;
     let painted: Vec<f32> = (0..n * n).map(|k| if (k / n) < n / 2 { 1.0 } else { 0.0 }).collect();
-    let ev = crate::landscape::build_evaluator(&gpu.device, &gpu.queue, &g, &s, &std::collections::BTreeMap::from([("m".to_string(), painted)]), std::path::Path::new(".")).unwrap();
+    let ev = crate::landscape::build_evaluator(&gpu.device, &gpu.queue, &g, &s, &crate::terrain_maps::TerrainMaps::painted(&std::collections::BTreeMap::from([("m".to_string(), painted)]), n), std::path::Path::new(".")).unwrap();
     let v = ev.eval_points(&[[0.5, 0.25, 0.0], [0.5, 0.75, 0.0]]);
     let expect = (400.0f32 / 2000.0).atan().to_degrees();
     assert!((v[0] - expect).abs() < 0.05, "painted: {} vs {expect}", v[0]);

@@ -156,7 +156,7 @@ pub fn title(kind: &NodeKind) -> String {
         NodeKind::NamedReroute { name } => format!("{name}  (reroute)"),
         NodeKind::NamedRerouteUse { name } => name.clone(),
         NodeKind::Normal { .. } => "Normal".into(),
-        NodeKind::Mask { name } => if name.is_empty() { "Mask".into() } else { format!("Mask: {name}") },
+        NodeKind::Mask { name } => if name.is_empty() { "Map".into() } else { format!("Map: {name}") },
         NodeKind::Slope { .. } => "Slope".into(),
         NodeKind::Noise(n) => n.kind.name().into(),
         NodeKind::OutDensity => "Density Output".into(),
@@ -279,7 +279,7 @@ fn palette() -> Vec<(&'static str, NodeKind)> {
     let mut all = noise_palette();
     if LANDSCAPE_MODE.load(std::sync::atomic::Ordering::Relaxed) {
         all.extend([
-            ("Mask", NodeKind::Mask { name: String::new() }),
+            ("Map", NodeKind::Mask { name: String::new() }),
             ("Slope", NodeKind::Slope { scale: 1.0 }),
             ("Noise Graph", NodeKind::NoiseGraph(Default::default())),
         ]);

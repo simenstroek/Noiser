@@ -26,6 +26,7 @@ mod meshworkspace;
 mod landscape;
 mod landscape_field;
 mod landscape_gpu;
+mod terrain_maps;
 mod scatter;
 mod landscape_masks;
 mod landscape_erosion;

@@ -30,7 +30,7 @@ fn catalogue() -> Vec<(&'static str, NodeKind, &'static str)> {
         ("Pattern", K::Pattern(Default::default()), "A regular pattern (bricks, honeycomb, gyroid, ...); `kind` is a PatternKind value. Input 0: position."),
         ("Position", K::position(), "The world position, each axis multiplied by inputs X, Y, Z (default 1). Feed it to other nodes' position input."),
         ("Radial", K::Radial(Default::default()), "Position in cylindrical or spherical coordinates. Input 0: position."),
-        ("Mask", K::Mask { name: "mask".into() }, "Landscape tab: the painted mask `name` (0..1) at the position. Input 0: position."),
+        ("Mask", K::Mask { name: "mask".into() }, "Landscape tab: the terrain map `name` (a painted mask today; shown as Map in the app), 0..1, at the position. Input 0: position."),
         ("Slope", K::Slope { scale: 1.0 }, "The slope in degrees of the input field over x and y."),
         ("Reroute", K::Reroute, "A waypoint on a wire; passes its input on."),
         ("NamedReroute", K::NamedReroute { name: "name".into() }, "The named end of a wire; read it with NamedRerouteUse."),

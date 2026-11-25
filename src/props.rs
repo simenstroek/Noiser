@@ -329,13 +329,26 @@ pub(crate) fn node_props(ui: &mut egui::Ui, kind: &mut NodeKind, pins: &mut Vec<
         }
         NodeKind::Normal { flip } => row(ui, flip, false, |ui, f| _ = ui.checkbox(f, "flip")),
         NodeKind::Mask { name } => {
+            // The terrain maps, grouped by where they come from (painted masks today; imports, stamps, erosion and
+            // layers as they arrive).
             let names = crate::landscape::mask_names();
-            egui::ComboBox::from_label("mask").selected_text(if name.is_empty() { "(none)" } else { name.as_str() }).show_ui(ui, |ui| {
-                for n in &names {
+            egui::ComboBox::from_label("map").selected_text(if name.is_empty() { "(none)" } else { name.as_str() }).show_ui(ui, |ui| {
+                let mut group = None;
+                for (n, source) in &names {
+                    if group != Some(*source) {
+                        if group.is_some() {
+                            ui.separator();
+                        }
+                        ui.weak(source.label());
+                        group = Some(*source);
+                    }
                     ui.selectable_value(name, n.clone(), n);
                 }
+                if names.is_empty() {
+                    ui.weak("No maps yet: paint a mask in the Landscape tab");
+                }
             });
-            ui.weak("The mask painted in the Landscape tab, 0 to 1. Its input is the position (x and y across the terrain); without one it is the world position.");
+            ui.weak("A terrain map from the Landscape tab (a painted mask, for now), 0 to 1. Its input is the position (x and y across the terrain); without one it is the world position.");
         }
         NodeKind::Slope { .. } => _ = ui.weak("The slope of the input in degrees. In the Landscape tab one unit of the input is one height (the height setting), spread over the size setting; wire the terrain's height in."),
         NodeKind::Noise(n) => {

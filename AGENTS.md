@@ -59,8 +59,11 @@ level (chunks, material, lights, water). `tools/demo/run_eiffel.sh` does all of 
 
 ## Working on the code
 
-`cargo build --release` writes `target/release/noiser.exe` (one build folder, one exe). Run only the tests for the area you
-changed (`cargo test --release agent_cli`, `cargo test --release landscape`); GPU tests need an adapter. Node kinds live in
+`cargo build --release` writes `target/release/noiser.exe` (one build folder, one exe). **Do not run the whole test suite**
+(`cargo test --release` with no filter): it takes several minutes at best and has run past 20; it is not needed to check a
+change. Run only the tests for the area you changed, by name filter (`cargo test --release agent_cli`,
+`cargo test --release landscape`, `cargo test --release gpu_terrain`); GPU tests need an adapter. Known failure, not yet
+fixed: `gpu_tests::radial_positions_and_displacement_outputs`. Node kinds live in
 `src/graph.rs` (`NodeKind`); adding one means adding it to `catalogue()` in `src/agent_cli.rs` too (a test fails until you do).
 `PLAN.md` and `docs/` hold the design notes; `docs/noiser-format.md` is the `.noiser` math-function format.
 

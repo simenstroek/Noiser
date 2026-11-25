@@ -10,11 +10,15 @@ fn safe_normalize(v: vec3f) -> vec3f { return v / max(length(v), 1e-12); }
 // The slope in degrees of a field with gradient g (over x and y), for a height of `k` per unit of the field.
 fn slope_degrees(g: vec2f, k: f32) -> f32 { return degrees(atan(k * length(g))); }
 
-// A painted mask (the Landscape tab): mask `index` is res x res values in P from MASK_BASE on; q.xy across the terrain.
+// A terrain map (the Landscape tab: painted masks and the other maps, see terrain_maps.rs): `side` x `side` values in P
+// starting `offset` x 256 floats after MASK_BASE (offsets are in those units so f32 holds them exactly); q.xy across the
+// terrain, 0 to 1. Bilinear.
 const MASK_BASE: u32 = 1048576u;
-fn painted_mask(index: f32, res: f32, q: vec3f) -> f32 {
+const MAP_ALIGN: u32 = 256u;
+fn terrain_map(offset: f32, side: f32, q: vec3f) -> f32 {
+    let res = max(side, 2.0);
     let n = u32(res);
-    let base = MASK_BASE + u32(index) * n * n;
+    let base = MASK_BASE + u32(offset) * MAP_ALIGN;
     let g = clamp(q.xy, vec2f(0.0), vec2f(1.0)) * (res - 1.0);
     let i = min(vec2u(floor(g)), vec2u(n - 2u, n - 2u));
     let f = g - vec2f(i);
