@@ -270,6 +270,11 @@ struct P { n: u32, pad: u32, dx: f32, dt: f32, g: f32, rain: f32, kc: f32, ks: f
 @group(0) @binding(5) var<storage, read_write> db: array<f32>;
 @group(0) @binding(6) var<storage, read_write> flux: array<vec4f>;
 @group(0) @binding(7) var<storage, read_write> vel: array<vec2f>;
+// The diagonal pipes: outflows towards (-1,-1), (+1,-1), (-1,+1) and (+1,+1). With them water spreads about equally in
+// every direction: four pipes alone cut straight, axis-aligned gullies.
+@group(0) @binding(8) var<storage, read_write> flux2: array<vec4f>;
+
+const DIAG: f32 = 0.70710678;
 
 fn cell(x: i32, y: i32) -> u32 {
     return u32(clamp(y, 0, i32(p.n) - 1)) * p.n + u32(clamp(x, 0, i32(p.n) - 1));
@@ -288,10 +293,17 @@ fn flux_pass(@builtin(global_invocation_id) id: vec3u) {
     let r = max(0.0, f.y * p.damp + k * (h - (b[cell(x + 1, y)] + d[cell(x + 1, y)])));
     let t = max(0.0, f.z * p.damp + k * (h - (b[cell(x, y - 1)] + d[cell(x, y - 1)])));
     let u = max(0.0, f.w * p.damp + k * (h - (b[cell(x, y + 1)] + d[cell(x, y + 1)])));
-    let total = l + r + t + u;
+    let k2 = k * DIAG;
+    let f2 = flux2[i];
+    let tl = max(0.0, f2.x * p.damp + k2 * (h - (b[cell(x - 1, y - 1)] + d[cell(x - 1, y - 1)])));
+    let tr = max(0.0, f2.y * p.damp + k2 * (h - (b[cell(x + 1, y - 1)] + d[cell(x + 1, y - 1)])));
+    let bl = max(0.0, f2.z * p.damp + k2 * (h - (b[cell(x - 1, y + 1)] + d[cell(x - 1, y + 1)])));
+    let br = max(0.0, f2.w * p.damp + k2 * (h - (b[cell(x + 1, y + 1)] + d[cell(x + 1, y + 1)])));
+    let total = l + r + t + u + tl + tr + bl + br;
     // A cell cannot send out more water than it has.
     let scale = select(1.0, min(1.0, d[i] * p.dx * p.dx / (total * p.dt)), total > 0.0);
     flux[i] = vec4f(l, r, t, u) * scale;
+    flux2[i] = vec4f(tl, tr, bl, br) * scale;
 }
 
 // New water depth from the flows in and out, and the water's velocity.
@@ -310,10 +322,19 @@ fn water_pass(@builtin(global_invocation_id) id: vec3u) {
     let out_l = select(f.x, 0.0, edge_l); let out_r = select(f.y, 0.0, edge_r);
     let out_t = select(f.z, 0.0, edge_t); let out_b = select(f.w, 0.0, edge_b);
     let old = d[i];
-    let now = max(0.0, old + p.dt * (in_l + in_r + in_t + in_b - out_l - out_r - out_t - out_b) / (p.dx * p.dx));
+    // The diagonals: out of the cell towards a corner that exists, and in from the corner cells.
+    let ok_l = x > 0; let ok_r = x < i32(p.n) - 1; let ok_t = y > 0; let ok_b = y < i32(p.n) - 1;
+    let g2 = flux2[i];
+    let o_tl = select(0.0, g2.x, ok_l && ok_t); let o_tr = select(0.0, g2.y, ok_r && ok_t);
+    let o_bl = select(0.0, g2.z, ok_l && ok_b); let o_br = select(0.0, g2.w, ok_r && ok_b);
+    let i_tl = select(0.0, flux2[cell(x - 1, y - 1)].w, ok_l && ok_t); let i_tr = select(0.0, flux2[cell(x + 1, y - 1)].z, ok_r && ok_t);
+    let i_bl = select(0.0, flux2[cell(x - 1, y + 1)].y, ok_l && ok_b); let i_br = select(0.0, flux2[cell(x + 1, y + 1)].x, ok_r && ok_b);
+    let now = max(0.0, old + p.dt * (in_l + in_r + in_t + in_b - out_l - out_r - out_t - out_b + i_tl + i_tr + i_bl + i_br - o_tl - o_tr - o_bl - o_br) / (p.dx * p.dx));
     d[i] = now;
     let mean = max(0.5 * (old + now), 0.02);
-    var v = vec2f(0.5 * (in_l - out_l + out_r - in_r), 0.5 * (in_t - out_t + out_b - in_b)) / (p.dx * mean);
+    let vx = 0.5 * (in_l - out_l + out_r - in_r) + 0.5 * DIAG * (o_tr + o_br - o_tl - o_bl + i_tl + i_bl - i_tr - i_br);
+    let vy = 0.5 * (in_t - out_t + out_b - in_b) + 0.5 * DIAG * (o_bl + o_br - o_tl - o_tr + i_tl + i_tr - i_bl - i_br);
+    var v = vec2f(vx, vy) / (p.dx * mean);
     // Water never moves a whole cell or more in one step (the sediment would skip cells and be lost), nor faster than a torrent.
     let vmax = min(0.9 * p.dx / p.dt, 5.0);
     let speed = length(v);
@@ -442,8 +463,8 @@ pub fn erode(device: &wgpu::Device, queue: &wgpu::Queue, heights: &[f32], n: usi
     let storage = wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST;
     let buffer = |per_cell: u64| device.create_buffer(&wgpu::BufferDescriptor { label: None, size: cells * per_cell * 4, usage: storage, mapped_at_creation: false });
     let b = device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: None, contents: bytemuck::cast_slice(heights), usage: storage });
-    let (d, s, s_mid, db, flux, vel) = (buffer(1), buffer(1), buffer(1), buffer(1), buffer(4), buffer(2));
-    for buf in [&d, &s, &s_mid, &db, &flux, &vel] {
+    let (d, s, s_mid, db, flux, vel, flux2) = (buffer(1), buffer(1), buffer(1), buffer(1), buffer(4), buffer(2), buffer(4));
+    for buf in [&d, &s, &s_mid, &db, &flux, &vel, &flux2] {
         queue.write_buffer(buf, 0, &vec![0u8; (buf.size()) as usize]);
     }
     let base = Params {
@@ -471,13 +492,13 @@ pub fn erode(device: &wgpu::Device, queue: &wgpu::Queue, heights: &[f32], n: usi
     let module = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("erosion"), source: wgpu::ShaderSource::Wgsl(SHADER.into()) });
     let storage_entry = |binding| wgpu::BindGroupLayoutEntry { binding, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: None }, count: None };
     let mut entries = vec![wgpu::BindGroupLayoutEntry { binding: 0, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None }, count: None }];
-    entries.extend((1..8).map(storage_entry));
+    entries.extend((1..9).map(storage_entry));
     let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: None, entries: &entries });
     let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: None, bind_group_layouts: &[Some(&bgl)], immediate_size: 0 });
     let pipeline = |entry: &str| device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor { label: Some(entry), layout: Some(&layout), module: &module, entry_point: Some(entry), compilation_options: Default::default(), cache: None });
     let (flux_pass, water_pass, erode_pass, transport_pass, thermal_calc, thermal_apply, finish) = (pipeline("flux_pass"), pipeline("water_pass"), pipeline("erode_pass"), pipeline("transport_pass"), pipeline("thermal_calc"), pipeline("thermal_apply"), pipeline("finish"));
     let bind = |u: &wgpu::Buffer| {
-        let bufs = [u, &b, &d, &s, &s_mid, &db, &flux, &vel];
+        let bufs = [u, &b, &d, &s, &s_mid, &db, &flux, &vel, &flux2];
         let entries: Vec<wgpu::BindGroupEntry> = bufs.iter().enumerate().map(|(k, buf)| wgpu::BindGroupEntry { binding: k as u32, resource: buf.as_entire_binding() }).collect();
         device.create_bind_group(&wgpu::BindGroupDescriptor { label: None, layout: &bgl, entries: &entries })
     };
