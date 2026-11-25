@@ -16,10 +16,33 @@ use eframe::wgpu;
 use std::sync::atomic::Ordering;
 use wgpu::util::DeviceExt;
 
+/// Which kind of erosion a node does.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum ErosionKind {
+    /// Rain, flowing water and the sediment it carries, then thermal slides (`landscape_erosion`).
+    #[default]
+    Water,
+    /// Saltation by wind: windward faces wear, dunes build in the lee (`landscape_wind`).
+    Wind,
+}
+
 /// The settings of an Erosion node (Landscape graph). The grid it erodes on is the terrain's working resolution.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct Erosion {
+    pub kind: ErosionKind,
+    /// Wind: the direction it blows towards, degrees counter-clockwise from the +x side (east) of the terrain.
+    pub wind_deg: f32,
+    /// Wind iterations (each lifts, carries one hop and settles); thermal iterations follow.
+    pub wind_iterations: u32,
+    /// Wind: metres lifted per iteration from ground the wind reaches.
+    pub wind_lift: f32,
+    /// Wind: how far material hops each iteration, in metres.
+    pub wind_hop_m: f32,
+    /// Wind: the angle of the shadow behind higher ground, in degrees: material settles in it.
+    pub wind_shadow_deg: f32,
+    /// Wind: the share of airborne material that settles per hop on open ground, 0 to 1.
+    pub wind_deposit: f32,
     /// Hydraulic iterations (a fifth more follow with no rain so the sediment settles).
     pub iterations: u32,
     /// Rain in metres of water per second (each iteration is a fixed time step).
@@ -44,7 +67,7 @@ pub struct Erosion {
 
 impl Default for Erosion {
     fn default() -> Self {
-        Erosion { iterations: 1000, rain: 0.04, capacity: 0.05, dissolve: 0.05, deposit: 0.05, evaporation: 0.05, thermal_iterations: 20, talus_deg: 35.0, auto: true, preset: String::new() }
+        Erosion { kind: ErosionKind::Water, wind_deg: 0.0, wind_iterations: 150, wind_lift: 0.04, wind_hop_m: 24.0, wind_shadow_deg: 12.0, wind_deposit: 0.15, iterations: 1000, rain: 0.04, capacity: 0.05, dissolve: 0.05, deposit: 0.05, evaporation: 0.05, thermal_iterations: 20, talus_deg: 35.0, auto: true, preset: String::new() }
     }
 }
 
@@ -159,7 +182,23 @@ pub fn node_ui(ui: &mut eframe::egui::Ui, e: &mut Erosion) {
             *e = e.reset();
         }
     });
+    crate::row(ui, &mut e.kind, d.kind, |ui, v| {
+        egui::ComboBox::from_id_salt("erosion kind").selected_text(match v { ErosionKind::Water => "Water", ErosionKind::Wind => "Wind" }).show_ui(ui, |ui| {
+            ui.selectable_value(v, ErosionKind::Water, "Water: rain, rivers and slides");
+            ui.selectable_value(v, ErosionKind::Wind, "Wind: dunes and wear");
+        });
+    });
     ui.checkbox(&mut e.auto, "run by itself").on_hover_text("Run again when what feeds this node changes. Off: the last result stays (marked out of date) until you press Run.");
+    if e.kind == ErosionKind::Wind {
+        crate::row(ui, &mut e.wind_deg, d.wind_deg, |ui, v| _ = ui.add(egui::DragValue::new(v).speed(1.0).prefix("blows towards ").suffix("°")).on_hover_text("Counter-clockwise from east (the +x side of the terrain): 90 blows towards north."));
+        crate::row(ui, &mut e.wind_iterations, d.wind_iterations, |ui, v| _ = ui.add(egui::DragValue::new(v).range(0..=20000).speed(5.0).prefix("iterations ")));
+        crate::row(ui, &mut e.wind_lift, d.wind_lift, |ui, v| _ = ui.add(egui::DragValue::new(v).range(0.0..=1.0).speed(0.001).prefix("lift ").suffix(" m")).on_hover_text("How much ground the wind picks up per iteration where it reaches it."));
+        crate::row(ui, &mut e.wind_hop_m, d.wind_hop_m, |ui, v| _ = ui.add(egui::DragValue::new(v).range(1.0..=500.0).speed(0.5).prefix("hop ").suffix(" m")).on_hover_text("How far the material travels per iteration: longer hops make longer dunes."));
+        crate::row(ui, &mut e.wind_shadow_deg, d.wind_shadow_deg, |ui, v| _ = ui.add(egui::DragValue::new(v).range(1.0..=60.0).speed(0.2).prefix("shadow ").suffix("°")).on_hover_text("The angle of the sheltered zone behind higher ground, where material settles."));
+        crate::row(ui, &mut e.wind_deposit, d.wind_deposit, |ui, v| _ = ui.add(egui::DragValue::new(v).range(0.0..=1.0).speed(0.005).prefix("settling ")).on_hover_text("The share of airborne material that settles per hop on open ground."));
+        crate::row(ui, &mut e.thermal_iterations, d.thermal_iterations, |ui, v| _ = ui.add(egui::DragValue::new(v).range(0..=5000).speed(1.0).prefix("slide iterations ")).on_hover_text("Steps that let slopes steeper than the angle of repose slip."));
+        crate::row(ui, &mut e.talus_deg, d.talus_deg, |ui, v| _ = ui.add(egui::DragValue::new(v).range(1.0..=89.0).speed(0.5).prefix("repose ").suffix(" deg")));
+    } else {
     crate::row(ui, &mut e.iterations, d.iterations, |ui, v| _ = ui.add(egui::DragValue::new(v).range(0..=20000).speed(10.0).prefix("iterations ")));
     crate::row(ui, &mut e.rain, d.rain, |ui, v| _ = ui.add(egui::DragValue::new(v).range(0.0..=1.0).speed(0.001).prefix("rain ").suffix(" m/s")));
     crate::row(ui, &mut e.capacity, d.capacity, |ui, v| _ = ui.add(egui::DragValue::new(v).range(0.0..=1.0).speed(0.001).prefix("capacity ")).on_hover_text("How much sediment fast water on a slope can carry: more means deeper channels."));
@@ -168,6 +207,7 @@ pub fn node_ui(ui: &mut eframe::egui::Ui, e: &mut Erosion) {
     crate::row(ui, &mut e.evaporation, d.evaporation, |ui, v| _ = ui.add(egui::DragValue::new(v).range(0.0..=1.0).speed(0.001).prefix("evaporation ")));
     crate::row(ui, &mut e.thermal_iterations, d.thermal_iterations, |ui, v| _ = ui.add(egui::DragValue::new(v).range(0..=5000).speed(1.0).prefix("thermal iterations ")));
     crate::row(ui, &mut e.talus_deg, d.talus_deg, |ui, v| _ = ui.add(egui::DragValue::new(v).range(1.0..=89.0).speed(0.5).prefix("repose ").suffix(" deg")));
+    }
     // Changed by hand: no longer the preset it was.
     if !e.same_as(&before) && e.preset == before.preset {
         e.preset.clear();
@@ -389,6 +429,9 @@ pub struct ErosionResult {
 
 /// Erodes `heights` (`n` x `n` metres, rows along y) on a grid whose cells are `cell_m` metres apart.
 pub fn erode(device: &wgpu::Device, queue: &wgpu::Queue, heights: &[f32], n: usize, cell_m: f32, e: &Erosion, progress: &Progress) -> Result<ErosionResult, String> {
+    if e.kind == ErosionKind::Wind {
+        return crate::landscape_wind::erode_wind(device, queue, heights, n, cell_m, e, progress);
+    }
     if heights.len() != n * n {
         return Err("the grid has the wrong size".into());
     }

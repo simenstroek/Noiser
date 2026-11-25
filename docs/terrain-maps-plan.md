@@ -108,3 +108,6 @@ Each phase is usable on its own and tested before the next.
   when the graph is prepared and becomes a Map (`heightmap#<id>#<hash>`), so erosion caches see a changed image.
 - **Phase 4:** done. *Stamp* node (`.sdf` traced from above along its -Y into a height and a cover map on the working
   grid: size = widest side in metres, height factor, centre, turn; modes Add, Max, Cut; the last 8 bakes are cached).
+- **Phase 5:** done. The Erosion node has a *kind*: Water (as before) or Wind (`landscape_wind.rs`: saltation with a
+  lee shadow, material hops downwind, dunes build behind crests, windward faces wear, thermal slides after; its own
+  shader and bind group; same outputs and maps). Chaining Erosion nodes is the stack.
