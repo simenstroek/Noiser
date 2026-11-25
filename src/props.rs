@@ -359,6 +359,7 @@ pub(crate) fn node_props(ui: &mut egui::Ui, kind: &mut NodeKind, pins: &mut Vec<
         }
         NodeKind::Layer(l) => crate::landscape_layers::node_ui(ui, l),
         NodeKind::Heightmap(h) => crate::landscape_heightmap::node_ui(ui, h),
+        NodeKind::Stamp(s) => crate::landscape_stamp::node_ui(ui, s),
         NodeKind::Slope { .. } => _ = ui.weak("The slope of the input in degrees. In the Landscape tab one unit of the input is one height (the height setting), spread over the size setting; wire the terrain's height in."),
         NodeKind::Noise(n) => {
             let d = graph::NoiseParams::default();

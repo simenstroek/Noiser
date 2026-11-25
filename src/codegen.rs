@@ -483,6 +483,7 @@ impl Gen<'_> {
             }
             NodeKind::NoiseGraph(_) => return Err("a Noise Graph node must be lowered first (meshgraph::lowered_mesh)".into()),
             NodeKind::Remesh { .. } | NodeKind::AutoUv(_) | NodeKind::Bake(_) | NodeKind::OutMesh(_) | NodeKind::OutImage(_) | NodeKind::ImageSplit | NodeKind::ImageCombine | NodeKind::ImageLevels { .. } | NodeKind::TransferUv => return Err("this node does not produce a field".into()),
+            NodeKind::Stamp(_) => return Err("a Stamp node works only in the Landscape graph, on a terrain".into()),
             NodeKind::Heightmap(_) => return Err("a Heightmap node works only in the Landscape graph, on a terrain".into()),
             NodeKind::Layer(_) => return Err("a Layer node is an output of the Landscape graph, not part of a field".into()),
             NodeKind::Erosion(_) => return Err("an Erosion node works only in the Landscape graph, on a terrain".into()),

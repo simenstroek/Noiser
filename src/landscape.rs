@@ -630,7 +630,7 @@ impl LandscapeWorkspace {
     fn key(&self) -> u64 {
         let s = &self.settings;
         let mut h = std::collections::hash_map::DefaultHasher::new();
-        (self.graph.to_json(), s.seed, s.resolution, self.mask_rev, &self.erosion_run, crate::landscape_heightmap::files_stamp(&self.graph, &self.base_dir())).hash(&mut h);
+        (self.graph.to_json(), s.seed, s.resolution, self.mask_rev, &self.erosion_run, crate::landscape_heightmap::files_stamp(&self.graph, &self.base_dir()), crate::landscape_stamp::files_stamp(&self.graph, &self.base_dir())).hash(&mut h);
         if crate::landscape_terrain::has_erosion(&self.graph) {
             (s.world_m.to_bits(), s.height_m.to_bits()).hash(&mut h);
         }

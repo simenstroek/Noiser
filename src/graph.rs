@@ -88,6 +88,8 @@ pub enum NodeKind {
     /// Landscape graph: an image (PNG or EXR) as a terrain map, read at the position (x and y across the terrain, 0 to 1).
     /// Input: position (defaults to world position). Heights come out in the graph's units (see `landscape_heightmap`).
     Heightmap(crate::landscape_heightmap::HeightmapParams),
+    /// Landscape graph: an `.sdf` shape pressed into the height at input 0 (see `landscape_stamp`).
+    Stamp(crate::landscape_stamp::StampParams),
     /// A waypoint on a wire: passes its input through (every reader skips it, like a muted node).
     Reroute,
     /// The named end of a wire (Unreal's named reroute): passes its input on, and any `NamedRerouteUse` with the
@@ -177,7 +179,7 @@ impl NodeKind {
             NodeKind::Separate => 1,
             NodeKind::Curve { .. } => 1,
             NodeKind::Noise(_) | NodeKind::Grid { .. } | NodeKind::Pattern(_) => 1 + self.param_pins().len(),
-            NodeKind::Normal { .. } | NodeKind::Radial(_) | NodeKind::Mask { .. } | NodeKind::Slope { .. } | NodeKind::Erosion(_) | NodeKind::Select { .. } | NodeKind::Layer(_) | NodeKind::Heightmap(_) | NodeKind::OutDensity | NodeKind::OutNormal => 1,
+            NodeKind::Normal { .. } | NodeKind::Radial(_) | NodeKind::Mask { .. } | NodeKind::Slope { .. } | NodeKind::Erosion(_) | NodeKind::Select { .. } | NodeKind::Layer(_) | NodeKind::Heightmap(_) | NodeKind::Stamp(_) | NodeKind::OutDensity | NodeKind::OutNormal => 1,
             NodeKind::Scatter(_) => 2,
             NodeKind::LoadMesh(_) | NodeKind::LoadSdf(_) | NodeKind::NoiseGraph(_) | NodeKind::Remesh { .. } | NodeKind::AutoUv(_) | NodeKind::OutMesh(_) | NodeKind::OutImage(_) | NodeKind::ImageSplit | NodeKind::ImageLevels { .. } => 1,
             NodeKind::Bake(s) => 2 + s.custom.len(),
@@ -762,6 +764,7 @@ impl Graph {
             NodeKind::Mask { .. } => Broken("a painted mask does not tile".into()),
             NodeKind::Erosion(_) => Broken("erosion does not tile".into()),
             NodeKind::Heightmap(_) => Broken("an imported heightmap does not tile".into()),
+            NodeKind::Stamp(_) => Broken("a stamp does not tile".into()),
             NodeKind::Slope { .. } => match input(0, memo, stack).unwrap_or(Const) {
                 Coord => Const, // the slope of a linear position map is constant
                 t => t,
@@ -1134,7 +1137,7 @@ impl Graph {
             NodeKind::Grid { amount, .. } => scaled((-1.0, 1.0), *amount),
             NodeKind::Pattern(p) => scaled((-1.0, 1.0), p.amount),
             NodeKind::Select { .. } => (0.0, 1.0),
-            NodeKind::Heightmap(_) => UNBOUNDED,
+            NodeKind::Heightmap(_) | NodeKind::Stamp(_) => UNBOUNDED,
             NodeKind::OutDensity | NodeKind::OutNormal | NodeKind::Layer(_) => UNBOUNDED,
         };
         stack.pop();

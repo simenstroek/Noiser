@@ -93,6 +93,7 @@ pub fn prepare(
     let mut states = HashMap::new();
     let n = s.resolution.max(2);
     lower_heightmaps(&mut g, &mut maps, base, s.height_m)?;
+    lower_stamps(&mut g, &mut maps, base, s)?;
     loop {
         let erosion: Vec<NodeId> = g.nodes.iter().filter(|(_, node)| !node.muted && matches!(node.kind, NodeKind::Erosion(_))).map(|(id, _)| *id).collect();
         // The first whose input has no Erosion node of its own before it.
@@ -165,6 +166,53 @@ fn lower_heightmaps(g: &mut Graph, maps: &mut TerrainMaps, base: &Path, height_m
         let name = format!("heightmap#{id}#{:x}", h.finish());
         maps.insert(name.clone(), loaded.side, Arc::new(loaded.data), Source::Imported);
         g.nodes.get_mut(&id).expect("listed").kind = NodeKind::Mask { name };
+    }
+    Ok(())
+}
+
+/// Stamp nodes trace their shapes onto the working grid and become Map reads and arithmetic: Add is `input + height`,
+/// Cut `input - height`, Max `mix(input, max(input, height), cover)`.
+fn lower_stamps(g: &mut Graph, maps: &mut TerrainMaps, base: &Path, s: &Settings) -> Result<(), String> {
+    use crate::graph::MathOp;
+    use crate::landscape_stamp::StampMode;
+    let ids: Vec<NodeId> = g.nodes.iter().filter(|(_, n)| !n.muted && matches!(n.kind, NodeKind::Stamp(_))).map(|(id, _)| *id).collect();
+    for id in ids {
+        let NodeKind::Stamp(p) = g.nodes[&id].kind.clone() else { continue };
+        let side = s.resolution.max(2);
+        let (key, baked) = crate::landscape_stamp::bake(&p, base, side, s.world_m).map_err(|e| format!("Stamp node {id}: {e}"))?;
+        let k = 1.0 / s.height_m.max(1e-3);
+        let units: Vec<f32> = baked.height_m.iter().map(|m| m * k).collect();
+        let (hname, cname) = (format!("stamp#{id}#{key:x}.height"), format!("stamp#{id}#{key:x}.cover"));
+        maps.insert(hname.clone(), side, Arc::new(units), Source::Stamp);
+        maps.insert(cname.clone(), side, Arc::new(baked.cover.clone()), Source::Stamp);
+        let pos = g.nodes[&id].pos;
+        let terrain = g.edges.iter().find(|e| e.to == id && e.port == 0).map(|e| (e.from, e.from_port));
+        g.edges.retain(|e| e.to != id);
+        let height = g.add(NodeKind::Mask { name: hname }, pos);
+        match p.mode {
+            StampMode::Add | StampMode::Cut => {
+                let op = if p.mode == StampMode::Add { MathOp::Add } else { MathOp::Subtract };
+                g.nodes.get_mut(&id).expect("listed").kind = NodeKind::Math { op, a: 0.0, b: 0.0, c: 0.0 };
+                if let Some((from, port)) = terrain {
+                    g.connect_from(from, port, id, 0);
+                }
+                g.connect(height, id, 1);
+            }
+            StampMode::Max => {
+                let cover = g.add(NodeKind::Mask { name: cname }, pos);
+                let top = g.add(NodeKind::Math { op: MathOp::Max, a: 0.0, b: 0.0, c: 0.0 }, pos);
+                if let Some((from, port)) = terrain {
+                    g.connect_from(from, port, top, 0);
+                }
+                g.connect(height, top, 1);
+                g.nodes.get_mut(&id).expect("listed").kind = NodeKind::Mix { vals: [0.0; 3], clamp: true };
+                g.connect(cover, id, 0);
+                if let Some((from, port)) = terrain {
+                    g.connect_from(from, port, id, 1);
+                }
+                g.connect(top, id, 2);
+            }
+        }
     }
     Ok(())
 }

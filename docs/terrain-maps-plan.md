@@ -106,3 +106,5 @@ Each phase is usable on its own and tested before the next.
 - **Phase 3:** done. *Heightmap* node (PNG exported by the tab with its sidecar returns in metres; other 8/16-bit PNGs
   are 0..1 of the height; EXR as is; `scale`, `offset`; up to 2049 a side; relative to the project's folder). It is read
   when the graph is prepared and becomes a Map (`heightmap#<id>#<hash>`), so erosion caches see a changed image.
+- **Phase 4:** done. *Stamp* node (`.sdf` traced from above along its -Y into a height and a cover map on the working
+  grid: size = widest side in metres, height factor, centre, turn; modes Add, Max, Cut; the last 8 bakes are cached).
