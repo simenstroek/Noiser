@@ -161,6 +161,8 @@ fn compile_inner(g: &Graph, caches: &BTreeMap<NodeId, u32>, eps: f32, preview: b
                 params.extend([0.0, 2.0]);
             }
             NodeKind::Slope { scale } => params.push(*scale),
+            NodeKind::Terrace { steps, sharpness } => params.extend([*steps, *sharpness]),
+            NodeKind::Craters(c) => params.extend([c.cells, c.depth, c.rim, c.density, c.size[0], c.size[1].max(c.size[0]), c.seed as f32]),
             NodeKind::Select { lo, hi, soft } => params.extend([*lo, *hi, *soft]),
             NodeKind::Radial(r) => {
                 params.push(if r.mode == crate::graph::RadialMode::Spherical { 1.0 } else { 0.0 });
@@ -587,6 +589,14 @@ impl Gen<'_> {
                     PatternKind::Honeycomb => "honeycomb",
                 };
                 (Ty::F, format!("{function}({q}, {s}u)"))
+            }
+            NodeKind::Terrace { .. } => {
+                let x = self.operand(id, 0, Ty::F, "0.0");
+                (Ty::F, format!("terrace({x}, P[{s}], P[{}])", s + 1))
+            }
+            NodeKind::Craters(_) => {
+                let q = self.operand(id, 0, Ty::V, "p");
+                (Ty::F, format!("crater_field({q}.xy, P[{s}], P[{}], P[{}], P[{}], P[{}], P[{}], u32(P[{}]))", s + 1, s + 2, s + 3, s + 4, s + 5, s + 6))
             }
             NodeKind::Select { .. } => {
                 let x = self.operand(id, 0, Ty::F, "0.0");

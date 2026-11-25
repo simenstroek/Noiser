@@ -264,6 +264,29 @@ pub(crate) fn tenth() -> f32 {
     0.1
 }
 
+/// Craters: a bowl and a raised rim in every cell that has one, at hashed places and sizes.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CraterParams {
+    /// Cells across the unit of the position (across the terrain in the Landscape tab).
+    pub cells: f32,
+    /// How deep a crater's floor is below the surroundings, in the field's units.
+    pub depth: f32,
+    /// The height of the rim, as a fraction of the depth.
+    pub rim: f32,
+    /// The chance a cell holds a crater, 0 to 1.
+    pub density: f32,
+    /// The smallest and largest crater radius, as fractions of half a cell.
+    pub size: [f32; 2],
+    pub seed: u32,
+}
+
+impl Default for CraterParams {
+    fn default() -> Self {
+        CraterParams { cells: 6.0, depth: 0.05, rim: 0.4, density: 0.7, size: [0.4, 0.95], seed: 1 }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct NoiseParams {
     pub kind: NoiseKind,

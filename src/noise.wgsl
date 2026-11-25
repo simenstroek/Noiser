@@ -310,6 +310,35 @@ fn mix_ab(t: f32, a: f32, b: f32, clamped: bool) -> f32 {
     return a + (b - a) * select(t, clamp(t, 0.0, 1.0), clamped);
 }
 
+// Terraces: `steps` flat treads per unit, the risers as sharp as `sharp` (1 gentle, 10 nearly a staircase).
+fn terrace(x: f32, steps: f32, sharp: f32) -> f32 {
+    let t = x * max(steps, 1e-3);
+    let f = floor(t);
+    let s = clamp((fract(t) - 0.5) * max(sharp, 1.0) + 0.5, 0.0, 1.0);
+    return (f + s * s * (3.0 - 2.0 * s)) / max(steps, 1e-3);
+}
+
+// Craters over q.xy: a bowl and a rim in each cell that has one (`p`: cells, depth, rim, density, size low, size high, seed).
+fn crater_field(q: vec2f, cells: f32, depth: f32, rim: f32, density: f32, size_lo: f32, size_hi: f32, seed: u32) -> f32 {
+    let g = q * cells;
+    let c0 = vec2i(floor(g));
+    var h = 0.0;
+    // The cell and its eight neighbours: a crater may reach over the border.
+    for (var k = 0; k < 9; k++) {
+        let id2 = c0 + vec2i(k % 3 - 1, k / 3 - 1);
+        let r = hash01(vec3i(id2, 0), seed);
+        if (r.x > density) { continue; }
+        let r2 = hash01(vec3i(id2, 1), seed);
+        let centre = vec2f(id2) + vec2f(0.5) + (r.yz - vec2f(0.5)) * 0.4;
+        let radius = 0.5 * mix(size_lo, size_hi, r2.x);
+        let u = length(g - centre) / max(radius, 1e-4);
+        let bowl = -depth * (1.0 - u * u) * select(0.0, 1.0, u < 1.0);
+        let ring = depth * rim * exp(-pow((u - 1.05) / 0.28, 2.0));
+        h += bowl + ring;
+    }
+    return h;
+}
+
 // 1 for x from lo to hi, falling smoothly to 0 over `soft` beyond either end.
 fn select_range(x: f32, lo: f32, hi: f32, soft: f32) -> f32 {
     let s = max(soft, 1e-6);

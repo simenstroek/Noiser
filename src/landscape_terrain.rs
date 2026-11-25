@@ -348,4 +348,34 @@ mod tests {
         assert!(err.contains("Heightmap node"), "{err}");
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    #[test]
+    fn terraces_make_flat_treads_and_craters_dig_bowls() {
+        let Some(gpu) = gpu() else { return eprintln!("no GPU adapter; skipping") };
+        let s = Settings { resolution: 65, ..Default::default() };
+        let sample_graph = |kind: NodeKind, from_x: bool| -> Vec<f32> {
+            let mut g = Graph::default();
+            let pos = g.add(NodeKind::position(), [0.0; 2]);
+            let sep = g.add(NodeKind::Separate, [0.0; 2]);
+            let node = g.add(kind, [0.0; 2]);
+            let out = g.add(NodeKind::OutDensity, [0.0; 2]);
+            g.connect(pos, sep, 0);
+            if from_x {
+                g.connect_from(sep, 0, node, 0);
+            } else {
+                g.connect(pos, node, 0);
+            }
+            g.connect(node, out, 0);
+            let ev = build_evaluator(&gpu.device, &gpu.queue, &g, &s, &TerrainMaps::default(), Path::new(".")).unwrap();
+            sample(&ev, 65, &Default::default())
+        };
+        // Four sharp terraces over x = 0..1: nearly every sample sits on a tread at k / 4.
+        let t = sample_graph(NodeKind::Terrace { steps: 4.0, sharpness: 40.0 }, true);
+        let on_tread = t.iter().filter(|v| ((**v * 4.0) - (**v * 4.0).round()).abs() < 0.05).count();
+        assert!(on_tread * 10 > t.len() * 8, "{on_tread} of {} on a tread", t.len());
+        // One crater per cell: the lowest point is about the depth below the highest rim, and there are rims.
+        let c = sample_graph(NodeKind::Craters(crate::graph::CraterParams { cells: 2.0, depth: 0.5, rim: 0.5, density: 1.0, ..Default::default() }), false);
+        let (lo, hi) = c.iter().fold((f32::MAX, f32::MIN), |(a, b), v| (a.min(*v), b.max(*v)));
+        assert!(lo < -0.4 && hi > 0.1, "bowls down to {lo}, rims up to {hi}");
+    }
 }

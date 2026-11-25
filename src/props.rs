@@ -357,6 +357,24 @@ pub(crate) fn node_props(ui: &mut egui::Ui, kind: &mut NodeKind, pins: &mut Vec<
             row(ui, soft, 0.1, |ui, v| _ = ui.add(egui::DragValue::new(v).speed(0.005).range(0.0..=1.0e6).prefix("soft edge ")));
             ui.weak("1 where the input is from..to, falling smoothly to 0 over the soft edge beyond either end. Heights are in the height setting's units (1 = the full height), slopes in degrees, maps 0 to 1.");
         }
+        NodeKind::Terrace { steps, sharpness } => {
+            row(ui, steps, 8.0, |ui, v| _ = ui.add(egui::DragValue::new(v).range(0.5..=500.0).speed(0.1).prefix("steps ")).on_hover_text("Terraces per unit of the input: for a height, per full height setting."));
+            row(ui, sharpness, 4.0, |ui, v| _ = ui.add(egui::DragValue::new(v).range(1.0..=50.0).speed(0.1).prefix("sharpness ")).on_hover_text("1 gives gentle steps; 10 is nearly a staircase."));
+            ui.weak("Flat terraces with risers between them. Add some noise to the height first for wobbly strata, or mix the result with the original height for terraces on the slopes only.");
+        }
+        NodeKind::Craters(c) => {
+            let d = graph::CraterParams::default();
+            row(ui, &mut c.cells, d.cells, |ui, v| _ = ui.add(egui::DragValue::new(v).range(1.0..=200.0).speed(0.1).prefix("cells ")).on_hover_text("Cells across the terrain; each holds at most one crater."));
+            row(ui, &mut c.depth, d.depth, |ui, v| _ = ui.add(egui::DragValue::new(v).range(0.0..=10.0).speed(0.001).prefix("depth ")).on_hover_text("In the graph's units: 1 is the full height setting."));
+            row(ui, &mut c.rim, d.rim, |ui, v| _ = ui.add(egui::DragValue::new(v).range(0.0..=2.0).speed(0.01).prefix("rim ")).on_hover_text("The rim's height as a fraction of the depth."));
+            row(ui, &mut c.density, d.density, |ui, v| _ = ui.add(egui::Slider::new(v, 0.0..=1.0).text("density")));
+            row(ui, &mut c.size, d.size, |ui, v| {
+                ui.add(egui::DragValue::new(&mut v[0]).range(0.05..=2.0).speed(0.01).prefix("size "));
+                ui.add(egui::DragValue::new(&mut v[1]).range(0.05..=2.0).speed(0.01));
+            });
+            row(ui, &mut c.seed, d.seed, |ui, v| _ = ui.add(egui::DragValue::new(v).prefix("seed ")));
+            ui.weak("Add the output to a height. The position decides where: wire a Position node (x and y across the terrain).");
+        }
         NodeKind::Layer(l) => crate::landscape_layers::node_ui(ui, l),
         NodeKind::TerrainLayer { name } => {
             ui.weak("The terrain's paint layer (a weightmap the Landscape tab wrote beside the heightmap), 0 to 1 at the position. Add the layer to the maps of the terrain's Load Mesh node. Wire it to a Bake node's extra inputs to write the layer's weights per chunk.");

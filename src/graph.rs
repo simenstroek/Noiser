@@ -8,6 +8,14 @@ pub type NodeId = u32;
 pub use crate::graph_params::*;
 use crate::graph_params::{default_smooth, default_true, migrate_noise_kinds, one, tenth};
 
+fn eight() -> f32 {
+    8.0
+}
+
+fn four() -> f32 {
+    4.0
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum NodeKind {
     Float(f32),
@@ -93,6 +101,16 @@ pub enum NodeKind {
     /// Mesh graph: the terrain's paint layer `name` (a weightmap listed on the terrain Load Mesh node's `maps`) at the
     /// position, 0 to 1. Input: position (defaults to the world position). Wire it to a Bake node for per-chunk weights.
     TerrainLayer { name: String },
+    /// Steps its input into `steps` terraces per unit, with flat treads and risers as sharp as `sharpness` (1 is gentle,
+    /// 10 nearly a staircase). Feed it a height.
+    Terrace {
+        #[serde(default = "eight")]
+        steps: f32,
+        #[serde(default = "four")]
+        sharpness: f32,
+    },
+    /// Craters over the position (x and y across the terrain, 0 to 1): a field of bowls with raised rims, to add to a height.
+    Craters(CraterParams),
     /// A waypoint on a wire: passes its input through (every reader skips it, like a muted node).
     Reroute,
     /// The named end of a wire (Unreal's named reroute): passes its input on, and any `NamedRerouteUse` with the
@@ -182,7 +200,7 @@ impl NodeKind {
             NodeKind::Separate => 1,
             NodeKind::Curve { .. } => 1,
             NodeKind::Noise(_) | NodeKind::Grid { .. } | NodeKind::Pattern(_) => 1 + self.param_pins().len(),
-            NodeKind::Normal { .. } | NodeKind::Radial(_) | NodeKind::Mask { .. } | NodeKind::Slope { .. } | NodeKind::Erosion(_) | NodeKind::Select { .. } | NodeKind::Layer(_) | NodeKind::Heightmap(_) | NodeKind::Stamp(_) | NodeKind::TerrainLayer { .. } | NodeKind::OutDensity | NodeKind::OutNormal => 1,
+            NodeKind::Normal { .. } | NodeKind::Radial(_) | NodeKind::Mask { .. } | NodeKind::Slope { .. } | NodeKind::Erosion(_) | NodeKind::Select { .. } | NodeKind::Layer(_) | NodeKind::Heightmap(_) | NodeKind::Stamp(_) | NodeKind::TerrainLayer { .. } | NodeKind::Terrace { .. } | NodeKind::Craters(_) | NodeKind::OutDensity | NodeKind::OutNormal => 1,
             NodeKind::Scatter(_) => 2,
             NodeKind::LoadMesh(_) | NodeKind::LoadSdf(_) | NodeKind::NoiseGraph(_) | NodeKind::Remesh { .. } | NodeKind::AutoUv(_) | NodeKind::OutMesh(_) | NodeKind::OutImage(_) | NodeKind::ImageSplit | NodeKind::ImageLevels { .. } => 1,
             NodeKind::Bake(s) => 2 + s.custom.len(),
@@ -910,7 +928,8 @@ impl Graph {
                 Coord => Const, // gradient of a linear position map is constant
                 t => t,
             },
-            NodeKind::Select { .. } => input(0, memo, stack).unwrap_or(Const),
+            NodeKind::Select { .. } | NodeKind::Terrace { .. } => input(0, memo, stack).unwrap_or(Const),
+            NodeKind::Craters(_) => Broken("craters do not tile".into()),
             NodeKind::OutDensity | NodeKind::OutNormal | NodeKind::Layer(_) => match input(0, memo, stack).unwrap_or(Const) {
                 Coord => Broken("output depends directly on position".into()),
                 t => t,
@@ -1141,6 +1160,12 @@ impl Graph {
             NodeKind::Grid { amount, .. } => scaled((-1.0, 1.0), *amount),
             NodeKind::Pattern(p) => scaled((-1.0, 1.0), p.amount),
             NodeKind::Select { .. } | NodeKind::TerrainLayer { .. } => (0.0, 1.0),
+            NodeKind::Terrace { .. } => {
+                // Terraces stay within a step of their input.
+                let r = self.input(id, 0).map_or((0.0, 0.0), |src| self.range_of(src, stack));
+                (r.0 - 1.0, r.1 + 1.0)
+            }
+            NodeKind::Craters(_) => UNBOUNDED,
             NodeKind::Heightmap(_) | NodeKind::Stamp(_) => UNBOUNDED,
             NodeKind::OutDensity | NodeKind::OutNormal | NodeKind::Layer(_) => UNBOUNDED,
         };
