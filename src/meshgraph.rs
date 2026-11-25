@@ -27,11 +27,14 @@ pub struct LoadMeshParams {
     /// A heightmap (a PNG from the Landscape tab) as the file: the terrain is cut into this many chunks per side, and a
     /// run makes every chunk. 1 is the whole terrain.
     pub chunks: u32,
+    /// A heightmap: the paint layers (names from the sidecar's `layers`) loaded beside the heights, for Scatter's density
+    /// map and Terrain Layer nodes (the Bake node writes them per chunk).
+    pub maps: Vec<String>,
 }
 
 impl Default for LoadMeshParams {
     fn default() -> Self {
-        LoadMeshParams { path: String::new(), resolution: 128, padding: 0.5, combine: Default::default(), unit_cm: 100.0, sdf: false, chunks: 1 }
+        LoadMeshParams { path: String::new(), resolution: 128, padding: 0.5, combine: Default::default(), unit_cm: 100.0, sdf: false, chunks: 1, maps: Vec::new() }
     }
 }
 
@@ -253,13 +256,13 @@ impl Runner<'_> {
             (None, "{batch}") => return Err("a Load Mesh node reads {batch}, which needs a batch run (--batch-dir or --batch-file)".into()),
             _ => self.resolve(&p.path),
         };
-        let key = format!("{}|{}|{}|{:?}|{}", path.display(), p.resolution, p.padding, p.combine.mode, p.combine.smooth);
+        let key = format!("{}|{}|{}|{:?}|{}|{}", path.display(), p.resolution, p.padding, p.combine.mode, p.combine.smooth, p.maps.join(","));
         if let Some(m) = self.cache.meshes.get(&key) {
             return Ok(m.clone());
         }
         (self.log)(&format!("loading {}", path.display()));
         if crate::landscape_field::is_heightmap(&p.path) {
-            let heights = std::sync::Arc::new(crate::landscape_field::load(&path, p.unit_cm)?);
+            let heights = std::sync::Arc::new(crate::landscape_field::load_with_maps(&path, p.unit_cm, &p.maps)?);
             (self.log)(&format!("  terrain {0} x {0} samples, {1:.1} units apart, heights {2:.1} to {3:.1}", heights.n, heights.cell, heights.z.0, heights.z.1));
             let (texture, view) = heights.upload(self.device, self.queue);
             let w = heights.world();

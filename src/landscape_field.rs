@@ -19,6 +19,9 @@ pub struct Heights {
     pub z: (f32, f32),
     /// The height of the water in the node's units, when the heightmap says there is some.
     pub water: Option<f32>,
+    /// Paint layer weightmaps (0 to 1, `n` x `n`) travelling with the heights: extra layers of the same texture, after
+    /// the height tiles (see `texels`). Names as in the sidecar's `layers`.
+    pub maps: Vec<(String, Vec<f32>)>,
 }
 
 pub fn is_heightmap(path: &str) -> bool {
@@ -43,7 +46,40 @@ pub fn load(path: &Path, unit_cm: f32) -> Result<Heights, String> {
     let h: Vec<f32> = img.as_raw().iter().map(|v| ((*v as f32 - 32768.0) * step_cm + centre_cm) * k).collect();
     let z = h.iter().fold((f32::MAX, f32::MIN), |(lo, hi), v| (lo.min(*v), hi.max(*v)));
     let water = json["water_level_m"].as_f64().map(|w| w as f32 * 100.0 * k);
-    Ok(Heights { n, cell: size_m * 100.0 * k / (n - 1) as f32, h, z, water })
+    Ok(Heights { n, cell: size_m * 100.0 * k / (n - 1) as f32, h, z, water, maps: Vec::new() })
+}
+
+/// The paint layers the Landscape tab wrote beside a heightmap: (name, weightmap file), from the sidecar's `layers`.
+pub fn sidecar_layers(path: &Path) -> Vec<(String, String)> {
+    let Ok(text) = std::fs::read_to_string(format!("{}.json", path.display())) else { return Vec::new() };
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) else { return Vec::new() };
+    json["layers"].as_array().map(|a| a.iter().filter_map(|l| Some((l["name"].as_str()?.to_string(), l["file"].as_str()?.to_string()))).collect()).unwrap_or_default()
+}
+
+/// `load`, with the paint layers called `names` (from the sidecar's `layers`) as weightmaps. A weightmap of another size
+/// is resampled to the heights'.
+pub fn load_with_maps(path: &Path, unit_cm: f32, names: &[String]) -> Result<Heights, String> {
+    let mut heights = load(path, unit_cm)?;
+    if names.is_empty() {
+        return Ok(heights);
+    }
+    let layers = sidecar_layers(path);
+    for name in names {
+        let (_, file) = layers.iter().find(|(n, _)| n == name).ok_or_else(|| {
+            let known: Vec<&str> = layers.iter().map(|(n, _)| n.as_str()).collect();
+            format!("{}: no paint layer called {name} (the sidecar lists: {})", path.display(), if known.is_empty() { "none; export the terrain with Layer nodes".to_string() } else { known.join(", ") })
+        })?;
+        let wpath = path.with_file_name(file);
+        let img = image::open(&wpath).map_err(|e| format!("{}: {e}", wpath.display()))?.to_luma16();
+        let side = img.width() as usize;
+        if img.height() as usize != side || side < 2 {
+            return Err(format!("{}: a weightmap must be square", wpath.display()));
+        }
+        let values: Vec<f32> = img.as_raw().iter().map(|v| *v as f32 / 65535.0).collect();
+        let values = if side == heights.n { values } else { crate::landscape_heightmap::shrink_or_grow(&values, side, heights.n) };
+        heights.maps.push((name.clone(), values));
+    }
+    Ok(heights)
 }
 
 /// The height of the water a heightmap's sidecar names, in centimetres.
@@ -131,14 +167,21 @@ impl Heights {
         self.n.div_ceil(TILE)
     }
 
-    /// The heights as the layers of the texture (tile (tx, ty) is layer ty * tiles + tx).
+    /// The heights as the layers of the texture (tile (tx, ty) is layer ty * tiles + tx), then each paint layer's
+    /// weights in the same arrangement (map k starts at layer (k + 1) * tiles * tiles).
     fn texels(&self) -> Vec<f32> {
         let (t, tiles) = (self.tile_size(), self.tiles());
-        let mut out = vec![self.z.0; t * t * tiles * tiles];
+        let per = t * t * tiles * tiles;
+        let mut out = vec![self.z.0; per];
+        out.resize(per * (1 + self.maps.len()), 0.0);
         for y in 0..self.n {
             for x in 0..self.n {
                 let layer = (y / TILE) * tiles + x / TILE;
-                out[(layer * t + y % TILE) * t + x % TILE] = self.h[y * self.n + x];
+                let at = (layer * t + y % TILE) * t + x % TILE;
+                out[at] = self.h[y * self.n + x];
+                for (k, (_, map)) in self.maps.iter().enumerate() {
+                    out[(k + 1) * per + at] = map[y * self.n + x];
+                }
             }
         }
         out
@@ -147,7 +190,7 @@ impl Heights {
     pub fn upload(&self, device: &eframe::wgpu::Device, queue: &eframe::wgpu::Queue) -> (eframe::wgpu::Texture, eframe::wgpu::TextureView) {
         use eframe::wgpu;
         let (t, tiles) = (self.tile_size() as u32, self.tiles() as u32);
-        let size = wgpu::Extent3d { width: t, height: t, depth_or_array_layers: tiles * tiles };
+        let size = wgpu::Extent3d { width: t, height: t, depth_or_array_layers: tiles * tiles * (1 + self.maps.len() as u32) };
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("terrain heights"),
             size,

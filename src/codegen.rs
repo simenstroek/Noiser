@@ -52,6 +52,14 @@ pub const MASK_RES: usize = 1024;
 /// Where the terrain maps start in the parameter buffer (the same number as `MASK_BASE` in noise.wgsl).
 pub const MASK_BASE: usize = 1 << 20;
 
+/// The paint layers the terrain's Load Mesh node (the first with a heightmap) loads beside its heights, in order.
+pub fn terrain_maps(g: &Graph) -> Vec<String> {
+    g.nodes.values().filter(|n| !n.muted).find_map(|n| match &n.kind {
+        NodeKind::LoadMesh(p) if crate::landscape_field::is_heightmap(&p.path) => Some(p.maps.clone()),
+        _ => None,
+    }).unwrap_or_default()
+}
+
 /// The distinct names of the graph's Mask nodes, sorted.
 fn mask_names(g: &Graph) -> Vec<String> {
     g.nodes.values().filter_map(|n| if let NodeKind::Mask { name } = &n.kind { Some(name.clone()) } else { None }).collect::<BTreeSet<_>>().into_iter().collect()
@@ -195,7 +203,7 @@ fn compile_inner(g: &Graph, caches: &BTreeMap<NodeId, u32>, eps: f32, preview: b
                 let loaded = crate::sdf_node::load(&p.file);
                 params.extend(p.shader_params(loaded.as_ref().as_ref().ok()));
             }
-            NodeKind::Scatter(p) => params.extend(p.shader_params()),
+            NodeKind::Scatter(p) => params.extend(p.shader_params(terrain_maps(g).iter().position(|m| *m == p.density_map && !m.is_empty()).map_or(0, |i| i + 1))),
             NodeKind::Noise(n) => params.extend([
                 n.scale,
                 if n.normalize { 1.0 } else { 0.0 },
@@ -473,6 +481,9 @@ impl Gen<'_> {
                 if self.land_slot().is_none() {
                     return Err("a Scatter SDF node needs a terrain: add a Load Mesh node with a heightmap".into());
                 }
+                if !p.density_map.is_empty() && !terrain_maps(self.g).contains(&p.density_map) {
+                    return Err(format!("the Scatter density map {} is not one of the terrain's maps: add it to the maps of the Load Mesh node", p.density_map));
+                }
                 match crate::sdf_node::load(&p.file).as_ref() {
                     Ok(_) => {
                         self.sdf_used.insert(id);
@@ -483,6 +494,14 @@ impl Gen<'_> {
             }
             NodeKind::NoiseGraph(_) => return Err("a Noise Graph node must be lowered first (meshgraph::lowered_mesh)".into()),
             NodeKind::Remesh { .. } | NodeKind::AutoUv(_) | NodeKind::Bake(_) | NodeKind::OutMesh(_) | NodeKind::OutImage(_) | NodeKind::ImageSplit | NodeKind::ImageCombine | NodeKind::ImageLevels { .. } | NodeKind::TransferUv => return Err("this node does not produce a field".into()),
+            NodeKind::TerrainLayer { name } => {
+                let Some(land) = self.land_slot() else { return Err("a Terrain Layer node needs a terrain: add a Load Mesh node with a heightmap".into()) };
+                let Some(k) = terrain_maps(self.g).iter().position(|m| m == name) else {
+                    return Err(format!("the terrain has no map called {name}: add the paint layer to the maps of the Load Mesh node"));
+                };
+                let q = self.operand(id, 0, Ty::V, "p");
+                (Ty::F, format!("land_map_{land}({q}.xy, {k})"))
+            }
             NodeKind::Stamp(_) => return Err("a Stamp node works only in the Landscape graph, on a terrain".into()),
             NodeKind::Heightmap(_) => return Err("a Heightmap node works only in the Landscape graph, on a terrain".into()),
             NodeKind::Layer(_) => return Err("a Layer node is an output of the Landscape graph, not part of a field".into()),

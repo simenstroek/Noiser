@@ -474,3 +474,97 @@ fn scratch_demo_compile() {
         eprintln!("  {l}");
     }
 }
+
+/// Paint layers written beside a heightmap the way the Landscape tab does: 8-bit weightmaps and the sidecar's `layers`.
+fn add_layers(png: &Path, n: usize, layers: &[(&str, &dyn Fn(usize, usize) -> u8)]) {
+    let mut listed = Vec::new();
+    for (name, f) in layers {
+        let file = format!("terrain_{name}.png");
+        let bytes: Vec<u8> = (0..n * n).map(|k| f(k % n, k / n)).collect();
+        image::GrayImage::from_raw(n as u32, n as u32, bytes).unwrap().save(png.with_file_name(&file)).unwrap();
+        listed.push(serde_json::json!({ "name": name, "file": file }));
+    }
+    let side = format!("{}.json", png.display());
+    let mut json: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&side).unwrap()).unwrap();
+    json["layers"] = listed.into();
+    std::fs::write(side, json.to_string()).unwrap();
+}
+
+#[test]
+fn a_paint_layer_bakes_per_chunk() {
+    use crate::bake::{Channel, Settings};
+    let Some(_) = gpu() else { return eprintln!("no GPU adapter; skipping") };
+    let dir = std::env::temp_dir().join("noiser-terrain-layers");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let n = 129;
+    let png = heightmap(&dir, n, 640.0, 60.0);
+    // "west" is 1 on the left half and 0 on the right; "none" is 0 everywhere, "all" is 1.
+    add_layers(&png, n, &[("west", &|x, _| if x < n / 2 { 255 } else { 0 }), ("none", &|_, _| 0), ("all", &|_, _| 255)]);
+    let land_params = |maps: &[&str]| LoadMeshParams { path: png.to_string_lossy().into_owned(), unit_cm: 100.0, chunks: 1, maps: maps.iter().map(|s| s.to_string()).collect(), ..Default::default() };
+
+    // The layer baked as a custom map: bright on the left of the picture, dark on the right.
+    let mut g = Graph::default();
+    let land = g.add(NodeKind::LoadMesh(land_params(&["west"])), [0.0; 2]);
+    let remesh = g.add(NodeKind::Remesh { triangles: 6000, adaptivity: 1.0 }, [0.0; 2]);
+    let uv = g.add(NodeKind::AutoUv(crate::uvgen::UvParams { planar: true, ..Default::default() }), [0.0; 2]);
+    let bake = g.add(NodeKind::Bake(Settings { size: 64, padding: 2, channels: vec![Channel::Normal], custom: vec!["west".into()], samples: 1, ..Default::default() }), [0.0; 2]);
+    let layer = g.add(NodeKind::TerrainLayer { name: "west".into() }, [0.0; 2]);
+    let img = g.add(NodeKind::OutImage(OutParams { folder: "out".into(), name: "weights".into(), image: crate::bake::ImageFormat::Png8, ..Default::default() }), [0.0; 2]);
+    g.connect(land, remesh, 0);
+    g.connect(remesh, uv, 0);
+    g.connect(uv, bake, 0);
+    g.connect(land, bake, 1);
+    g.connect(layer, bake, 2);
+    g.connect_from(bake, 1, img, 0);
+    let (written, log) = run(&dir, &g);
+    let file = written.iter().find(|p| p.to_string_lossy().contains("weights")).unwrap_or_else(|| panic!("{written:?} {log:?}"));
+    let image = image::open(file).unwrap().to_luma8();
+    let mean = |x0: u32, x1: u32| -> f32 { (0..image.height()).flat_map(|y| (x0..x1).map(move |x| (x, y))).map(|(x, y)| image.get_pixel(x, y)[0] as f32).sum::<f32>() / (image.height() * (x1 - x0)) as f32 };
+    let (left, right) = (mean(4, 24), mean(40, 60));
+    assert!(left > 200.0 && right < 50.0, "the west layer is bright on the left ({left}) and dark on the right ({right})");
+
+    // An unknown layer is an error that says what to do.
+    let mut bad = g.clone();
+    if let Some(NodeKind::TerrainLayer { name }) = bad.nodes.get_mut(&layer).map(|n| &mut n.kind) {
+        *name = "nope".into();
+    }
+    let gpu = gpu().unwrap();
+    let mut cache = MeshCache::default();
+    let mut note = |_: &str| {};
+    let err = Runner { device: &gpu.device, queue: &gpu.queue, cache: &mut cache, base: dir.clone(), seed: 0, progress: Default::default(), log: &mut note, batch_file: None, max_triangles: None }.run(&bad).unwrap_err();
+    assert!(err.contains("nope") && err.contains("maps"), "{err}");
+
+}
+
+#[test]
+fn a_paint_layer_scales_scatter_density() {
+    let Some(_) = gpu() else { return eprintln!("no GPU adapter; skipping") };
+    let dir = std::env::temp_dir().join("noiser-terrain-layers-scatter");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let n = 129;
+    let png = heightmap(&dir, n, 640.0, 60.0);
+    add_layers(&png, n, &[("none", &|_, _| 0), ("all", &|_, _| 255)]);
+    let land_params = |maps: &[&str]| LoadMeshParams { path: png.to_string_lossy().into_owned(), unit_cm: 100.0, chunks: 1, maps: maps.iter().map(|s| s.to_string()).collect(), ..Default::default() };
+    // Scatter: a density map of 0 plants nothing, of 1 plants copies.
+    let sdf = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples").join("SDFs").join("Mushroom.sdf");
+    let count = |map: &str, name: &str| -> usize {
+        let mut g = Graph::default();
+        let land = g.add(NodeKind::LoadMesh(land_params(&["none", "all"])), [0.0; 2]);
+        let scatter = g.add(NodeKind::Scatter(crate::scatter::ScatterParams { file: sdf.to_string_lossy().into_owned(), cell: 160.0, density: 1.0, size: [50.0, 50.0], density_map: map.into(), blend: 0.0, ..Default::default() }), [0.0; 2]);
+        let remesh = g.add(NodeKind::Remesh { triangles: 6000, adaptivity: 1.0 }, [0.0; 2]);
+        let out = g.add(NodeKind::OutMesh(OutParams { folder: "out".into(), name: name.into(), ..Default::default() }), [0.0; 2]);
+        g.connect(land, scatter, 0);
+        g.connect(scatter, remesh, 0);
+        g.connect(remesh, out, 0);
+        let (written, log) = run(&dir, &g);
+        assert_eq!(written.len(), 1, "{written:?} {log:?}");
+        vertices(&written[0]).iter().filter(|v| v[2].parse::<f32>().unwrap() > 70.0).count()
+    };
+    // The field is in metres here (unit 100 cm): a 640 m terrain, copies 50 m across in 160 m cells.
+    let none = count("none", "scatter_none");
+    let all = count("all", "scatter_all");
+    assert_eq!(none, 0, "no copies where the map is 0");
+    assert!(all > 0, "copies where the map is 1");
+}

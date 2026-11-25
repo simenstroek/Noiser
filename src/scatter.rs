@@ -49,22 +49,26 @@ pub struct ScatterParams {
     pub subtract: bool,
     /// How much of the displacement input roughens a copy (the input times this, in field units).
     pub roughen: f32,
+    /// A paint layer of the terrain (one of its Load Mesh node's `maps`) that scales the density: copies grow where it is 1
+    /// and not where it is 0. Empty for none.
+    pub density_map: String,
 }
 
 impl Default for ScatterParams {
     fn default() -> Self {
-        ScatterParams { file: String::new(), seed: 1, cell: 4000.0, density: 0.5, size: [1500.0, 2500.0], jitter: 0.8, yaw: true, face_uphill: false, face_centre: false, ring: false, ring_count: 4, ring_radius: 40000.0, ring_start: 45.0, ring_centre: None, slope: [0.0, 0.6], elevation: [0.0, 1.0], sink: 0.05, blend: 100.0, subtract: false, roughen: 1.0 }
+        ScatterParams { file: String::new(), seed: 1, cell: 4000.0, density: 0.5, size: [1500.0, 2500.0], jitter: 0.8, yaw: true, face_uphill: false, face_centre: false, ring: false, ring_count: 4, ring_radius: 40000.0, ring_start: 45.0, ring_centre: None, slope: [0.0, 0.6], elevation: [0.0, 1.0], sink: 0.05, blend: 100.0, subtract: false, roughen: 1.0, density_map: String::new() }
     }
 }
 
 /// How many shader parameters the node uses (see `shader_params`).
-pub const SLOTS: usize = 30;
+pub const SLOTS: usize = 31;
 
 impl ScatterParams {
     /// The shader's numbers: seed, cell, density, size low and high, jitter, slope low and high, elevation low and high,
     /// sink, blend, subtract, yaw, roughen, then of the shape (in its file's own units) 1 / its longest side, its centre,
     /// and how far its centre is above its lowest point.
-    pub fn shader_params(&self) -> [f32; SLOTS] {
+    /// `map` is 1 + the index of the density map among the terrain's maps, 0 for none.
+    pub fn shader_params(&self, map: usize) -> [f32; SLOTS] {
         let (inv, centre, half) = match crate::sdf_node::load(&self.file).as_ref() {
             Ok(data) => match data.tight.or(data.scene.bounds) {
                 Some((lo, hi)) => {
@@ -109,6 +113,7 @@ impl ScatterParams {
             self.ring_centre.map_or(0.0, |c| c[1]),
             if self.ring_centre.is_none() { 1.0 } else { 0.0 },
             if self.face_centre { 1.0 } else { 0.0 },
+            map as f32,
         ]
     }
 
@@ -174,9 +179,11 @@ fn scatter{id}(p: vec3f, base: f32, displace: f32) -> f32 {{
         for (var k = 0; k < cells; k++) {{
             let id2 = c0 + vec2i(k % 3 - 1, k / 3 - 1);
             let r = hash01(vec3i(id2, 0), seed);
-            if (r.x > {density}) {{ continue; }}
-            let r2 = hash01(vec3i(id2, 1), seed);
             let ctr = (vec2f(id2) + vec2f(0.5) + (r.yz - vec2f(0.5)) * {jitter}) * cell;
+            var chance = {density};
+            if ({map} > 0.5) {{ chance = chance * land_map_{land}(ctr, i32({map}) - 1); }}
+            if (r.x > chance) {{ continue; }}
+            let r2 = hash01(vec3i(id2, 1), seed);
             near = min(near, scatter{id}_one(p, ctr, mix({size_lo}, {size_hi}, r2.x), r2.y, zr, middle));
         }}
     }} else {{
@@ -223,6 +230,7 @@ fn scatter{id}(p: vec3f, base: f32, displace: f32) -> f32 {{
         ring_y = p(27),
         ring_terrain = p(28),
         face_centre = p(29),
+        map = p(30),
     )
 }
 
@@ -287,6 +295,10 @@ pub fn props(ui: &mut eframe::egui::Ui, p: &mut ScatterParams) {
         });
         crate::row(ui, &mut p.face_centre, d.face_centre, |ui, v| _ = ui.checkbox(v, "face the middle").on_hover_text("Turns each copy so its front (+Z in the Composer) faces the middle of the ring."));
     }
+    crate::row(ui, &mut p.density_map, d.density_map.clone(), |ui, v| {
+        ui.label("density map");
+        ui.add(egui::TextEdit::singleline(v).hint_text("a paint layer").desired_width(110.0)).on_hover_text("A paint layer of the terrain (listed on the Load Mesh node's maps) that scales the density: copies grow where the layer is 1 and not where it is 0. Empty: the density is the same everywhere.");
+    });
     crate::row(ui, &mut p.yaw, d.yaw, |ui, v| _ = ui.checkbox(v, "random facing"));
     crate::row(ui, &mut p.face_uphill, d.face_uphill, |ui, v| _ = ui.checkbox(v, "face uphill").on_hover_text("Turns each copy so its back (+Z in the Composer) faces uphill: a cave goes into the hillside and opens downhill. Used instead of the random turn where there is a slope."));
     ui.horizontal(|ui| {

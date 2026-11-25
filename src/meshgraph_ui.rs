@@ -65,6 +65,20 @@ pub fn props(ui: &mut egui::Ui, kind: &mut NodeKind) -> bool {
             path_row(ui, "terrain path", &mut p.path, "heightmap .png", Some(("Heightmap", &["png"])));
             let d = crate::meshgraph::LoadMeshParams::default();
             crate::row(ui, &mut p.chunks, d.chunks, |ui, v| _ = ui.add(egui::DragValue::new(v).range(1..=32).prefix("chunks ").suffix(" per side")).on_hover_text("The terrain is cut into this many chunks along each side; a run writes one file per chunk and map, named ending _row_column."));
+            let layers = crate::landscape_field::sidecar_layers(&crate::meshgraph::resolve_in(&base(), &p.path));
+            if layers.is_empty() {
+                ui.weak("No paint layers beside this heightmap (the Landscape tab writes them when its graph has Layer nodes).");
+            } else {
+                ui.label("paint layers to load:");
+                ui.horizontal_wrapped(|ui| {
+                    for (name, _) in &layers {
+                        let mut on = p.maps.contains(name);
+                        if ui.checkbox(&mut on, name).on_hover_text("Loaded beside the heights: Scatter's density map and Terrain layer nodes can read it. Each costs as much video memory as the heights.").changed() {
+                            if on { p.maps.push(name.clone()) } else { p.maps.retain(|m| m != name) }
+                        }
+                    }
+                });
+            }
             crate::row(ui, &mut p.unit_cm, d.unit_cm, |ui, v| _ = ui.add(egui::DragValue::new(v).range(0.0001..=1.0e6).speed(0.5).prefix("1 unit = ").suffix(" cm")).on_hover_text("The unit of the field: 100 for metres, 1 for centimetres (Unreal). Other meshes in the graph must use the same unit."));
             true
         }

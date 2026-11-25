@@ -255,10 +255,27 @@ struct MeshInfo { origin: vec3f, voxel: f32, centre: vec3f, scale: f32 };
 // A terrain (scale < 0): the texture holds heights in 2048 x 2048 tiles, one per layer, `centre.x` tiles per side, `origin.z`
 // samples per side and `voxel` the distance between samples. The field is the height above the ground, made a distance
 // to first order by the slope.
-fn land_h(t: texture_3d<f32>, x: i32, y: i32, n: i32, tiles: i32) -> f32 {
+fn land_hm(t: texture_3d<f32>, x: i32, y: i32, n: i32, tiles: i32, base: i32) -> f32 {
     let cx = clamp(x, 0, n - 1);
     let cy = clamp(y, 0, n - 1);
-    return textureLoad(t, vec3i(cx & 2047, cy & 2047, (cy >> 11) * tiles + (cx >> 11)), 0).x;
+    return textureLoad(t, vec3i(cx & 2047, cy & 2047, base + (cy >> 11) * tiles + (cx >> 11)), 0).x;
+}
+fn land_h(t: texture_3d<f32>, x: i32, y: i32, n: i32, tiles: i32) -> f32 {
+    return land_hm(t, x, y, n, tiles, 0);
+}
+// Paint layer `k` (0 to 1) under (x, y): the layers follow the height tiles in the same arrangement.
+fn land_map(t: texture_3d<f32>, xy: vec2f, k: i32, m: MeshInfo) -> f32 {
+    let n = i32(m.origin.z);
+    let tiles = i32(m.centre.x);
+    let base = (k + 1) * tiles * tiles;
+    let g = clamp((xy - m.origin.xy) / m.voxel, vec2f(0.0), vec2f(f32(n - 1)));
+    let i = vec2i(floor(g));
+    let f = g - vec2f(i);
+    let h00 = land_hm(t, i.x, i.y, n, tiles, base);
+    let h10 = land_hm(t, i.x + 1, i.y, n, tiles, base);
+    let h01 = land_hm(t, i.x, i.y + 1, n, tiles, base);
+    let h11 = land_hm(t, i.x + 1, i.y + 1, n, tiles, base);
+    return mix(mix(h00, h10, f.x), mix(h01, h11, f.x), f.y);
 }
 fn land_dist(t: texture_3d<f32>, p: vec3f, m: MeshInfo) -> f32 {
     let n = i32(m.origin.z);
@@ -299,6 +316,10 @@ fn land_sample(t: texture_3d<f32>, xy: vec2f, m: MeshInfo) -> vec3f {
     let h11 = land_h(t, i.x + 1, i.y + 1, n, tiles);
     return vec3f(mix(mix(h00, h10, f.x), mix(h01, h11, f.x), f.y), mix(h10 - h00, h11 - h01, f.y) / m.voxel, mix(h01 - h00, h11 - h10, f.x) / m.voxel);
 }
+fn land_map_0(xy: vec2f, k: i32) -> f32 { return land_map(mesh_tex, xy, k, meshes[0]); }
+fn land_map_1(xy: vec2f, k: i32) -> f32 { return land_map(mesh_tex1, xy, k, meshes[1]); }
+fn land_map_2(xy: vec2f, k: i32) -> f32 { return land_map(mesh_tex2, xy, k, meshes[2]); }
+fn land_map_3(xy: vec2f, k: i32) -> f32 { return land_map(mesh_tex3, xy, k, meshes[3]); }
 fn land_ground_0(xy: vec2f) -> vec3f { return land_sample(mesh_tex, xy, meshes[0]); }
 fn land_ground_1(xy: vec2f) -> vec3f { return land_sample(mesh_tex1, xy, meshes[1]); }
 fn land_ground_2(xy: vec2f) -> vec3f { return land_sample(mesh_tex2, xy, meshes[2]); }

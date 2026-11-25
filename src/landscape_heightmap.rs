@@ -113,6 +113,11 @@ pub fn shrink(data: &[f32], n: usize, m: usize) -> Vec<f32> {
     out
 }
 
+/// `data` (`n` x `n`) resampled bilinearly to `m` x `m` over the same area, larger or smaller.
+pub fn shrink_or_grow(data: &[f32], n: usize, m: usize) -> Vec<f32> {
+    shrink(data, n, m)
+}
+
 /// A stamp of the files the graph's Heightmap nodes read (modified time and size), so an edited image is seen.
 pub fn files_stamp(graph: &crate::graph::Graph, base: &Path) -> u64 {
     use std::hash::{Hash, Hasher};

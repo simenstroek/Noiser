@@ -358,6 +358,13 @@ pub(crate) fn node_props(ui: &mut egui::Ui, kind: &mut NodeKind, pins: &mut Vec<
             ui.weak("1 where the input is from..to, falling smoothly to 0 over the soft edge beyond either end. Heights are in the height setting's units (1 = the full height), slopes in degrees, maps 0 to 1.");
         }
         NodeKind::Layer(l) => crate::landscape_layers::node_ui(ui, l),
+        NodeKind::TerrainLayer { name } => {
+            ui.weak("The terrain's paint layer (a weightmap the Landscape tab wrote beside the heightmap), 0 to 1 at the position. Add the layer to the maps of the terrain's Load Mesh node. Wire it to a Bake node's extra inputs to write the layer's weights per chunk.");
+            row(ui, name, String::new(), |ui, v| {
+                ui.label("layer");
+                ui.add(egui::TextEdit::singleline(v).hint_text("rock").desired_width(110.0));
+            });
+        }
         NodeKind::Heightmap(h) => crate::landscape_heightmap::node_ui(ui, h),
         NodeKind::Stamp(s) => crate::landscape_stamp::node_ui(ui, s),
         NodeKind::Slope { .. } => _ = ui.weak("The slope of the input in degrees. In the Landscape tab one unit of the input is one height (the height setting), spread over the size setting; wire the terrain's height in."),

@@ -111,3 +111,7 @@ Each phase is usable on its own and tested before the next.
 - **Phase 5:** done. The Erosion node has a *kind*: Water (as before) or Wind (`landscape_wind.rs`: saltation with a
   lee shadow, material hops downwind, dunes build behind crests, windward faces wear, thermal slides after; its own
   shader and bind group; same outputs and maps). Chaining Erosion nodes is the stack.
+- **Phase 6:** done. The terrain's Load Mesh node has `maps`: paint layers (from the sidecar's `layers`) loaded as extra
+  layers of the heights' 3D texture (no new bindings; each costs as much video memory as the heights). *Terrain layer*
+  (Mesh graph node, `TerrainLayer { name }`) reads one at a position: wire it to a Bake node's extra inputs for per-chunk
+  layer weights. Scatter has `density_map`, a layer that scales its density.
