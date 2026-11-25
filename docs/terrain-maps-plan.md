@@ -1,6 +1,6 @@
 # Terrain maps, erosion and layer nodes, stamps: plan
 
-Status: agreed 2026-11-26, phase 0 in progress. Covers five features picked after looking at TerraForge3D:
+Status: agreed 2026-11-26. Phases 0 to 2 done (see Progress at the end); defaults decided: imported maps up to 2049 a side, Erosion auto-run on by default. Covers five features picked after looking at TerraForge3D:
 
 1. Erosion output maps (flow, deposition, wear).
 2. Unreal paint-layer weightmaps from the Landscape.
@@ -93,3 +93,13 @@ Each phase is usable on its own and tested before the next.
 - Imported maps up to 2049 a side: enough? (The terrain is still sampled at the working resolution.)
 - Stamps only raise or cut height. Caves and overhangs stay in the Mesh graph, where they already work.
 - Auto-run for Erosion nodes: on by default, or a Run button only?
+
+## Progress
+
+- **Phase 0, 1:** done (terrain maps store; Erosion node with grid boundary, cache, badge and Run, old projects migrated).
+- **Phase 2:** done. *Select* (range with soft edges: height, slope in degrees, or a map) and *Layer* (output; name and
+  colour) nodes. `export_terrain` writes the heightmap and one 8-bit weightmap per layer (`<heightmap>_<layer>.png`,
+  normalised, adding up to 255 per cell), listed under `layers` in the sidecar. The 3D view paints the layers' colours.
+  `noiser --build spec.json out.landscape` (with an optional `"settings"` object) and `--preview X.landscape OUT.png`
+  (map and 3D view side by side) work from the command line. Weightmap import into Unreal is checked in the end-to-end
+  run (UE 5.8 is at `C:\UnrealEngine\UE_5.8` on this machine, not `E:`).
