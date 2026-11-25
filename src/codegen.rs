@@ -482,6 +482,7 @@ impl Gen<'_> {
             }
             NodeKind::NoiseGraph(_) => return Err("a Noise Graph node must be lowered first (meshgraph::lowered_mesh)".into()),
             NodeKind::Remesh { .. } | NodeKind::AutoUv(_) | NodeKind::Bake(_) | NodeKind::OutMesh(_) | NodeKind::OutImage(_) | NodeKind::ImageSplit | NodeKind::ImageCombine | NodeKind::ImageLevels { .. } | NodeKind::TransferUv => return Err("this node does not produce a field".into()),
+            NodeKind::Erosion(_) => return Err("an Erosion node works only in the Landscape graph, on a terrain".into()),
             // Never reached (readers look through them), but the match must be complete.
             NodeKind::NamedReroute { .. } | NodeKind::NamedRerouteUse { .. } => (Ty::F, "0.0".into()),
             NodeKind::Reroute => {

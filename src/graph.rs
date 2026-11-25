@@ -68,6 +68,10 @@ pub enum NodeKind {
         #[serde(default = "one")]
         scale: f32,
     },
+    /// Landscape graph: hydraulic and thermal erosion of its input (a height field) on the terrain's working grid.
+    /// Outputs: the eroded height (in the input's units), then flow, deposition and wear (0 to 1). Not a function: the
+    /// Landscape tab runs it before compiling and puts terrain maps in its place (see `landscape_erosion_node`).
+    Erosion(crate::landscape_erosion::Erosion),
     /// A waypoint on a wire: passes its input through (every reader skips it, like a muted node).
     Reroute,
     /// The named end of a wire (Unreal's named reroute): passes its input on, and any `NamedRerouteUse` with the
@@ -120,7 +124,7 @@ impl NodeKind {
     pub fn output_count(&self) -> usize {
         match self {
             NodeKind::Separate => 3,
-            NodeKind::ImageSplit => 4,
+            NodeKind::ImageSplit | NodeKind::Erosion(_) => 4,
             // The second output of a generator is its displacement vector.
             NodeKind::LoadMesh(_) | NodeKind::Noise(_) | NodeKind::Pattern(_) | NodeKind::Grid { .. } => 2,
             NodeKind::Bake(s) => (s.channels.len() + s.custom.len()).max(1),
@@ -157,7 +161,7 @@ impl NodeKind {
             NodeKind::Separate => 1,
             NodeKind::Curve { .. } => 1,
             NodeKind::Noise(_) | NodeKind::Grid { .. } | NodeKind::Pattern(_) => 1 + self.param_pins().len(),
-            NodeKind::Normal { .. } | NodeKind::Radial(_) | NodeKind::Mask { .. } | NodeKind::Slope { .. } | NodeKind::OutDensity | NodeKind::OutNormal => 1,
+            NodeKind::Normal { .. } | NodeKind::Radial(_) | NodeKind::Mask { .. } | NodeKind::Slope { .. } | NodeKind::Erosion(_) | NodeKind::OutDensity | NodeKind::OutNormal => 1,
             NodeKind::Scatter(_) => 2,
             NodeKind::LoadMesh(_) | NodeKind::LoadSdf(_) | NodeKind::NoiseGraph(_) | NodeKind::Remesh { .. } | NodeKind::AutoUv(_) | NodeKind::OutMesh(_) | NodeKind::OutImage(_) | NodeKind::ImageSplit | NodeKind::ImageLevels { .. } => 1,
             NodeKind::Bake(s) => 2 + s.custom.len(),
@@ -740,6 +744,7 @@ impl Graph {
             }
             NodeKind::Radial(_) => Broken("a radial position does not tile".into()),
             NodeKind::Mask { .. } => Broken("a painted mask does not tile".into()),
+            NodeKind::Erosion(_) => Broken("erosion does not tile".into()),
             NodeKind::Slope { .. } => match input(0, memo, stack).unwrap_or(Const) {
                 Coord => Const, // the slope of a linear position map is constant
                 t => t,
@@ -1055,6 +1060,11 @@ impl Graph {
             },
             NodeKind::Normal { .. } => (-1.0, 1.0),
             NodeKind::Mask { .. } => (0.0, 1.0),
+            // The eroded height stays within its input's range (erosion only moves material); the maps are 0 to 1.
+            NodeKind::Erosion(_) => {
+                let h = self.input(id, 0).map_or((0.0, 0.0), |src| self.range_of(src, stack));
+                (h.0.min(0.0), h.1.max(1.0))
+            }
             NodeKind::Slope { .. } => (0.0, 90.0),
             // noise.wgsl keeps every kind within [-1, 1] (Perlin and Simplex are clamped).
             NodeKind::Noise(n) => scaled(if n.normalize { (0.0, 1.0) } else { (-1.0, 1.0) }, n.amount),

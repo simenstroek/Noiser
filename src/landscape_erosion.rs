@@ -16,11 +16,10 @@ use eframe::wgpu;
 use std::sync::atomic::Ordering;
 use wgpu::util::DeviceExt;
 
+/// The settings of an Erosion node (Landscape graph). The grid it erodes on is the terrain's working resolution.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct Erosion {
-    /// Working grid side in samples (the preview and the exports use this grid).
-    pub resolution: usize,
     /// Hydraulic iterations (a fifth more follow with no rain so the sediment settles).
     pub iterations: u32,
     /// Rain in metres of water per second (each iteration is a fixed time step).
@@ -36,42 +35,58 @@ pub struct Erosion {
     /// Thermal iterations, and the angle of repose in degrees.
     pub thermal_iterations: u32,
     pub talus_deg: f32,
+    /// Run again by itself when what feeds it changes (otherwise it keeps its last result, marked out of date, until
+    /// Run is pressed).
+    pub auto: bool,
+    /// The preset these settings were loaded from or saved as (shown on the node; empty for none).
+    pub preset: String,
 }
 
 impl Default for Erosion {
     fn default() -> Self {
-        Erosion { resolution: 1024, iterations: 1000, rain: 0.04, capacity: 0.05, dissolve: 0.05, deposit: 0.05, evaporation: 0.05, thermal_iterations: 20, talus_deg: 35.0 }
+        Erosion { iterations: 1000, rain: 0.04, capacity: 0.05, dissolve: 0.05, deposit: 0.05, evaporation: 0.05, thermal_iterations: 20, talus_deg: 35.0, auto: true, preset: String::new() }
     }
 }
 
 /// Erosion presets: `.erosion` files (JSON) in the library's Erosion Presets folder, or anywhere. A preset holds how the
-/// erosion behaves, not the working resolution, which is about the machine and how fine and slow a run is: loading one
-/// keeps the resolution in use.
+/// erosion behaves: not whether the node runs by itself, nor the preset's own name (the file's name is that).
 impl Erosion {
+    /// Only what shapes the result (for presets, and for the key of a cached run).
+    fn simulation(&self) -> Erosion {
+        Erosion { auto: true, preset: String::new(), ..self.clone() }
+    }
+
     pub fn to_preset(&self) -> String {
-        let mut settings = serde_json::to_value(self).unwrap_or_default();
+        let mut settings = serde_json::to_value(self.simulation()).unwrap_or_default();
         if let Some(map) = settings.as_object_mut() {
-            map.remove("resolution");
+            map.remove("auto");
+            map.remove("preset");
         }
         serde_json::to_string_pretty(&serde_json::json!({ "noiser_erosion": 1, "settings": settings })).unwrap_or_default()
     }
 
-    /// These settings with a preset's applied (settings it leaves out take their defaults), keeping the resolution.
-    pub fn with_preset(&self, text: &str) -> Result<Erosion, String> {
+    /// These settings with a preset's applied (settings it leaves out take their defaults), named `name`; whether the
+    /// node runs by itself stays as it was.
+    pub fn with_preset(&self, text: &str, name: &str) -> Result<Erosion, String> {
         let v: serde_json::Value = serde_json::from_str(text).map_err(|e| e.to_string())?;
         let settings = v.get("settings").filter(|_| v.get("noiser_erosion").is_some()).ok_or("not an erosion preset")?;
         let preset: Erosion = serde_json::from_value(settings.clone()).map_err(|e| e.to_string())?;
-        Ok(Erosion { resolution: self.resolution, ..preset })
+        Ok(Erosion { auto: self.auto, preset: name.to_string(), ..preset })
     }
 
-    /// These settings back at their defaults, keeping the resolution.
+    /// These settings back at their defaults (whether the node runs by itself stays).
     pub fn reset(&self) -> Erosion {
-        Erosion { resolution: self.resolution, ..Erosion::default() }
+        Erosion { auto: self.auto, ..Erosion::default() }
     }
 
-    /// The same erosion as `other`, whatever the resolution.
+    /// The same erosion as `other`: the settings that shape the result are equal.
     pub fn same_as(&self, other: &Erosion) -> bool {
-        *self == Erosion { resolution: self.resolution, ..other.clone() }
+        self.simulation() == other.simulation()
+    }
+
+    /// A hash of the settings that shape the result.
+    pub fn key(&self) -> String {
+        serde_json::to_string(&self.simulation()).unwrap_or_default()
     }
 }
 
@@ -80,25 +95,84 @@ mod preset_tests {
     use super::*;
 
     #[test]
-    fn a_preset_round_trips_and_leaves_the_resolution_alone() {
-        let mine = Erosion { resolution: 2048, iterations: 3000, rain: 0.1, talus_deg: 30.0, ..Default::default() };
+    fn a_preset_round_trips_without_the_node_s_own_settings() {
+        let mine = Erosion { iterations: 3000, rain: 0.1, talus_deg: 30.0, auto: false, preset: "old".into(), ..Default::default() };
         let text = mine.to_preset();
-        assert!(!text.contains("resolution"), "a preset does not carry the working resolution");
-        let other = Erosion { resolution: 512, ..Default::default() };
-        let loaded = other.with_preset(&text).unwrap();
-        assert_eq!(loaded.resolution, 512, "loading keeps the resolution in use");
-        assert!(loaded.same_as(&mine), "and takes everything else from the preset");
-        assert!(other.with_preset("{\"graph\": 1}").is_err(), "a file that is not a preset is refused");
+        assert!(!text.contains("auto") && !text.contains("preset"), "a preset holds only how the erosion behaves: {text}");
+        let other = Erosion { auto: false, ..Default::default() };
+        let loaded = other.with_preset(&text, "dunes").unwrap();
+        assert!(loaded.same_as(&mine) && !loaded.auto && loaded.preset == "dunes");
+        assert!(other.with_preset("{\"graph\": 1}", "x").is_err(), "a file that is not a preset is refused");
     }
 
     #[test]
-    fn a_preset_missing_settings_gets_the_defaults_and_reset_keeps_the_resolution() {
-        let base = Erosion { resolution: 4096, iterations: 7, ..Default::default() };
-        let loaded = base.with_preset("{\"noiser_erosion\": 1, \"settings\": {\"rain\": 0.2}}").unwrap();
-        assert_eq!((loaded.rain, loaded.iterations, loaded.resolution), (0.2, Erosion::default().iterations, 4096));
+    fn a_preset_missing_settings_gets_the_defaults_and_reset_keeps_auto() {
+        let base = Erosion { iterations: 7, auto: false, ..Default::default() };
+        let loaded = base.with_preset("{\"noiser_erosion\": 1, \"settings\": {\"rain\": 0.2, \"resolution\": 4096}}", "p").unwrap();
+        assert_eq!((loaded.rain, loaded.iterations), (0.2, Erosion::default().iterations));
         let reset = base.reset();
-        assert!(reset.same_as(&Erosion::default()) && reset.resolution == 4096);
+        assert!(reset.same_as(&Erosion::default()) && !reset.auto);
     }
+}
+/// The Erosion node's settings: its preset (pick from the library, save, load, reset), whether it runs by itself, and
+/// the simulation settings. Whether its result is up to date, and Run, are shown by the Landscape tab beside this.
+pub fn node_ui(ui: &mut eframe::egui::Ui, e: &mut Erosion) {
+    use eframe::egui;
+    let d = Erosion::default();
+    let before = e.clone();
+    ui.horizontal(|ui| {
+        let shown = if !e.preset.is_empty() { e.preset.clone() } else if e.same_as(&d) { "default".to_string() } else { "custom".to_string() };
+        let mut pick = None;
+        egui::ComboBox::from_id_salt("erosion preset").selected_text(shown).width(130.0).show_ui(ui, |ui| {
+            // Read when the list opens, not every frame: the library may be on a network drive.
+            let presets = library_presets();
+            if presets.is_empty() {
+                ui.weak(if crate::library::root().is_some() { "No presets in the library yet" } else { "No library folder set (Preferences)" });
+            }
+            for (name, path) in presets {
+                if ui.selectable_label(false, name).clicked() {
+                    pick = Some(path);
+                }
+            }
+        }).response.on_hover_text("Erosion presets in the library's Erosion Presets folder");
+        if crate::icons::button(ui, "open", "Load erosion preset", None, true).on_hover_text("Load an erosion preset file from anywhere").clicked() {
+            pick = crate::library::dialog(crate::library::Kind::Erosion, rfd::FileDialog::new().add_filter("Erosion preset", &["erosion"])).pick_file();
+        }
+        if let Some(path) = pick {
+            let name = path.file_stem().map_or_else(String::new, |s| s.to_string_lossy().into_owned());
+            if let Ok(loaded) = std::fs::read_to_string(&path).map_err(|e| e.to_string()).and_then(|text| e.with_preset(&text, &name)) {
+                *e = loaded;
+            }
+        }
+        if crate::icons::button(ui, "save", "Save erosion preset", None, true).on_hover_text("Save these settings as a preset (in the library's Erosion Presets folder unless you pick another)").clicked() {
+            if let Some(dir) = crate::library::dir(crate::library::Kind::Erosion) {
+                let _ = std::fs::create_dir_all(dir);
+            }
+            let start = if e.preset.is_empty() { "erosion".to_string() } else { e.preset.clone() };
+            let dialog = rfd::FileDialog::new().add_filter("Erosion preset", &["erosion"]).set_file_name(format!("{start}.erosion"));
+            if let Some(path) = crate::library::dialog(crate::library::Kind::Erosion, dialog).save_file()
+                && std::fs::write(&path, e.to_preset()).is_ok() {
+                    e.preset = path.file_stem().map_or_else(String::new, |s| s.to_string_lossy().into_owned());
+                }
+        }
+        if crate::icons::button(ui, "reset", "Reset erosion", None, !e.same_as(&d)).on_hover_text("Put every erosion setting back to its default").clicked() {
+            *e = e.reset();
+        }
+    });
+    ui.checkbox(&mut e.auto, "run by itself").on_hover_text("Run again when what feeds this node changes. Off: the last result stays (marked out of date) until you press Run.");
+    crate::row(ui, &mut e.iterations, d.iterations, |ui, v| _ = ui.add(egui::DragValue::new(v).range(0..=20000).speed(10.0).prefix("iterations ")));
+    crate::row(ui, &mut e.rain, d.rain, |ui, v| _ = ui.add(egui::DragValue::new(v).range(0.0..=1.0).speed(0.001).prefix("rain ").suffix(" m/s")));
+    crate::row(ui, &mut e.capacity, d.capacity, |ui, v| _ = ui.add(egui::DragValue::new(v).range(0.0..=1.0).speed(0.001).prefix("capacity ")).on_hover_text("How much sediment fast water on a slope can carry: more means deeper channels."));
+    crate::row(ui, &mut e.dissolve, d.dissolve, |ui, v| _ = ui.add(egui::DragValue::new(v).range(0.0..=1.0).speed(0.005).prefix("dissolve ")).on_hover_text("How quickly water picks sediment up."));
+    crate::row(ui, &mut e.deposit, d.deposit, |ui, v| _ = ui.add(egui::DragValue::new(v).range(0.0..=1.0).speed(0.005).prefix("deposit ")).on_hover_text("How quickly water drops sediment."));
+    crate::row(ui, &mut e.evaporation, d.evaporation, |ui, v| _ = ui.add(egui::DragValue::new(v).range(0.0..=1.0).speed(0.001).prefix("evaporation ")));
+    crate::row(ui, &mut e.thermal_iterations, d.thermal_iterations, |ui, v| _ = ui.add(egui::DragValue::new(v).range(0..=5000).speed(1.0).prefix("thermal iterations ")));
+    crate::row(ui, &mut e.talus_deg, d.talus_deg, |ui, v| _ = ui.add(egui::DragValue::new(v).range(1.0..=89.0).speed(0.5).prefix("repose ").suffix(" deg")));
+    // Changed by hand: no longer the preset it was.
+    if !e.same_as(&before) && e.preset == before.preset {
+        e.preset.clear();
+    }
+    ui.weak("Outputs: the eroded height (in the input's units), then flow, deposition and wear (0 to 1), for layers, masks and Scatter.");
 }
 
 /// The presets in the library's folder, by name, sorted.
@@ -289,8 +363,32 @@ fn finish(@builtin(global_invocation_id) id: vec3u) {
 }
 ";
 
+/// How much water passed through each cell: a pass of its own (its own bind group), so the hydraulic passes stay
+/// within the default limit of 8 storage buffers.
+const FLOW_SHADER: &str = "
+struct P { n: u32, pad: u32, dx: f32, dt: f32, g: f32, rain: f32, kc: f32, ks: f32, kd: f32, ke: f32, min_tilt: f32, max_step: f32, talus_h: f32, rate: f32, damp: f32, pad2: f32 };
+@group(0) @binding(0) var<uniform> p: P;
+@group(0) @binding(1) var<storage, read> d: array<f32>;
+@group(0) @binding(2) var<storage, read> vel: array<vec2f>;
+@group(0) @binding(3) var<storage, read_write> flow: array<f32>;
+
+@compute @workgroup_size(8, 8)
+fn flow_pass(@builtin(global_invocation_id) id: vec3u) {
+    if (id.x >= p.n || id.y >= p.n) { return; }
+    let i = id.y * p.n + id.x;
+    flow[i] = flow[i] + d[i] * length(vel[i]) * p.dt;
+}
+";
+
+/// What an erosion run gives: the eroded heights (metres) and the water that flowed through each cell over the run
+/// (metres of depth times metres travelled; see `ErosionMaps` for the 0..1 maps).
+pub struct ErosionResult {
+    pub heights: Vec<f32>,
+    pub flow: Vec<f32>,
+}
+
 /// Erodes `heights` (`n` x `n` metres, rows along y) on a grid whose cells are `cell_m` metres apart.
-pub fn erode(device: &wgpu::Device, queue: &wgpu::Queue, heights: &[f32], n: usize, cell_m: f32, e: &Erosion, progress: &Progress) -> Result<Vec<f32>, String> {
+pub fn erode(device: &wgpu::Device, queue: &wgpu::Queue, heights: &[f32], n: usize, cell_m: f32, e: &Erosion, progress: &Progress) -> Result<ErosionResult, String> {
     if heights.len() != n * n {
         return Err("the grid has the wrong size".into());
     }
@@ -341,6 +439,24 @@ pub fn erode(device: &wgpu::Device, queue: &wgpu::Queue, heights: &[f32], n: usi
         device.create_bind_group(&wgpu::BindGroupDescriptor { label: None, layout: &bgl, entries: &entries })
     };
     let (g_rain, g_settle) = (bind(&u_rain), bind(&u_settle));
+    // The flow pass: water depth and velocity read, flow added up.
+    let flow = buffer(1);
+    queue.write_buffer(&flow, 0, &vec![0u8; flow.size() as usize]);
+    let flow_module = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("erosion flow"), source: wgpu::ShaderSource::Wgsl(FLOW_SHADER.into()) });
+    let read_entry = |binding| wgpu::BindGroupLayoutEntry { binding, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }, count: None };
+    let flow_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some("erosion flow"), entries: &[entries[0], read_entry(1), read_entry(2), storage_entry(3)] });
+    let flow_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("erosion flow"), bind_group_layouts: &[Some(&flow_bgl)], immediate_size: 0 });
+    let flow_pass = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor { label: Some("flow_pass"), layout: Some(&flow_layout), module: &flow_module, entry_point: Some("flow_pass"), compilation_options: Default::default(), cache: None });
+    let g_flow = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("erosion flow"),
+        layout: &flow_bgl,
+        entries: &[
+            wgpu::BindGroupEntry { binding: 0, resource: u_rain.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 1, resource: d.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 2, resource: vel.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 3, resource: flow.as_entire_binding() },
+        ],
+    });
     let groups = (n as u32).div_ceil(8);
     let hydraulic = e.iterations;
     let settling = e.iterations / 5;
@@ -365,6 +481,12 @@ pub fn erode(device: &wgpu::Device, queue: &wgpu::Queue, heights: &[f32], n: usi
                         pass.set_pipeline(pipe);
                         pass.dispatch_workgroups(groups, groups, 1);
                     }
+                    // Flow is counted while it rains (the settling steps would only add still water).
+                    if it < hydraulic {
+                        pass.set_bind_group(0, &g_flow, &[]);
+                        pass.set_pipeline(&flow_pass);
+                        pass.dispatch_workgroups(groups, groups, 1);
+                    }
                 }
                 // The sediment goes back on the ground when the water part is over.
                 if it + 1 == hydraulic + settling {
@@ -379,12 +501,52 @@ pub fn erode(device: &wgpu::Device, queue: &wgpu::Queue, heights: &[f32], n: usi
         done += batch;
         progress.store((done * 1000 / total.max(1)) as u32, Ordering::Relaxed);
     }
-    let read = device.create_buffer(&wgpu::BufferDescriptor { label: None, size: cells * 4, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
-    let mut enc = device.create_command_encoder(&Default::default());
-    enc.copy_buffer_to_buffer(&b, 0, &read, 0, cells * 4);
-    queue.submit([enc.finish()]);
-    read.map_async(wgpu::MapMode::Read, .., |r| r.expect("map erosion result"));
-    device.poll(wgpu::PollType::wait_indefinitely()).map_err(|e| format!("{e:?}"))?;
-    let view = read.get_mapped_range(..).map_err(|e| format!("{e:?}"))?;
-    Ok(bytemuck::cast_slice(&view).to_vec())
+    let read_back = |src: &wgpu::Buffer| -> Result<Vec<f32>, String> {
+        let read = device.create_buffer(&wgpu::BufferDescriptor { label: None, size: cells * 4, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+        let mut enc = device.create_command_encoder(&Default::default());
+        enc.copy_buffer_to_buffer(src, 0, &read, 0, cells * 4);
+        queue.submit([enc.finish()]);
+        read.map_async(wgpu::MapMode::Read, .., |r| r.expect("map erosion result"));
+        device.poll(wgpu::PollType::wait_indefinitely()).map_err(|e| format!("{e:?}"))?;
+        let view = read.get_mapped_range(..).map_err(|e| format!("{e:?}"))?;
+        Ok(bytemuck::cast_slice(&view).to_vec())
+    };
+    Ok(ErosionResult { heights: read_back(&b)?, flow: read_back(&flow)? })
+}
+
+/// The 0..1 maps an erosion run leaves besides the height: where water ran (flow, on a log scale, since rivers carry
+/// orders of magnitude more than slopes), where material was laid down (deposition) and where it was taken away
+/// (wear). Deposition and wear come from comparing the heights before and after, so they cover thermal erosion too
+/// (scree fans and their sources).
+pub struct ErosionMaps {
+    pub flow: Vec<f32>,
+    pub deposition: Vec<f32>,
+    pub wear: Vec<f32>,
+}
+
+impl ErosionMaps {
+    pub fn new(before: &[f32], result: &ErosionResult) -> ErosionMaps {
+        let change: Vec<f32> = result.heights.iter().zip(before).map(|(a, b)| a - b).collect();
+        // Scaled by a high percentile rather than the maximum, so a few extreme cells don't make the rest of the map dark.
+        let scale_by = |values: Vec<f32>| -> Vec<f32> {
+            let top = percentile(&values, 0.99).max(1e-6);
+            values.iter().map(|v| (v / top).clamp(0.0, 1.0)).collect()
+        };
+        let flow: Vec<f32> = result.flow.iter().map(|f| (1.0 + f.max(0.0) * 100.0).ln()).collect();
+        ErosionMaps {
+            flow: scale_by(flow),
+            deposition: scale_by(change.iter().map(|c| c.max(0.0)).collect()),
+            wear: scale_by(change.iter().map(|c| (-c).max(0.0)).collect()),
+        }
+    }
+}
+
+/// The value below which `fraction` of the positive values lie (0 when there are none).
+fn percentile(values: &[f32], fraction: f32) -> f32 {
+    let mut positive: Vec<f32> = values.iter().copied().filter(|v| *v > 0.0).collect();
+    if positive.is_empty() {
+        return 0.0;
+    }
+    let k = ((positive.len() - 1) as f32 * fraction) as usize;
+    *positive.select_nth_unstable_by(k, |a, b| a.total_cmp(b)).1
 }

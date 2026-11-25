@@ -26,6 +26,7 @@ mod meshworkspace;
 mod landscape;
 mod landscape_field;
 mod landscape_gpu;
+mod landscape_terrain;
 mod terrain_maps;
 mod scatter;
 mod landscape_masks;
@@ -1065,7 +1066,7 @@ impl App {
             }
             library::Kind::Erosion => {
                 self.workspace = Workspace::Landscape;
-                self.landscape.load_erosion_preset(&path);
+                self.landscape.apply_erosion_preset(&path);
             }
             library::Kind::Bake | library::Kind::Udim => {}
         }

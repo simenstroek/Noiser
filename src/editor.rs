@@ -67,6 +67,8 @@ pub struct Editor {
     pub mesh_mode: bool,
     /// The Landscape tab's editor: its add menus offer the Mask, Slope and Noise Graph nodes.
     pub landscape_mode: bool,
+    /// Short status text drawn on a node (the Landscape tab's Erosion nodes: up to date, out of date, running).
+    pub badges: std::collections::HashMap<NodeId, String>,
     /// A node was double-clicked this frame (the app opens what it refers to).
     pub opened: Option<NodeId>,
     /// Snap nodes to a 20-unit grid when a drag ends (a preference).
@@ -112,6 +114,7 @@ impl Default for Editor {
             mesh_mode: false,
             landscape_mode: false,
             opened: None,
+            badges: Default::default(),
             snap: false,
             cut_start: None,
             cut_armed: false,
@@ -158,6 +161,7 @@ pub fn title(kind: &NodeKind) -> String {
         NodeKind::Normal { .. } => "Normal".into(),
         NodeKind::Mask { name } => if name.is_empty() { "Map".into() } else { format!("Map: {name}") },
         NodeKind::Slope { .. } => "Slope".into(),
+        NodeKind::Erosion(e) => if e.preset.is_empty() { "Erosion".into() } else { format!("Erosion: {}", e.preset) },
         NodeKind::Noise(n) => n.kind.name().into(),
         NodeKind::OutDensity => "Density Output".into(),
         NodeKind::OutNormal => "Normal Output".into(),
@@ -208,6 +212,7 @@ fn input_label(kind: &NodeKind, port: usize) -> &'static str {
         (NodeKind::Noise(_) | NodeKind::Radial(_), _) => "Position",
         (NodeKind::Normal { .. } | NodeKind::Slope { .. }, _) => "Field",
         (NodeKind::Mask { .. }, _) => "Position",
+        (NodeKind::Erosion(_), _) => "Height",
         (NodeKind::OutDensity, _) => "Density",
         (NodeKind::OutNormal, _) => "Normal",
         (NodeKind::LoadMesh(_) | NodeKind::LoadSdf(_) | NodeKind::NoiseGraph(_), _) => "Position",
@@ -238,6 +243,7 @@ fn header_tint(kind: &NodeKind) -> Color32 {
         // The Landscape tab's own nodes: earth tones, like the tab.
         NodeKind::Mask { .. } => Color32::from_rgb(130, 82, 52),
         NodeKind::Slope { .. } => Color32::from_rgb(112, 96, 58),
+        NodeKind::Erosion(_) => Color32::from_rgb(70, 110, 150),
         NodeKind::OutDensity | NodeKind::OutNormal | NodeKind::OutMesh(_) | NodeKind::OutImage(_) => Color32::from_rgb(80, 60, 95),
         NodeKind::LoadMesh(_) | NodeKind::LoadSdf(_) | NodeKind::NoiseGraph(_) => Color32::from_rgb(50, 95, 70),
         NodeKind::Scatter(_) => Color32::from_rgb(70, 110, 60),
@@ -281,6 +287,7 @@ fn palette() -> Vec<(&'static str, NodeKind)> {
         all.extend([
             ("Map", NodeKind::Mask { name: String::new() }),
             ("Slope", NodeKind::Slope { scale: 1.0 }),
+            ("Erosion", NodeKind::Erosion(Default::default())),
             ("Noise Graph", NodeKind::NoiseGraph(Default::default())),
         ]);
     }
@@ -692,6 +699,10 @@ impl Editor {
                 let at = Pos2::new(l.rect.left() + 8.0 * z, l.rect.top() + (HEADER_H + ROW_H * 0.5) * z);
                 painter.text(at, egui::Align2::LEFT_CENTER, s, small.clone(), Color32::from_gray(190));
             }
+            if let Some(badge) = self.badges.get(&id) {
+                let at = Pos2::new(l.rect.right() - 8.0 * z, l.rect.bottom() - 9.0 * z);
+                painter.text(at, egui::Align2::RIGHT_CENTER, badge, small.clone(), Color32::from_rgb(150, 200, 235));
+            }
 
             // Cache toggle, beside the eye.
             if cacheable {
@@ -805,6 +816,7 @@ impl Editor {
                     let name = match &node.kind {
                         NodeKind::Bake(b) => b.channels.get(k).map(|c| c.name()).or_else(|| b.custom.get(k - b.channels.len()).map(|s| s.as_str())).unwrap_or(""),
                         NodeKind::ImageSplit => ["R", "G", "B", "A"][k.min(3)],
+                        NodeKind::Erosion(_) => ["Height", "Flow", "Deposition", "Wear"][k.min(3)],
                         NodeKind::LoadMesh(_) => ["Field", "Mesh"][k.min(1)],
                         NodeKind::Noise(_) | NodeKind::Pattern(_) | NodeKind::Grid { .. } => ["Value", "Displacement"][k.min(1)],
                         _ => ["X", "Y", "Z"][k.min(2)],

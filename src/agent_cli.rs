@@ -32,6 +32,7 @@ fn catalogue() -> Vec<(&'static str, NodeKind, &'static str)> {
         ("Radial", K::Radial(Default::default()), "Position in cylindrical or spherical coordinates. Input 0: position."),
         ("Mask", K::Mask { name: "mask".into() }, "Landscape tab: the terrain map `name` (a painted mask today; shown as Map in the app), 0..1, at the position. Input 0: position."),
         ("Slope", K::Slope { scale: 1.0 }, "The slope in degrees of the input field over x and y."),
+        ("Erosion", K::Erosion(Default::default()), "Landscape tab only: hydraulic and thermal erosion of input 0 (the height) on the terrain's working grid. Output 0: eroded height (input's units); 1: flow, 2: deposition, 3: wear (0..1). `auto` reruns it when the input changes."),
         ("Reroute", K::Reroute, "A waypoint on a wire; passes its input on."),
         ("NamedReroute", K::NamedReroute { name: "name".into() }, "The named end of a wire; read it with NamedRerouteUse."),
         ("NamedRerouteUse", K::NamedRerouteUse { name: "name".into() }, "Reads the NamedReroute with the same name."),
@@ -552,9 +553,9 @@ mod tests {
         }
         // Adding a NodeKind variant breaks this match until the catalogue lists it.
         let _ = |k: &NodeKind| match k {
-            NodeKind::Float(_) | NodeKind::Vec3(_) | NodeKind::Math { .. } | NodeKind::Remap { .. } | NodeKind::Separate | NodeKind::Combine { .. } | NodeKind::Random { .. } | NodeKind::Mix { .. } | NodeKind::Curve { .. } | NodeKind::Grid { .. } | NodeKind::Pattern(_) | NodeKind::Position { .. } | NodeKind::Radial(_) | NodeKind::Mask { .. } | NodeKind::Slope { .. } | NodeKind::Reroute | NodeKind::NamedReroute { .. } | NodeKind::NamedRerouteUse { .. } | NodeKind::Normal { .. } | NodeKind::Noise(_) | NodeKind::OutDensity | NodeKind::OutNormal | NodeKind::LoadMesh(_) | NodeKind::LoadSdf(_) | NodeKind::Scatter(_) | NodeKind::NoiseGraph(_) | NodeKind::Remesh { .. } | NodeKind::AutoUv(_) | NodeKind::Bake(_) | NodeKind::OutMesh(_) | NodeKind::OutImage(_) | NodeKind::TransferUv | NodeKind::ImageSplit | NodeKind::ImageCombine | NodeKind::ImageLevels { .. } => {}
+            NodeKind::Float(_) | NodeKind::Vec3(_) | NodeKind::Math { .. } | NodeKind::Remap { .. } | NodeKind::Separate | NodeKind::Combine { .. } | NodeKind::Random { .. } | NodeKind::Mix { .. } | NodeKind::Curve { .. } | NodeKind::Grid { .. } | NodeKind::Pattern(_) | NodeKind::Position { .. } | NodeKind::Radial(_) | NodeKind::Mask { .. } | NodeKind::Slope { .. } | NodeKind::Erosion(_) | NodeKind::Reroute | NodeKind::NamedReroute { .. } | NodeKind::NamedRerouteUse { .. } | NodeKind::Normal { .. } | NodeKind::Noise(_) | NodeKind::OutDensity | NodeKind::OutNormal | NodeKind::LoadMesh(_) | NodeKind::LoadSdf(_) | NodeKind::Scatter(_) | NodeKind::NoiseGraph(_) | NodeKind::Remesh { .. } | NodeKind::AutoUv(_) | NodeKind::Bake(_) | NodeKind::OutMesh(_) | NodeKind::OutImage(_) | NodeKind::TransferUv | NodeKind::ImageSplit | NodeKind::ImageCombine | NodeKind::ImageLevels { .. } => {}
         };
-        assert_eq!(seen.len(), 35);
+        assert_eq!(seen.len(), 36);
     }
 
     #[test]

@@ -2869,17 +2869,17 @@ fn erosion_keeps_the_ground_and_changes_the_shape() {
     let n = 128;
     let before = hilly(n);
     let e = Erosion { iterations: 150, thermal_iterations: 10, ..Default::default() };
-    let after = erode(&gpu.device, &gpu.queue, &before, n, 4.0, &e, &Default::default()).unwrap();
+    let after = erode(&gpu.device, &gpu.queue, &before, n, 4.0, &e, &Default::default()).unwrap().heights;
     let mean = |v: &[f32]| v.iter().sum::<f32>() / v.len() as f32;
     assert!((mean(&after) - mean(&before)).abs() < 0.5, "the ground is moved, not made or lost: {} -> {}", mean(&before), mean(&after));
     let changed = before.iter().zip(&after).filter(|(a, b)| (*a - *b).abs() > 0.01).count();
     assert!(changed > n * n / 4, "{changed} cells changed");
     assert!(after.iter().all(|v| v.is_finite()), "finite heights");
     // The same input erodes the same way.
-    let again = erode(&gpu.device, &gpu.queue, &before, n, 4.0, &e, &Default::default()).unwrap();
+    let again = erode(&gpu.device, &gpu.queue, &before, n, 4.0, &e, &Default::default()).unwrap().heights;
     assert_eq!(after, again);
     // No iterations leave the grid alone.
-    let none = erode(&gpu.device, &gpu.queue, &before, n, 4.0, &Erosion { iterations: 0, thermal_iterations: 0, ..e }, &Default::default()).unwrap();
+    let none = erode(&gpu.device, &gpu.queue, &before, n, 4.0, &Erosion { iterations: 0, thermal_iterations: 0, ..e }, &Default::default()).unwrap().heights;
     assert_eq!(none, before);
 }
 
@@ -2900,13 +2900,13 @@ fn erosion_pictures() {
     let values = crate::landscape::sample(&ev, n, &Default::default());
     let metres = crate::landscape::to_metres(&values, &s);
     let cell = s.world_m / (n - 1) as f32;
-    let mut e = Erosion { resolution: n, ..Default::default() };
+    let mut e = Erosion::default();
     if let Ok(v) = std::env::var("EROSION_ITERS") { e.iterations = v.parse().unwrap(); }
     if let Ok(v) = std::env::var("EROSION_CAP") { e.capacity = v.parse().unwrap(); }
     if let Ok(v) = std::env::var("EROSION_RAIN") { e.rain = v.parse().unwrap(); }
     if let Ok(v) = std::env::var("EROSION_KS") { (e.dissolve, e.deposit) = (v.parse().unwrap(), v.parse().unwrap()); }
     let t0 = std::time::Instant::now();
-    let after = erode(&gpu.device, &gpu.queue, &metres, n, cell, &e, &Default::default()).unwrap();
+    let after = erode(&gpu.device, &gpu.queue, &metres, n, cell, &e, &Default::default()).unwrap().heights;
     eprintln!("RES erosion {:.1} s, mean abs change {:.3} m", t0.elapsed().as_secs_f32(), metres.iter().zip(&after).map(|(a, b)| (a - b).abs()).sum::<f32>() / (n * n) as f32);
     for (name, h) in [("before", &metres), ("after", &after)] {
         // Hillshade with a light from the north-west.

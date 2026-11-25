@@ -32,12 +32,16 @@ pub struct Settings {
     /// The height of water (a river, a lake, the sea) in metres: drawn in the previews, written into the heightmap's sidecar and
     /// the chunk manifest, and made into a water surface by the Unreal import script.
     pub water_m: Option<f32>,
-    pub erosion: crate::landscape_erosion::Erosion,
+    /// The working grid's side in samples: the preview samples the graph on it and Erosion nodes erode on it.
+    pub resolution: usize,
+    /// Erosion settings from before erosion was a node: read from old projects (see `migrate_erosion`), never written.
+    #[serde(rename = "erosion", skip_serializing)]
+    pub legacy_erosion: Option<serde_json::Value>,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { seed: 0, world_m: 2000.0, height_m: 400.0, fit: true, water_m: None, erosion: Default::default() }
+        Settings { seed: 0, world_m: 2000.0, height_m: 400.0, fit: true, water_m: None, resolution: 1024, legacy_erosion: None }
     }
 }
 
@@ -302,6 +306,47 @@ fn render_steps(metres: &[f32], n: usize, world_m: f32, water: Option<f32>, (yaw
     egui::ColorImage { size: [w, h], source_size: egui::vec2(w as f32, h as f32), pixels }
 }
 
+/// Projects from before erosion was a node kept its settings (and the working resolution) in `settings.erosion`, and
+/// eroded only when Run was pressed. Their resolution moves to `settings.resolution`, and when their graph has no Erosion
+/// node, one with those settings goes in front of the output, muted: the terrain looks as the plain graph did, and
+/// unmuting it erodes as before.
+fn migrate_erosion(graph: &mut Graph, settings: &mut Settings) {
+    let Some(old) = settings.legacy_erosion.take() else { return };
+    if let Some(r) = old.get("resolution").and_then(|r| r.as_u64()) {
+        settings.resolution = r as usize;
+    }
+    if graph.nodes.values().any(|n| matches!(n.kind, NodeKind::Erosion(_))) {
+        return;
+    }
+    let Some((out, out_node)) = graph.nodes.iter().find(|(_, n)| matches!(n.kind, NodeKind::OutDensity)).map(|(id, n)| (*id, n.pos)) else { return };
+    let Some((src, port)) = graph.edges.iter().find(|e| e.to == out && e.port == 0).map(|e| (e.from, e.from_port)) else { return };
+    let params: crate::landscape_erosion::Erosion = serde_json::from_value(old).unwrap_or_default();
+    let node = graph.add(NodeKind::Erosion(params), [out_node[0] - 160.0, out_node[1]]);
+    graph.nodes.get_mut(&node).expect("just added").muted = true;
+    graph.connect_from(src, port, node, 0);
+    graph.connect(node, out, 0);
+}
+
+/// The evaluator for the terrain graph with its Erosion nodes run (or their cached results used) and replaced by the
+/// maps they made: what the preview, the exports and the headless export all evaluate. Returns how each Erosion node's
+/// result stood.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn terrain_evaluator(
+    device: &eframe::wgpu::Device,
+    queue: &eframe::wgpu::Queue,
+    graph: &Graph,
+    s: &Settings,
+    maps: &crate::terrain_maps::TerrainMaps,
+    maps_key: u64,
+    base: &Path,
+    cache: &crate::landscape_terrain::ErosionCache,
+    run: &std::collections::BTreeSet<crate::graph::NodeId>,
+    progress: &Progress,
+) -> Result<(Evaluator, std::collections::HashMap<crate::graph::NodeId, crate::landscape_terrain::State>), String> {
+    let prepared = crate::landscape_terrain::prepare(device, queue, graph, s, maps, maps_key, base, cache, run, progress)?;
+    Ok((build_evaluator(device, queue, &prepared.graph, s, &prepared.maps, base)?, prepared.states))
+}
+
 /// The evaluator for the terrain: Noise Graph nodes inlined, the slope scale set from the size and height, the terrain
 /// maps in.
 pub(crate) fn build_evaluator(device: &eframe::wgpu::Device, queue: &eframe::wgpu::Queue, graph: &Graph, s: &Settings, masks: &crate::terrain_maps::TerrainMaps, base: &Path) -> Result<Evaluator, String> {
@@ -337,17 +382,15 @@ fn hillshade(metres: &[f32], m: usize, world_m: f32, water: Option<f32>) -> egui
 
 /// What a finished job hands back.
 enum Done {
-    Values(Vec<f32>),
-    Eroded(Vec<f32>, u64),
+    /// The sampled values and how each Erosion node's result stood.
+    Values(Vec<f32>, std::collections::HashMap<crate::graph::NodeId, crate::landscape_terrain::State>),
     Message(String),
 }
 
 /// A background job: sampling the graph (preview or export) and what to do with the result.
 enum Job {
-    /// The graph's values on the working grid.
-    Preview(mpsc::Receiver<Result<Vec<f32>, String>>),
-    /// The eroded heights, and the key (see `erosion_key`) they belong to.
-    Erode(mpsc::Receiver<Result<Vec<f32>, String>>, Progress, u64),
+    /// The graph's values on the working grid (Erosion nodes run first when they need to), with its progress.
+    Preview(mpsc::Receiver<Result<Done, String>>, Progress),
     Export(mpsc::Receiver<Result<String, String>>, Progress),
 }
 
@@ -359,8 +402,12 @@ pub struct LandscapeWorkspace {
     /// The graph's values on the working grid, and the key (graph, seed, resolution) they were sampled for.
     values: Option<Vec<f32>>,
     sampled_key: Option<u64>,
-    /// The eroded heights in metres and the key of everything they were made from; out of date when it differs.
-    eroded: Option<(u64, Vec<f32>)>,
+    /// Erosion nodes' results, kept between runs, how each stood after the last one, and those to run on demand.
+    erosion_cache: crate::landscape_terrain::ErosionCache,
+    erosion_states: std::collections::HashMap<crate::graph::NodeId, crate::landscape_terrain::State>,
+    erosion_run: std::collections::BTreeSet<crate::graph::NodeId>,
+    /// A change waiting to be sampled, and when it was made (sampling waits a moment when there is erosion).
+    pending: Option<(u64, std::time::Instant)>,
     job: Option<Job>,
     status: String,
     /// A heightmap being exported for the Mesh graph: when it is written, a graph for it opens there.
@@ -370,8 +417,6 @@ pub struct LandscapeWorkspace {
     view_grid: Option<crate::landscape_gpu::Grid>,
     /// Undo and redo of the graph.
     history: crate::history::History,
-    /// The erosion preset last loaded or saved: its name and its settings (to show when they have been changed since).
-    erosion_preset: Option<(String, crate::landscape_erosion::Erosion)>,
     /// The painted masks (read by Mask nodes), the selected one, the brush and its tool.
     pub masks: Vec<Mask>,
     mask_selected: usize,
@@ -390,7 +435,7 @@ pub struct LandscapeWorkspace {
 
 impl Default for LandscapeWorkspace {
     fn default() -> Self {
-        LandscapeWorkspace { graph: default_graph(), editor: Editor::default(), path: None, settings: Settings::default(), values: None, sampled_key: None, eroded: None, job: None, status: String::new(), to_mesh: None, view: (0.8, 0.6, 1.0), view_grid: None, history: crate::history::History::new(&default_graph()), erosion_preset: None, masks: Vec::new(), mask_selected: 0, mask_rev: 0, mask_live: 0, brush: Brush::default(), tool: Tool::Paint, map_mode: false, stroke_from: None, new_mask: String::new(), overlay: None, map_picture: None }
+        LandscapeWorkspace { graph: default_graph(), editor: Editor::default(), path: None, settings: Settings::default(), values: None, sampled_key: None, erosion_cache: Default::default(), erosion_states: Default::default(), erosion_run: Default::default(), pending: None, job: None, status: String::new(), to_mesh: None, view: (0.8, 0.6, 1.0), view_grid: None, history: crate::history::History::new(&default_graph()), masks: Vec::new(), mask_selected: 0, mask_rev: 0, mask_live: 0, brush: Brush::default(), tool: Tool::Paint, map_mode: false, stroke_from: None, new_mask: String::new(), overlay: None, map_picture: None }
     }
 }
 
@@ -400,25 +445,18 @@ impl LandscapeWorkspace {
         let ls = self;
         let (graph, s) = (ls.graph.clone(), ls.settings.clone());
         let (masks, base) = (ls.mask_map(), ls.base_dir());
-        let eroded = ls.current_eroded().cloned();
+        let (maps_key, cache, run) = (ls.mask_rev, ls.erosion_cache.clone(), ls.erosion_run.clone());
         let (tx, rx) = mpsc::channel();
         let progress = Progress::default();
         let p = progress.clone();
         let (device, queue) = (device.clone(), queue.clone());
         std::thread::spawn(move || {
-            let r = match eroded {
-                // The eroded grid, resampled to the landscape size.
-                Some(e) => {
-                    let n = side(e.len());
-                    let step = 1.0 / (UNREAL_RES - 1) as f32;
-                    let metres: Vec<f32> = (0..UNREAL_RES * UNREAL_RES).map(|k| bilinear(&e, n, (k % UNREAL_RES) as f32 * step, (k / UNREAL_RES) as f32 * step)).collect();
-                    write_unreal(&path, UNREAL_RES, s.world_m, &encode_unreal_with(&metres, s.water_m))
-                }
-                None => build_evaluator(&device, &queue, &graph, &s, &masks, &base).and_then(|ev| {
-                    let metres = to_metres(&sample(&ev, UNREAL_RES, &p), &s);
-                    write_unreal(&path, UNREAL_RES, s.world_m, &encode_unreal_with(&metres, s.water_m))
-                }),
-            };
+            // Erosion nodes run (or come from the cache) at the working resolution; what follows them is sampled at
+            // the Unreal size.
+            let r = terrain_evaluator(&device, &queue, &graph, &s, &masks, maps_key, &base, &cache, &run, &p).and_then(|(ev, _)| {
+                let metres = to_metres(&sample(&ev, UNREAL_RES, &p), &s);
+                write_unreal(&path, UNREAL_RES, s.world_m, &encode_unreal_with(&metres, s.water_m))
+            });
             let _ = tx.send(r);
         });
         ls.job = Some(Job::Export(rx, progress));
@@ -447,42 +485,22 @@ impl LandscapeWorkspace {
         self.history.can_redo()
     }
 
-    /// Applies an erosion preset file (the working resolution stays as it is).
-    pub fn load_erosion_preset(&mut self, path: &Path) {
-        let result = std::fs::read_to_string(path).map_err(|e| e.to_string()).and_then(|text| self.settings.erosion.with_preset(&text));
-        match result {
-            Ok(e) => {
-                let name = path.file_stem().map_or_else(String::new, |s| s.to_string_lossy().into_owned());
-                self.status = format!("Erosion preset {name} loaded");
-                self.erosion_preset = Some((name, e.clone()));
-                self.settings.erosion = e;
-            }
-            Err(e) => self.status = format!("could not load the preset {}: {e}", path.display()),
-        }
-    }
-
-    /// Asks where to save the erosion settings as a preset (the library's Erosion Presets folder by default).
-    pub fn save_erosion_preset(&mut self) {
-        if let Some(dir) = crate::library::dir(crate::library::Kind::Erosion) {
-            let _ = std::fs::create_dir_all(dir);
-        }
-        let start = self.erosion_preset.as_ref().map_or("erosion".to_string(), |(n, _)| n.clone());
-        let dialog = rfd::FileDialog::new().add_filter("Erosion preset", &["erosion"]).set_file_name(format!("{start}.erosion"));
-        let Some(path) = crate::library::dialog(crate::library::Kind::Erosion, dialog).save_file() else { return };
-        self.status = match std::fs::write(&path, self.settings.erosion.to_preset()) {
-            Ok(()) => {
-                let name = path.file_stem().map_or_else(String::new, |s| s.to_string_lossy().into_owned());
-                self.erosion_preset = Some((name.clone(), self.settings.erosion.clone()));
-                format!("Erosion preset {name} saved")
-            }
-            Err(e) => format!("could not save the preset: {e}"),
+    /// Applies an erosion preset file to the selected Erosion node (the library's double-click).
+    pub fn apply_erosion_preset(&mut self, path: &Path) {
+        let name = path.file_stem().map_or_else(String::new, |s| s.to_string_lossy().into_owned());
+        let selected: Vec<_> = self.editor.selected.iter().copied().collect();
+        let Some(id) = selected.into_iter().find(|id| self.graph.nodes.get(id).is_some_and(|n| matches!(n.kind, NodeKind::Erosion(_)))) else {
+            self.status = format!("Select an Erosion node to apply the preset {name} to");
+            return;
         };
-    }
-
-    /// The erosion settings back at their defaults (the working resolution stays as it is).
-    pub fn reset_erosion(&mut self) {
-        self.settings.erosion = self.settings.erosion.reset();
-        self.erosion_preset = None;
+        let Some(NodeKind::Erosion(e)) = self.graph.nodes.get_mut(&id).map(|n| &mut n.kind) else { unreachable!() };
+        match std::fs::read_to_string(path).map_err(|e| e.to_string()).and_then(|text| e.with_preset(&text, &name)) {
+            Ok(loaded) => {
+                *e = loaded;
+                self.status = format!("Erosion preset {name} applied");
+            }
+            Err(err) => self.status = format!("could not load the preset {}: {err}", path.display()),
+        }
     }
 
     /// Lays the graph out in columns, inputs on the left.
@@ -509,8 +527,10 @@ impl LandscapeWorkspace {
     pub fn from_project(&mut self, text: &str) -> Result<(), String> {
         let v: serde_json::Value = serde_json::from_str(text).map_err(|e| e.to_string())?;
         let graph = Graph::from_json(v.get("graph").and_then(|g| g.as_str()).ok_or("not a landscape project")?)?;
-        let settings = v.get("settings").and_then(|s| serde_json::from_value(s.clone()).ok()).unwrap_or_default();
+        let mut settings: Settings = v.get("settings").and_then(|s| serde_json::from_value(s.clone()).ok()).unwrap_or_default();
         let masks = v.get("masks").and_then(|m| m.as_array()).map(|a| a.iter().filter_map(|m| Mask::from_png(m.get("name")?.as_str()?, &crate::landscape_masks::base64_decode(m.get("png")?.as_str()?)?)).collect()).unwrap_or_default();
+        let mut graph = graph;
+        migrate_erosion(&mut graph, &mut settings);
         (self.graph, self.settings, self.masks) = (graph, settings, masks);
         (self.mask_selected, self.mask_rev) = (0, self.mask_rev + 1);
         self.history = crate::history::History::new(&self.graph);
@@ -531,24 +551,16 @@ impl LandscapeWorkspace {
         self.path.as_ref().and_then(|p| p.parent()).map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("."))
     }
 
-    /// What the sampled values depend on: the graph, the seed and the working resolution.
+    /// What the sampled values depend on: the graph, the seed, the working resolution, the masks, Erosion nodes asked
+    /// to run, and (when there is erosion, which works in metres) the terrain's size and height.
     fn key(&self) -> u64 {
-        let mut h = std::collections::hash_map::DefaultHasher::new();
-        (self.graph.to_json(), self.settings.seed, self.settings.erosion.resolution, self.mask_rev).hash(&mut h);
-        h.finish()
-    }
-
-    /// What eroded heights depend on: the sampled values, how they become metres, and the erosion settings.
-    fn erosion_key(&self) -> u64 {
         let s = &self.settings;
         let mut h = std::collections::hash_map::DefaultHasher::new();
-        (self.key(), s.world_m.to_bits(), s.height_m.to_bits(), s.fit, serde_json::to_string(&s.erosion).unwrap_or_default()).hash(&mut h);
+        (self.graph.to_json(), s.seed, s.resolution, self.mask_rev, &self.erosion_run).hash(&mut h);
+        if crate::landscape_terrain::has_erosion(&self.graph) {
+            (s.world_m.to_bits(), s.height_m.to_bits()).hash(&mut h);
+        }
         h.finish()
-    }
-
-    /// The eroded heights when they are up to date.
-    fn current_eroded(&self) -> Option<&Vec<f32>> {
-        self.eroded.as_ref().filter(|(k, _)| *k == self.erosion_key()).map(|(_, e)| e)
     }
 
     /// A landscape project (graph, settings, masks) or a plain noise graph (the masks stay).
@@ -670,15 +682,11 @@ impl LandscapeWorkspace {
         ui.painter().rect_filled(rect, 0.0, egui::Color32::from_gray(24));
         let whole = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
         if let Some(values) = &self.values {
-            let eroded_key = self.eroded.as_ref().map(|(k, _)| *k).filter(|k| *k == self.erosion_key());
             let mut hasher = std::collections::hash_map::DefaultHasher::new();
-            (self.sampled_key, eroded_key, settings.world_m.to_bits(), settings.height_m.to_bits(), settings.fit).hash(&mut hasher);
+            (self.sampled_key, settings.world_m.to_bits(), settings.height_m.to_bits(), settings.fit).hash(&mut hasher);
             let key = hasher.finish();
             if self.map_picture.as_ref().is_none_or(|(k, _)| *k != key) {
-                let metres = match (&self.eroded, eroded_key) {
-                    (Some((_, e)), Some(_)) => e.clone(),
-                    _ => to_metres(values, settings),
-                };
+                let metres = to_metres(values, settings);
                 let (grid, m) = shrink(&metres, side_of(metres.len()), 512);
                 self.map_picture = Some((key, ctx.load_texture("landscape map", hillshade(&grid, m, settings.world_m, settings.water_m), egui::TextureOptions::LINEAR)));
             }
@@ -795,15 +803,10 @@ impl crate::App {
         // The background job: its result.
         let mut finished = None;
         match &ls.job {
-            Some(Job::Preview(rx)) => match rx.try_recv() {
-                Ok(r) => finished = Some(r.map(Done::Values)),
+            Some(Job::Preview(rx, _)) => match rx.try_recv() {
+                Ok(r) => finished = Some(r),
                 Err(mpsc::TryRecvError::Empty) => ctx.request_repaint_after(std::time::Duration::from_millis(100)),
                 Err(mpsc::TryRecvError::Disconnected) => finished = Some(Err("the sampler stopped unexpectedly".into())),
-            },
-            Some(Job::Erode(rx, _, key)) => match rx.try_recv() {
-                Ok(r) => finished = Some(r.map(|e| Done::Eroded(e, *key))),
-                Err(mpsc::TryRecvError::Empty) => ctx.request_repaint_after(std::time::Duration::from_millis(100)),
-                Err(mpsc::TryRecvError::Disconnected) => finished = Some(Err("the erosion stopped unexpectedly".into())),
             },
             Some(Job::Export(rx, _)) => match rx.try_recv() {
                 Ok(r) => finished = Some(r.map(Done::Message)),
@@ -819,10 +822,13 @@ impl crate::App {
                 ls.to_mesh = None;
             }
             match r {
-                Ok(Done::Values(v)) => ls.values = Some(v),
-                Ok(Done::Eroded(e, key)) => {
-                    ls.eroded = Some((key, e));
-                    ls.status = "Erosion done".into();
+                Ok(Done::Values(v, states)) => {
+                    ls.values = Some(v);
+                    if states.values().any(|s| *s == crate::landscape_terrain::State::Ran) {
+                        ls.status = "Erosion done".into();
+                    }
+                    ls.erosion_states = states;
+                    ls.erosion_run.clear();
                 }
                 Ok(Done::Message(m)) => {
                     ls.status = m;
@@ -845,18 +851,39 @@ impl crate::App {
             *names = ls.masks.iter().map(|m| (m.name.clone(), crate::terrain_maps::Source::Painted)).collect();
         }
         ls.editor.landscape_mode = true;
-        // Sample the preview again when the graph, the seed or a mask changed and nothing else is running.
+        let working = matches!(ls.job, Some(Job::Preview(..)));
+        ls.editor.badges = ls.graph.nodes.iter().filter(|(_, n)| matches!(n.kind, NodeKind::Erosion(_))).map(|(id, _)| {
+            let text = match ls.erosion_states.get(id) {
+                _ if working => "running…",
+                Some(crate::landscape_terrain::State::OutOfDate) => "out of date",
+                Some(_) => "up to date",
+                None => "not run yet",
+            };
+            (*id, text.to_string())
+        }).collect();
+        // Sample the preview again when the graph, the seed or a mask changed and nothing else is running. With erosion
+        // in the graph (seconds of work) it waits until the graph has been still for a moment.
         let key = ls.key();
-        if ls.job.is_none() && ls.sampled_key != Some(key) {
+        if ls.sampled_key != Some(key) && ls.pending.is_none_or(|(k, _)| k != key) {
+            ls.pending = Some((key, std::time::Instant::now()));
+        }
+        let settled = ls.pending.is_some_and(|(_, t)| !crate::landscape_terrain::has_erosion(&ls.graph) || t.elapsed() > std::time::Duration::from_millis(400));
+        if ls.sampled_key != Some(key) && !settled {
+            ctx.request_repaint_after(std::time::Duration::from_millis(100));
+        }
+        if ls.job.is_none() && ls.sampled_key != Some(key) && settled {
             ls.sampled_key = Some(key);
+            ls.pending = None;
             let (graph, settings, masks, base) = (ls.graph.clone(), ls.settings.clone(), ls.mask_map(), ls.base_dir());
-            let resolution = settings.erosion.resolution;
+            let (maps_key, cache, run) = (ls.mask_rev, ls.erosion_cache.clone(), ls.erosion_run.clone());
             let (tx, rx) = mpsc::channel();
+            let progress = Progress::default();
+            let p = progress.clone();
             std::thread::spawn(move || {
-                let r = build_evaluator(&device, &queue, &graph, &settings, &masks, &base).map(|ev| sample(&ev, resolution, &Progress::default()));
+                let r = terrain_evaluator(&device, &queue, &graph, &settings, &masks, maps_key, &base, &cache, &run, &p).map(|(ev, states)| Done::Values(sample(&ev, settings.resolution, &Progress::default()), states));
                 let _ = tx.send(r);
             });
-            ls.job = Some(Job::Preview(rx));
+            ls.job = Some(Job::Preview(rx, progress));
         }
 
         let (device, queue) = (self.rs.device.clone(), self.rs.queue.clone());
@@ -878,7 +905,7 @@ impl crate::App {
                 }
             });
             ui.separator();
-            let running = matches!(ls.job, Some(Job::Export(..) | Job::Erode(..)));
+            let running = matches!(ls.job, Some(Job::Export(..)));
             section(ui, "terrain", "height", "Terrain", TERRAIN, true, |ui| {
             let d = Settings::default();
             crate::row(ui, &mut ls.settings.seed, d.seed, |ui, v| _ = ui.add(egui::DragValue::new(v).prefix("seed ")));
@@ -1000,91 +1027,19 @@ impl crate::App {
                 ui.add(egui::DragValue::new(&mut ls.brush.strength).range(0.01..=1.0).speed(0.01).prefix("strength "));
                 ui.add(egui::DragValue::new(&mut ls.brush.hardness).range(0.0..=1.0).speed(0.01).prefix("hardness "));
             });
-            section(ui, "erosion", "erosion", "Erosion", WATER_COLOR, true, |ui| {
-                let d = crate::landscape_erosion::Erosion::default();
+            section(ui, "grid", "erosion", "Working grid", WATER_COLOR, true, |ui| {
                 let max = crate::landscape_erosion::max_resolution(&device);
-                let up_to_date = ls.current_eroded().is_some();
-                // Presets: pick one from the library's Erosion Presets folder, save these settings as one, load a file
-                // from anywhere, or go back to the defaults. None of them changes the working resolution.
-                ui.horizontal(|ui| {
-                    let shown = match &ls.erosion_preset {
-                        Some((name, e)) if ls.settings.erosion.same_as(e) => name.clone(),
-                        Some((name, _)) => format!("{name} *"),
-                        None if ls.settings.erosion.same_as(&d) => "default".to_string(),
-                        None => "custom".to_string(),
-                    };
-                    let mut pick = None;
-                    egui::ComboBox::from_id_salt("erosion preset").selected_text(shown).width(130.0).show_ui(ui, |ui| {
-                        // Read when the list opens, not every frame: the library may be on a network drive.
-                        let presets = crate::landscape_erosion::library_presets();
-                        if presets.is_empty() {
-                            ui.weak(if crate::library::root().is_some() { "No presets in the library yet" } else { "No library folder set (Preferences)" });
-                        }
-                        for (name, path) in presets {
-                            if ui.selectable_label(false, name).clicked() {
-                                pick = Some(path);
-                            }
-                        }
-                    }).response.on_hover_text("Erosion presets in the library's Erosion Presets folder; * means changed since");
-                    if let Some(path) = pick {
-                        ls.load_erosion_preset(&path);
-                    }
-                    if crate::icons::button(ui, "save", "Save erosion preset", None, true).on_hover_text("Save these erosion settings as a preset (in the library's Erosion Presets folder unless you pick another)").clicked() {
-                        ls.save_erosion_preset();
-                    }
-                    if crate::icons::button(ui, "open", "Load erosion preset", None, true).on_hover_text("Load an erosion preset file from anywhere").clicked() {
-                        let dialog = crate::library::dialog(crate::library::Kind::Erosion, rfd::FileDialog::new().add_filter("Erosion preset", &["erosion"]));
-                        if let Some(path) = dialog.pick_file() {
-                            ls.load_erosion_preset(&path);
-                        }
-                    }
-                    if crate::icons::button(ui, "reset", "Reset erosion", None, !ls.settings.erosion.same_as(&d)).on_hover_text("Put every erosion setting back to its default (the working resolution stays)").clicked() {
-                        ls.reset_erosion();
-                    }
-                });
-                let e = &mut ls.settings.erosion;
-                crate::row(ui, &mut e.resolution, d.resolution, |ui, v| {
+                let default = Settings::default().resolution;
+                crate::row(ui, &mut ls.settings.resolution, default, |ui, v| {
                     for r in crate::landscape_erosion::RESOLUTIONS.into_iter().filter(|r| *r <= max) {
                         ui.selectable_value(v, r, format!("{r}"));
                     }
                 });
-                crate::row(ui, &mut e.iterations, d.iterations, |ui, v| _ = ui.add(egui::DragValue::new(v).range(0..=20000).speed(10.0).prefix("iterations ")));
-                crate::row(ui, &mut e.rain, d.rain, |ui, v| _ = ui.add(egui::DragValue::new(v).range(0.0..=1.0).speed(0.001).prefix("rain ").suffix(" m/s")));
-                crate::row(ui, &mut e.capacity, d.capacity, |ui, v| _ = ui.add(egui::DragValue::new(v).range(0.0..=1.0).speed(0.001).prefix("capacity ")).on_hover_text("How much sediment fast water on a slope can carry: more means deeper channels."));
-                crate::row(ui, &mut e.dissolve, d.dissolve, |ui, v| _ = ui.add(egui::DragValue::new(v).range(0.0..=1.0).speed(0.005).prefix("dissolve ")).on_hover_text("How quickly water picks sediment up."));
-                crate::row(ui, &mut e.deposit, d.deposit, |ui, v| _ = ui.add(egui::DragValue::new(v).range(0.0..=1.0).speed(0.005).prefix("deposit ")).on_hover_text("How quickly water drops sediment."));
-                crate::row(ui, &mut e.evaporation, d.evaporation, |ui, v| _ = ui.add(egui::DragValue::new(v).range(0.0..=1.0).speed(0.001).prefix("evaporation ")));
-                crate::row(ui, &mut e.thermal_iterations, d.thermal_iterations, |ui, v| _ = ui.add(egui::DragValue::new(v).range(0..=5000).speed(1.0).prefix("thermal iterations ")));
-                crate::row(ui, &mut e.talus_deg, d.talus_deg, |ui, v| _ = ui.add(egui::DragValue::new(v).range(1.0..=89.0).speed(0.5).prefix("repose ").suffix(" deg")));
-                ui.horizontal(|ui| {
-                    if action(ui, "play", "Run erosion", WATER_COLOR, !running && ls.values.is_some()).on_hover_text("Erodes the terrain at the working resolution. The preview and both exports use the result until the graph or a setting changes.").clicked() {
-                        let s = ls.settings.clone();
-                        let values = ls.values.clone().unwrap_or_default();
-                        let (n, key) = (side(values.len()), ls.erosion_key());
-                        let metres = to_metres(&values, &s);
-                        let cell = s.world_m / (n.max(2) - 1) as f32;
-                        let (tx, rx) = mpsc::channel();
-                        let progress = Progress::default();
-                        let p = progress.clone();
-                        let (device, queue) = (device.clone(), queue.clone());
-                        std::thread::spawn(move || {
-                            let _ = tx.send(crate::landscape_erosion::erode(&device, &queue, &metres, n, cell, &s.erosion, &p));
-                        });
-                        ls.job = Some(Job::Erode(rx, progress, key));
-                        ls.status = "Eroding...".into();
+                ui.weak("The grid the preview samples the graph on and Erosion nodes erode on. Erosion is a node: add one in the graph (right-click, Erosion).");
+                if let Some(Job::Preview(_, p)) = &ls.job
+                    && crate::landscape_terrain::has_erosion(&ls.graph) {
+                        ui.add(egui::ProgressBar::new(p.load(Ordering::Relaxed) as f32 / 1000.0).show_percentage().text("eroding"));
                     }
-                    if crate::icons::button(ui, "delete", "Clear erosion", None, ls.eroded.is_some()).on_hover_text("Drop the eroded terrain and use the plain graph again").clicked() {
-                        ls.eroded = None;
-                    }
-                });
-                if let Some(Job::Erode(_, p, _)) = &ls.job {
-                    ui.add(egui::ProgressBar::new(p.load(Ordering::Relaxed) as f32 / 1000.0).show_percentage());
-                }
-                ui.weak(match (ls.eroded.is_some(), up_to_date) {
-                    (true, true) => "Eroded: the preview and the exports use it.",
-                    (true, false) => "Out of date: the graph or a setting changed. Run again, or the exports use the plain graph.",
-                    _ => "Not eroded. The working resolution is the grid the preview and the erosion use.",
-                });
             });
             if !ls.status.is_empty() {
                 ui.label(&ls.status);
@@ -1095,6 +1050,24 @@ impl crate::App {
             if let [id] = ls.editor.selected.iter().copied().collect::<Vec<_>>().as_slice()
                 && let Some(node) = ls.graph.nodes.get_mut(id) {
                 ui.heading(crate::editor::title(&node.kind));
+                if let NodeKind::Erosion(e) = &node.kind {
+                    let state = ls.erosion_states.get(id).copied();
+                    let working = matches!(ls.job, Some(Job::Preview(..)));
+                    ui.horizontal(|ui| {
+                        ui.label(match (state, working) {
+                            (_, true) => "Running…",
+                            (Some(crate::landscape_terrain::State::OutOfDate), _) => "Out of date",
+                            (Some(_), _) => "Up to date",
+                            (None, _) => "Not run yet",
+                        });
+                        if ui.add_enabled(!working, egui::Button::new("Run")).on_hover_text("Run this erosion now, even when it does not run by itself").clicked() {
+                            ls.erosion_run.insert(*id);
+                        }
+                    });
+                    if !e.auto {
+                        ui.weak("Runs only when you press Run.");
+                    }
+                }
                 crate::node_props(ui, &mut node.kind, &mut node.pins, &names);
             }
         }));
@@ -1119,20 +1092,14 @@ impl crate::App {
                 new_view.2 = (new_view.2 * (1.0 + ui.input(|i| i.smooth_scroll_delta.y) * 0.002)).clamp(0.3, 6.0);
             }
             if let Some(values) = &ls.values {
-                let eroded_key = ls.eroded.as_ref().map(|(k, _)| *k).filter(|k| *k == ls.erosion_key());
                 let mut hasher = std::collections::hash_map::DefaultHasher::new();
-                (ls.sampled_key, eroded_key, settings.world_m.to_bits(), settings.height_m.to_bits(), settings.fit, settings.water_m.map(f32::to_bits)).hash(&mut hasher);
+                (ls.sampled_key, settings.world_m.to_bits(), settings.height_m.to_bits(), settings.fit, settings.water_m.map(f32::to_bits)).hash(&mut hasher);
                 let grid_key = hasher.finish();
-                // The eroded terrain when it is up to date, otherwise the graph's, at most VIEW_SAMPLES a side: worked out
+                // The terrain (with its erosion, which is part of the graph), at most VIEW_SAMPLES a side: worked out
                 // (and uploaded to the GPU) once per terrain, not on every camera move.
                 if ls.view_grid.as_ref().is_none_or(|g| g.key != grid_key) {
-                    let (grid, m) = match (&ls.eroded, eroded_key) {
-                        (Some((_, e)), Some(_)) => shrink(e, side(e.len()), VIEW_SAMPLES),
-                        _ => {
-                            let metres = to_metres(values, &settings);
-                            shrink(&metres, side(metres.len()), VIEW_SAMPLES)
-                        }
-                    };
+                    let metres = to_metres(values, &settings);
+                    let (grid, m) = shrink(&metres, side(metres.len()), VIEW_SAMPLES);
                     ls.view_grid = Some(crate::landscape_gpu::Grid::new(grid_key, grid, m, settings.world_m, settings.water_m));
                 }
                 let grid = ls.view_grid.as_ref().expect("just made");
@@ -1142,7 +1109,7 @@ impl crate::App {
                 ui.painter().add(eframe::egui_wgpu::Callback::new_paint_callback(rect, callback));
             } else {
                 ui.painter().rect_filled(rect, 0.0, egui::Color32::from_gray(30));
-                ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, if matches!(ls.job, Some(Job::Preview(_))) { "Sampling…" } else { "No terrain: the graph has no density output, or has an error" }, egui::FontId::proportional(14.0), egui::Color32::GRAY);
+                ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, if matches!(ls.job, Some(Job::Preview(..))) { "Sampling…" } else { "No terrain: the graph has no density output, or has an error" }, egui::FontId::proportional(14.0), egui::Color32::GRAY);
             }
             ui.painter().text(rect.left_bottom() + egui::vec2(8.0, -8.0), egui::Align2::LEFT_BOTTOM, "drag to orbit, scroll to zoom", egui::FontId::proportional(11.0), egui::Color32::from_white_alpha(120));
             view_toggle(ui, rect, &mut ls.map_mode);
@@ -1158,8 +1125,8 @@ impl crate::App {
 }
 
 /// Exports a landscape project's heightmap for Unreal without a window (`noiser --headless --landscape-export P.landscape
-/// OUT.png [--erode]`): the graph sampled at the Unreal size, or with `erode` the terrain eroded with the project's
-/// settings first.
+/// OUT.png [--erode]`): the graph sampled at the Unreal size, its Erosion nodes run first. `erode` also switches on Erosion
+/// nodes that are muted (as projects from before erosion was a node open), so their erosion is applied as it was then.
 pub fn export_headless(project: &Path, out: &Path, erode: bool, log: &mut dyn FnMut(&str)) -> Result<String, String> {
     let text = std::fs::read_to_string(project).map_err(|e| format!("{}: {e}", project.display()))?;
     let mut ls = LandscapeWorkspace::default();
@@ -1170,25 +1137,44 @@ pub fn export_headless(project: &Path, out: &Path, erode: bool, log: &mut dyn Fn
     }
     ls.path = Some(project.to_path_buf());
     let (device, queue) = crate::meshgraph::headless_gpu()?;
+    if erode {
+        for n in ls.graph.nodes.values_mut().filter(|n| matches!(n.kind, NodeKind::Erosion(_))) {
+            n.muted = false;
+        }
+    }
     let (s, masks, base) = (ls.settings.clone(), ls.mask_map(), ls.base_dir());
-    let ev = build_evaluator(&device, &queue, &ls.graph, &s, &masks, &base)?;
+    // Every Erosion node runs: nothing is cached in a fresh process.
+    let run: std::collections::BTreeSet<_> = ls.graph.nodes.iter().filter(|(_, n)| matches!(n.kind, NodeKind::Erosion(_))).map(|(id, _)| *id).collect();
+    if !run.is_empty() {
+        log(&format!("eroding on the {0} x {0} working grid ({1} Erosion node(s))", s.resolution, run.len()));
+    }
     let progress = Progress::default();
-    let metres = if erode {
-        let n = s.erosion.resolution;
-        log(&format!("sampling {n} x {n} and eroding ({} iterations)", s.erosion.iterations));
-        let values = to_metres(&sample(&ev, n, &progress), &s);
-        let eroded = crate::landscape_erosion::erode(&device, &queue, &values, n, s.world_m / (n - 1) as f32, &s.erosion, &progress)?;
-        let step = 1.0 / (UNREAL_RES - 1) as f32;
-        (0..UNREAL_RES * UNREAL_RES).map(|k| bilinear(&eroded, n, (k % UNREAL_RES) as f32 * step, (k / UNREAL_RES) as f32 * step)).collect()
-    } else {
-        to_metres(&sample(&ev, UNREAL_RES, &progress), &s)
-    };
+    let (ev, _) = terrain_evaluator(&device, &queue, &ls.graph, &s, &masks, ls.mask_rev, &base, &ls.erosion_cache, &run, &progress)?;
+    let metres = to_metres(&sample(&ev, UNREAL_RES, &progress), &s);
     write_unreal(out, UNREAL_RES, s.world_m, &encode_unreal_with(&metres, s.water_m))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_old_project_gets_a_muted_erosion_node_with_its_settings() {
+        let mut graph = default_graph();
+        let mut settings = Settings { legacy_erosion: Some(serde_json::json!({"resolution": 2048, "iterations": 77})), ..Default::default() };
+        migrate_erosion(&mut graph, &mut settings);
+        assert_eq!(settings.resolution, 2048);
+        let (id, node) = graph.nodes.iter().find(|(_, n)| matches!(n.kind, NodeKind::Erosion(_))).expect("an Erosion node");
+        let NodeKind::Erosion(e) = &node.kind else { unreachable!() };
+        assert_eq!(e.iterations, 77);
+        assert!(node.muted, "muted: the terrain looks as it did");
+        let out = graph.nodes.iter().find(|(_, n)| matches!(n.kind, NodeKind::OutDensity)).map(|(i, _)| *i).unwrap();
+        assert!(graph.edges.iter().any(|e| e.to == out && e.port == 0 && e.from == *id), "in front of the output");
+        // Migrating twice changes nothing.
+        let count = graph.nodes.len();
+        migrate_erosion(&mut graph, &mut settings);
+        assert_eq!(graph.nodes.len(), count);
+    }
 
     #[test]
     fn the_3d_view_s_big_steps_miss_nothing_the_small_ones_hit() {

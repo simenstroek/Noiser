@@ -225,6 +225,7 @@ pub(crate) fn cache_props(ui: &mut egui::Ui, graph: &mut Graph, id: graph::NodeI
 /// Properties of one node.
 pub(crate) fn node_props(ui: &mut egui::Ui, kind: &mut NodeKind, pins: &mut Vec<String>, names: &[String]) {
     match kind {
+        NodeKind::Erosion(e) => crate::landscape_erosion::node_ui(ui, e),
         NodeKind::Float(_) | NodeKind::Vec3(_) => {
             let is_vec = matches!(kind, NodeKind::Vec3(_));
             ui.horizontal(|ui| {
