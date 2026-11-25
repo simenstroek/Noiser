@@ -1,4 +1,4 @@
-﻿// No console window behind the release build on Windows.
+// No console window behind the release build on Windows.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod agent_cli;
@@ -24,8 +24,8 @@ mod meshgraph;
 mod meshgraph_ui;
 mod meshworkspace;
 mod landscape;
-mod landscape_chunks;
 mod landscape_field;
+mod landscape_gpu;
 mod scatter;
 mod landscape_masks;
 mod landscape_erosion;
@@ -1062,6 +1062,10 @@ impl App {
                 self.workspace = Workspace::Mesh;
                 self.mesh_ws.drop_file(path);
             }
+            library::Kind::Erosion => {
+                self.workspace = Workspace::Landscape;
+                self.landscape.load_erosion_preset(&path);
+            }
             library::Kind::Bake | library::Kind::Udim => {}
         }
     }
@@ -1164,13 +1168,16 @@ impl eframe::App for App {
         }
         // Window title: the file and an asterisk for unsaved changes.
         let dirty = self.graph != self.saved;
-        let title = if self.workspace == meshworkspace::Workspace::Composer {
-            format!("Noiser - {}", self.composer.title())
-        } else {
-            match (&self.path, dirty) {
-                (None, false) => "Noiser".to_string(),
-                (p, d) => format!("Noiser - {}{}", p.as_ref().and_then(|p| p.file_name()).map_or("untitled".into(), |n| n.to_string_lossy()), if d { " *" } else { "" }),
-            }
+        // The tab shown decides whose file it names.
+        let named = |path: &Option<std::path::PathBuf>, d: bool| match (path, d) {
+            (None, false) => "Noiser".to_string(),
+            (p, d) => format!("Noiser - {}{}", p.as_ref().and_then(|p| p.file_name()).map_or("untitled".into(), |n| n.to_string_lossy()), if d { " *" } else { "" }),
+        };
+        let title = match self.workspace {
+            meshworkspace::Workspace::Composer => format!("Noiser - {}", self.composer.title()),
+            meshworkspace::Workspace::Mesh => named(&self.mesh_ws.path, self.mesh_ws.dirty()),
+            meshworkspace::Workspace::Landscape => named(&self.landscape.path, false),
+            meshworkspace::Workspace::Noise => named(&self.path, dirty),
         };
         if title != self.title {
             ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
@@ -1329,10 +1336,16 @@ impl eframe::App for App {
         }
         let tiling = self.graph.tiling();
 
+        // The workspace tabs first, then the menu bar under them: its File and Edit menus belong to the tab shown.
+        self.workspace_tabs(ui);
         egui::Panel::top("menu").show(ui, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
                 if self.workspace == meshworkspace::Workspace::Composer {
-                    self.composer.menus(ui);
+                    self.composer.menus(ui, &mut self.prefs_open);
+                } else if self.workspace == meshworkspace::Workspace::Mesh {
+                    self.mesh_menus(ui);
+                } else if self.workspace == meshworkspace::Workspace::Landscape {
+                    self.landscape_menus(ui);
                 } else {
                 ui.menu_button("File", |ui| {
                     if icons::menu_item(ui, "new", "New", "Ctrl+N").clicked() {
@@ -1446,7 +1459,6 @@ impl eframe::App for App {
                 });
             });
         });
-        self.workspace_tabs(ui);
         self.library_drawer(ui);
         match self.workspace {
             meshworkspace::Workspace::Mesh => {

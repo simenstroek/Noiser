@@ -19,7 +19,8 @@ pub enum Workspace {
 }
 
 impl Workspace {
-    pub const ALL: [Workspace; 4] = [Workspace::Composer, Workspace::Noise, Workspace::Mesh, Workspace::Landscape];
+    /// In workflow order: shapes and noises, then terrain, then the Mesh graph that puts them together.
+    pub const ALL: [Workspace; 4] = [Workspace::Composer, Workspace::Noise, Workspace::Landscape, Workspace::Mesh];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -58,6 +59,8 @@ struct RayRequest {
     seed: u32,
     view: [f32; 3],
     size: u32,
+    /// Draw with Z up (a terrain) instead of Y up.
+    z_up: bool,
 }
 
 /// What the worker sends back: the picture (RGBA bytes) for a request, or why there is none.
@@ -75,14 +78,27 @@ struct RayWorker {
     outstanding: usize,
 }
 
+/// A point or direction as the views see it: they are drawn Y-up, so with `z_up` (a terrain) the field's Z becomes
+/// the view's Y, `(x, y, z) -> (x, z, -y)` (a rotation, so nothing is mirrored).
+fn view_space(p: [f32; 3], z_up: bool) -> [f32; 3] {
+    if z_up { [p[0], p[2], -p[1]] } else { p }
+}
+
+/// The inverse of `view_space`: a vector in the view's Y-up space, in the field's.
+fn field_space(v: [f32; 3], z_up: bool) -> [f32; 3] {
+    if z_up { [v[0], -v[2], v[1]] } else { v }
+}
+
 /// The orthographic camera that matches the software view (`Preview::paint`) for a field with these bounds.
-fn ray_camera(lo: [f32; 3], hi: [f32; 3], view: [f32; 3], size: u32) -> crate::meshexport::MarchCamera {
+fn ray_camera(lo: [f32; 3], hi: [f32; 3], view: [f32; 3], size: u32, z_up: bool) -> crate::meshexport::MarchCamera {
     let [yaw, pitch, zoom] = view;
     let centre: [f32; 3] = std::array::from_fn(|a| 0.5 * (lo[a] + hi[a]));
     let radius = (0..3).map(|a| hi[a] - lo[a]).fold(0.0, f32::max).max(1e-9) * 0.5;
     let (cy, sy, cp, sp) = (yaw.cos(), yaw.sin(), pitch.cos(), pitch.sin());
     // The rows of the software view's rotation: image x, image y and towards the viewer, in the field's space.
     let (x, y, z) = ([cy, 0.0, sy], [sp * sy, cp, -sp * cy], [-cp * sy, sp, cp * cy]);
+    // For a Z-up field, the view's Y-up axes are turned into the field's space (see iew_space).
+    let (x, y, z) = (field_space(x, z_up), field_space(y, z_up), field_space(z, z_up));
     let half = radius / (0.9 * zoom);
     let step = 2.0 * half / size as f32;
     let at = |a: usize| centre[a] + z[a] * 2.0 * radius + x[a] * (-half + 0.5 * step) + y[a] * (half - 0.5 * step);
@@ -97,6 +113,7 @@ fn ray_camera(lo: [f32; 3], hi: [f32; 3], view: [f32; 3], size: u32) -> crate::m
         t_max: 4.0 * radius,
         hit: 0.0008 * radius,
         gradient_step: 0.002 * radius,
+        clip: None,
     }
 }
 
@@ -137,7 +154,8 @@ impl RayWorker {
                 }
                 let Some((_, view)) = &current else { continue };
                 let (lo, hi) = view.bounds();
-                let cam = ray_camera(lo, hi, req.view, req.size);
+                let mut cam = ray_camera(lo, hi, req.view, req.size, req.z_up);
+                cam.clip = view.trace_box();
                 let pixels = view.march(&cam, req.size, req.size);
                 let rgba = pixels.iter().flat_map(|p| p.map(|c| (c.clamp(0.0, 1.0) * 255.0) as u8)).collect();
                 let _ = answers.send(RayResult { size: req.size, rgba: Ok(rgba) });
@@ -191,7 +209,7 @@ pub struct MeshWorkspace {
     /// The mesh view's surface: 0 baked normal and occlusion lit (default), 1 smooth grey, 2 and up map k - 2 unlit.
     surface: usize,
     surface_tex: Option<egui::TextureHandle>,
-    surface_key: Option<(i32, i32, i32, usize, usize)>,
+    surface_key: Option<(i32, i32, i32, usize, usize, bool)>,
     ray: Option<RayWorker>,
     ray_tex: Option<egui::TextureHandle>,
     ray_error: Option<String>,
@@ -313,7 +331,7 @@ impl Preview {
     /// The mesh as a picture of `size` pixels, rasterized in software with the baked maps: `surface` 0 lights the
     /// normal map and multiplies the occlusion map, 1 and up show map `surface - 1` as it is, without light.
     /// None when there is nothing to texture (no UVs or maps).
-    fn render(&self, size: usize, yaw: f32, pitch: f32, zoom: f32, surface: usize) -> Option<egui::ColorImage> {
+    fn render(&self, size: usize, yaw: f32, pitch: f32, zoom: f32, surface: usize, z_up: bool) -> Option<egui::ColorImage> {
         if self.uvs.is_empty() || self.maps.is_empty() || size < 8 {
             return None;
         }
@@ -322,6 +340,7 @@ impl Preview {
         let unlit = surface.checked_sub(1).and_then(|k| self.maps.get(k));
         let (cy, sy, cp, sp) = (yaw.cos(), yaw.sin(), pitch.cos(), pitch.sin());
         let view = |p: [f32; 3]| {
+            let p = view_space(p, z_up);
             let x = cy * p[0] + sy * p[2];
             let z = -sy * p[0] + cy * p[2];
             [x, cp * p[1] - sp * z, sp * p[1] + cp * z]
@@ -415,7 +434,7 @@ impl Preview {
     }
 
     /// Smooth-shaded triangles, far ones first, as one egui mesh in `rect`.
-    fn paint(&self, painter: &egui::Painter, rect: egui::Rect, yaw: f32, pitch: f32, zoom: f32) {
+    fn paint(&self, painter: &egui::Painter, rect: egui::Rect, yaw: f32, pitch: f32, zoom: f32, z_up: bool) {
         const LIMIT: usize = 150_000;
         if self.triangles.len() > LIMIT {
             painter.text(rect.center(), egui::Align2::CENTER_CENTER, format!("{} triangles: too many to preview here", self.triangles.len()), egui::FontId::proportional(14.0), egui::Color32::GRAY);
@@ -424,6 +443,7 @@ impl Preview {
         let (cy, sy, cp, sp) = (yaw.cos(), yaw.sin(), pitch.cos(), pitch.sin());
         // Rotate about the vertical axis, then tilt; the camera looks down -z, z points at the viewer.
         let view = |p: [f32; 3]| {
+            let p = view_space(p, z_up);
             let x = cy * p[0] + sy * p[2];
             let z = -sy * p[0] + cy * p[2];
             [x, cp * p[1] - sp * z, sp * p[1] + cp * z]
@@ -569,6 +589,12 @@ impl MeshWorkspace {
 
     pub fn has_preview(&self) -> bool {
         self.preview.is_some()
+    }
+
+    /// True when the graph makes a terrain (a Load Mesh node with a heightmap): terrains are Z-up, so the views turn
+    /// Z up instead of Y.
+    fn terrain_up(&self) -> bool {
+        self.graph.nodes.values().any(|n| !n.muted && matches!(&n.kind, NodeKind::LoadMesh(m) if crate::landscape_field::is_heightmap(&m.path)))
     }
 
     pub fn dirty(&self) -> bool {
@@ -816,6 +842,56 @@ impl crate::App {
         ));
     }
 
+    /// A new mesh graph (the example), once unsaved changes may go.
+    pub(crate) fn new_mesh_graph(&mut self) {
+        if self.mesh_ws.may_discard() {
+            self.mesh_ws.set(MeshWorkspace::example(), None);
+        }
+    }
+
+    /// Opens a mesh graph the user picks, once unsaved changes may go.
+    pub(crate) fn open_mesh_graph(&mut self) {
+        if self.mesh_ws.may_discard()
+            && let Err(e) = self.mesh_ws.open() {
+                self.status = e;
+            }
+    }
+
+    /// The File and Edit menus while the Mesh graph tab is shown: they act on the mesh graph.
+    pub(crate) fn mesh_menus(&mut self, ui: &mut egui::Ui) {
+        ui.menu_button("File", |ui| {
+            if crate::icons::menu_item(ui, "new", "New mesh graph", "Ctrl+N").clicked() {
+                self.new_mesh_graph();
+            }
+            if crate::icons::menu_item(ui, "open", "Open…", "Ctrl+O").clicked() {
+                self.open_mesh_graph();
+            }
+            if crate::icons::menu_item(ui, "save", "Save", "Ctrl+S").clicked() {
+                self.save_mesh_graph(false);
+            }
+            if crate::icons::menu_item(ui, "save_as", "Save As…", "Ctrl+Shift+S").clicked() {
+                self.save_mesh_graph(true);
+            }
+        });
+        ui.menu_button("Edit", |ui| {
+            if crate::icons::menu_item_enabled(ui, "undo", "Undo", "Ctrl+Z", self.mesh_ws.history.can_undo()).clicked() {
+                self.mesh_ws.undo(false);
+            }
+            if crate::icons::menu_item_enabled(ui, "redo", "Redo", "Ctrl+Y", self.mesh_ws.history.can_redo()).clicked() {
+                self.mesh_ws.undo(true);
+            }
+            ui.separator();
+            if crate::icons::menu_item(ui, "arrange", "Arrange nodes", "").on_hover_text("Lay the graph out in columns, inputs on the left").clicked() {
+                crate::editor::arrange(&mut self.mesh_ws.graph);
+                self.mesh_ws.editor.frame_next = true;
+            }
+            if crate::icons::menu_item(ui, "settings", "Preferences…", "").clicked() {
+                self.prefs_open = true;
+                ui.close();
+            }
+        });
+    }
+
     pub(crate) fn mesh_workspace_ui(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
         // The worker's progress and result.
@@ -918,22 +994,25 @@ impl crate::App {
                 self.mesh_ws.undo(false);
             }
         }
-        // Saving acts on this graph here.
-        let (save_as, save) = ui.input(|i| (crate::keymap::pressed(i, Action::SaveAs), crate::keymap::pressed(i, Action::Save)));
+        // New, open and save act on this graph here.
+        let (save_as, save, open, new) = ui.input(|i| (crate::keymap::pressed(i, Action::SaveAs), crate::keymap::pressed(i, Action::Save), crate::keymap::pressed(i, Action::Open), crate::keymap::pressed(i, Action::New)));
         if save_as {
             self.save_mesh_graph(true);
         } else if save {
             self.save_mesh_graph(false);
+        } else if open {
+            self.open_mesh_graph();
+        } else if new {
+            self.new_mesh_graph();
         }
         egui::Panel::right("mesh props").default_size(340.0).show(ui, |ui| {
             ui.horizontal_wrapped(|ui| {
-                if crate::icons::button(ui, "new", "New", None, true).on_hover_text("New mesh graph").clicked() && self.mesh_ws.may_discard() {
-                    self.mesh_ws.set(MeshWorkspace::example(), None);
+                if crate::icons::button(ui, "new", "New", None, true).on_hover_text("New mesh graph (Ctrl+N)").clicked() {
+                    self.new_mesh_graph();
                 }
-                if crate::icons::button(ui, "open", "Open…", None, true).on_hover_text("Open a mesh graph… (Ctrl+O)").clicked() && self.mesh_ws.may_discard()
-                    && let Err(e) = self.mesh_ws.open() {
-                        self.status = e;
-                    }
+                if crate::icons::button(ui, "open", "Open…", None, true).on_hover_text("Open a mesh graph… (Ctrl+O)").clicked() {
+                    self.open_mesh_graph();
+                }
                 if crate::icons::button(ui, "save", "Save", None, true).on_hover_text("Save (Ctrl+S). Saves the mesh graph, refreshes the embedded copy of every noise graph it uses, and saves the open noise graph too if it is one of them.").clicked() {
                     self.save_mesh_graph(false);
                 }
@@ -1133,12 +1212,13 @@ impl crate::App {
                 // A changed graph is drawn again once it has been still for a moment (compiling takes a while); a new
                 // view or size is drawn at once.
                 let settled = ws.ray_key.1.is_none_or(|t| t.elapsed() > std::time::Duration::from_millis(400));
+                let z_up = ws.terrain_up();
                 let quant = [(ws.yaw * 100.0) as i32, (ws.pitch * 100.0) as i32, (ws.zoom * 100.0) as i32];
                 let first = ws.ray_sent.is_none();
                 let changed = ws.ray_sent.is_none_or(|(k, v, s)| k != ws.ray_key.0 || v != quant || s != side);
                 if changed && (settled || first) && !ui.input(|i| i.pointer.any_down() && ws.ray_sent.is_some_and(|(k, _, _)| k != ws.ray_key.0)) {
                     if let Some(w) = &mut ws.ray {
-                        let req = RayRequest { graph, key, base: ws.path.as_ref().and_then(|p| p.parent()).map_or(PathBuf::from("."), |p| p.to_path_buf()), seed: ws.seed, view: [ws.yaw, ws.pitch, ws.zoom], size: side };
+                        let req = RayRequest { graph, key, base: ws.path.as_ref().and_then(|p| p.parent()).map_or(PathBuf::from("."), |p| p.to_path_buf()), seed: ws.seed, view: [ws.yaw, ws.pitch, ws.zoom], size: side, z_up };
                         if w.tx.send(req).is_ok() {
                             w.outstanding += 1;
                         }
@@ -1178,6 +1258,7 @@ impl crate::App {
                 painter.line_segment([egui::pos2(view_rect.min.x, view_rect.min.y), egui::pos2(view_rect.min.x, view_rect.max.y)], egui::Stroke::new(1.0, egui::Color32::from_gray(60)));
                 painter.text(fr.left_top() + egui::vec2(8.0, 22.0), egui::Align2::LEFT_TOP, "Field (ray marched)", egui::FontId::proportional(11.0), egui::Color32::from_gray(120));
             }
+            let z_up = self.mesh_ws.terrain_up();
             let preview = self.mesh_ws.preview.take();
             match &preview {
                 _ if map_view => {}
@@ -1189,10 +1270,10 @@ impl crate::App {
                         let ws = &mut self.mesh_ws;
                         let side = (view_rect.width().min(view_rect.height()) as usize).clamp(64, 800);
                         let textured = ws.surface != 1 && !p.maps.is_empty() && !p.uvs.is_empty() && p.triangles.len() <= 150_000;
-                        let key = (((ws.yaw * 100.0) as i32), ((ws.pitch * 100.0) as i32), ((ws.zoom * 100.0) as i32), ws.surface, side);
+                        let key = (((ws.yaw * 100.0) as i32), ((ws.pitch * 100.0) as i32), ((ws.zoom * 100.0) as i32), ws.surface, side, z_up);
                         if textured {
                             if (ws.surface_key != Some(key) || ws.surface_tex.is_none())
-                                && let Some(img) = p.render(side, ws.yaw, ws.pitch, ws.zoom, ws.surface) {
+                                && let Some(img) = p.render(side, ws.yaw, ws.pitch, ws.zoom, ws.surface, z_up) {
                                     ws.surface_tex = Some(ctx.load_texture("mesh surface", img, egui::TextureOptions::LINEAR));
                                     ws.surface_key = Some(key);
                                 }
@@ -1201,7 +1282,7 @@ impl crate::App {
                                 painter.image(tex.id(), img, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), egui::Color32::WHITE);
                             }
                         } else {
-                            p.paint(&painter, view_rect, ws.yaw, ws.pitch, ws.zoom);
+                            p.paint(&painter, view_rect, ws.yaw, ws.pitch, ws.zoom, z_up);
                         }
                     }
                     let hint = if uv { "UV layout" } else { "Drag to turn, scroll to zoom, double-click to reset." };

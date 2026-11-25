@@ -113,20 +113,39 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
 
 // Sphere tracing of the field for a picture (an orthographic camera): pts[0] is the first ray origin and pts[1] and
 // pts[2] the world steps per pixel along the image's x and y; pts[3] the ray direction; pts[4] = (light dir, t_max);
-// pts[5] = (step scale, hit distance, gradient step, 0). The picture is x.nx by x.ny in `samples`.
+// pts[5] = (step scale, hit distance, gradient step, 0); pts[6] = (box low corner, 1 to trace only inside the box) and
+// pts[7] = (box high corner, 0). The picture is x.nx by x.ny in `samples`.
 @compute @workgroup_size(8, 8)
 fn march(@builtin(global_invocation_id) id: vec3u) {
     if (id.x >= x.nx || id.y >= x.ny) { return; }
     let o = pts[0].xyz + pts[1].xyz * f32(id.x) + pts[2].xyz * f32(id.y);
     let d = pts[3].xyz;
     let light = pts[4].xyz;
-    let t_max = pts[4].w;
+    var t_max = pts[4].w;
     let scale = pts[5].x;
     let hit_d = pts[5].y;
     let e = pts[5].z;
     var t = 0.0;
     var hit = false;
+    // A terrain is a sheet, as its mesh is: a ray that starts inside the ground (it came in through the side or the
+    // bottom of the box, under the surface) shows nothing. Drawing it would show the ground's body as walls along the
+    // square and a floor underneath, or valleys seen through the near edge.
+    var outside = true;
+    if (pts[6].w > 0.5) {
+        // Only where the ray crosses the box (slabs). WGSL leaves 1/0 undefined, so a zero component becomes a tiny one.
+        let inv = 1.0 / select(d, vec3f(1e-12), abs(d) < vec3f(1e-12));
+        let a = (pts[6].xyz - o) * inv;
+        let b = (pts[7].xyz - o) * inv;
+        let t_in = max(max(min(a.x, b.x), min(a.y, b.y)), min(a.z, b.z));
+        let t_out = min(min(max(a.x, b.x), max(a.y, b.y)), max(a.z, b.z));
+        t = max(t_in, 0.0);
+        t_max = min(t_max, t_out);
+        // Judged a hair inside the box, clear of the square's edge where the field jumps.
+        outside = field_at(o + d * (t + hit_d)) >= hit_d;
+    }
     for (var i = 0; i < 220; i = i + 1) {
+        if (t > t_max) { break; }
+        if (!outside) { break; }
         let v = field_at(o + d * t);
         if (v < hit_d) { hit = true; break; }
         t = t + max(v * scale, hit_d * 0.5);
@@ -288,6 +307,16 @@ fn land_centre_0() -> vec2f { let m = meshes[0]; return m.origin.xy + vec2f(0.5 
 fn land_centre_1() -> vec2f { let m = meshes[1]; return m.origin.xy + vec2f(0.5 * (m.origin.z - 1.0) * m.voxel); }
 fn land_centre_2() -> vec2f { let m = meshes[2]; return m.origin.xy + vec2f(0.5 * (m.origin.z - 1.0) * m.voxel); }
 fn land_centre_3() -> vec2f { let m = meshes[3]; return m.origin.xy + vec2f(0.5 * (m.origin.z - 1.0) * m.voxel); }
+// True when (x, y) is at least `margin` inside the terrain's square (scattered copies stand only on the terrain).
+fn land_inside(xy: vec2f, margin: f32, m: MeshInfo) -> bool {
+    let side = (m.origin.z - 1.0) * m.voxel;
+    let q = xy - m.origin.xy;
+    return all(q >= vec2f(margin)) && all(q <= vec2f(side - margin));
+}
+fn land_inside_0(xy: vec2f, margin: f32) -> bool { return land_inside(xy, margin, meshes[0]); }
+fn land_inside_1(xy: vec2f, margin: f32) -> bool { return land_inside(xy, margin, meshes[1]); }
+fn land_inside_2(xy: vec2f, margin: f32) -> bool { return land_inside(xy, margin, meshes[2]); }
+fn land_inside_3(xy: vec2f, margin: f32) -> bool { return land_inside(xy, margin, meshes[3]); }
 fn land_range_0() -> vec2f { return meshes[0].centre.yz; }
 fn land_range_1() -> vec2f { return meshes[1].centre.yz; }
 fn land_range_2() -> vec2f { return meshes[2].centre.yz; }
@@ -538,7 +567,11 @@ impl MeshEvaluator {
         };
         let block = dev.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: None, contents: bytemuck::bytes_of(&block), usage: wgpu::BufferUsages::UNIFORM });
         let v4 = |v: V3, w: f32| [v[0], v[1], v[2], w];
-        let input = [v4(cam.origin, 0.0), v4(cam.step_x, 0.0), v4(cam.step_y, 0.0), v4(cam.direction, 0.0), v4(cam.light, cam.t_max), [0.8, cam.hit, cam.gradient_step, 0.0]];
+        let (clip_lo, clip_hi, clipped) = match cam.clip {
+            Some((lo, hi)) => (lo, hi, 1.0),
+            None => ([0.0; 3], [0.0; 3], 0.0),
+        };
+        let input = [v4(cam.origin, 0.0), v4(cam.step_x, 0.0), v4(cam.step_y, 0.0), v4(cam.direction, 0.0), v4(cam.light, cam.t_max), [0.8, cam.hit, cam.gradient_step, 0.0], v4(clip_lo, clipped), v4(clip_hi, 0.0)];
         let input = dev.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: None, contents: bytemuck::cast_slice(&input), usage: wgpu::BufferUsages::STORAGE });
         let bytes = (w as u64) * (h as u64) * 16;
         let out = dev.create_buffer(&wgpu::BufferDescriptor { label: None, size: bytes, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC, mapped_at_creation: false });
@@ -658,6 +691,10 @@ pub struct MarchCamera {
     pub t_max: f32,
     pub hit: f32,
     pub gradient_step: f32,
+    /// The box the surface is inside, if known: each ray is traced only where it crosses it. A terrain's field outside
+    /// its square is many times the true distance (see `land_dist`), so a ray tracing in from beside the square would
+    /// jump straight through it.
+    pub clip: Option<(V3, V3)>,
 }
 
 /// One export: what to evaluate and how.

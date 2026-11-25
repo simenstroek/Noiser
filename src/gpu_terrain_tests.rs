@@ -355,6 +355,54 @@ fn a_scatter_node_plants_shapes_on_the_terrain() {
     assert!(pits.len() > 1000 && high < 25.0, "{} vertices, top {high} {log:?}", pits.len());
 }
 
+/// The field view of a terrain with scattered copies, traced from straight above and from beside it.
+#[test]
+fn the_field_view_shows_a_scattered_terrain_from_any_side_and_no_copies_past_its_edge() {
+    if gpu().is_none() {
+        return eprintln!("no GPU adapter; skipping");
+    }
+    let gpu = gpu().unwrap();
+    let dir = std::env::temp_dir().join("noiser-terrain-field-view");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    // 640 m square, ground under 20 m, a copy 30 to 40 m across in every 80 m cell.
+    let png = heightmap(&dir, 129, 640.0, 20.0);
+    let sdf = crate::sdf_node::tests::temp_sphere("noiser_terrain_field_view.sdf");
+    let mut g = graph(&png, 1, 40000, false);
+    let land = g.nodes.iter().find(|(_, n)| matches!(&n.kind, NodeKind::LoadMesh(_))).map(|(id, _)| *id).unwrap();
+    let remesh = g.nodes.iter().find(|(_, n)| matches!(&n.kind, NodeKind::Remesh { .. })).map(|(id, _)| *id).unwrap();
+    let scatter = g.add(NodeKind::Scatter(crate::scatter::ScatterParams { file: sdf, cell: 80.0, density: 1.0, size: [30.0, 40.0], slope: [0.0, 10.0], blend: 2.0, ..Default::default() }), [0.0; 2]);
+    g.connect(land, scatter, 0);
+    g.connect(scatter, remesh, 0);
+    let mut cache = MeshCache::default();
+    let mut quiet = |_: &str| {};
+    let view = Runner { device: &gpu.device, queue: &gpu.queue, cache: &mut cache, base: dir.clone(), seed: 0, progress: Default::default(), log: &mut quiet, batch_file: None, max_triangles: None }.field_view(&g).unwrap();
+    let clip = view.trace_box();
+    assert!(clip.is_some(), "a terrain's field view traces only inside its box");
+    let n = 128u32;
+    let camera = |origin: [f32; 3], step_x: [f32; 3], step_y: [f32; 3], direction: [f32; 3]| crate::meshexport::MarchCamera { origin, step_x, step_y, direction, light: [0.3, 0.4, 0.86], t_max: 4000.0, hit: 0.05, gradient_step: 0.5, clip };
+    // From above, over a 1280 m square centred on the terrain: x and y from -320 to 960 m, 10 m a pixel.
+    let top = view.march(&camera([-315.0, -315.0, 1000.0], [10.0, 0.0, 0.0], [0.0, 10.0, 0.0], [0.0, 0.0, -1.0]), n, n);
+    let (mut inside, mut outside) = (0, 0);
+    for (k, px) in top.iter().enumerate() {
+        let (x, y) = (-315.0 + 10.0 * (k as u32 % n) as f32, -315.0 + 10.0 * (k as u32 / n) as f32);
+        let on = (-5.0..=645.0).contains(&x) && (-5.0..=645.0).contains(&y);
+        if px[3] > 0.5 {
+            if on { inside += 1 } else { outside += 1 }
+        }
+    }
+    assert!(inside > 3000, "the terrain fills its square from above: {inside} pixels");
+    assert_eq!(outside, 0, "nothing stands past the terrain's edge");
+    // From the side, level with the ground (looking along +y from beyond the square): the terrain and its copies show.
+    let side = view.march(&camera([-315.0, -2000.0, -100.0], [10.0, 0.0, 0.0], [0.0, 0.0, 2.0], [0.0, 1.0, 0.0]), n, n);
+    let seen = side.iter().filter(|p| p[3] > 0.5).count();
+    assert!(seen > 500, "the terrain is seen from the side too: {seen} pixels");
+    // From straight below, the ground is a sheet, not a solid block with a floor: nothing shows.
+    let below = view.march(&camera([-315.0, 960.0 - 5.0, -1000.0], [10.0, 0.0, 0.0], [0.0, -10.0, 0.0], [0.0, 0.0, 1.0]), n, n);
+    let under = below.iter().filter(|p| p[3] > 0.5).count();
+    assert_eq!(under, 0, "no floor under the terrain");
+}
+
 /// Time and size for growing chunks: `cargo test --release terrain_chunk_scaling -- --ignored --nocapture`.
 /// Set `NOISER_SCALE_QUADS` to a comma separated list of quads per side to try others.
 #[test]

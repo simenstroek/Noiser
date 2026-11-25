@@ -50,9 +50,9 @@ In the Noise graph tab's side panel: import a low-resolution OBJ, PLY, STL, glTF
 
 A terrain workspace where a noise graph is the height function. Masks are painted on a map view and read in the graph with a Mask node; Slope and Noise Graph nodes pick where detail layers apply. Then:
 
-- GPU hydraulic (pipe model) and thermal erosion on a 512 to 4096 working grid.
-- *Export heightmap for Unreal*: a 16-bit 4033 x 4033 PNG plus a sidecar `.json` with the location and scale to enter in Unreal's Landscape import.
-- *Nanite chunks*: the terrain cut into chunks, each a regular-grid mesh up to a triangle budget with planar UVs, normal/occlusion/curvature maps and a manifest; optionally packed as a UDIM tileset.
+- GPU hydraulic (pipe model) and thermal erosion on a 512 to 4096 working grid, with erosion presets (`.erosion` files in the library's Erosion Presets folder).
+- *Export heightmap for Unreal*: a 16-bit 4033 x 4033 PNG plus a sidecar `.json` with the location and scale to enter in Unreal's Landscape import (Unreal can make that landscape Nanite itself).
+- *Open as Nanite chunks in the Mesh graph*: the heightmap goes into a Mesh graph that cuts it into Nanite chunks, where shapes, caves and noise can be added before it is meshed.
 - Terrain is saved as a `.landscape` project.
 
 Plan and status: [`docs/landscape-plan.md`](docs/landscape-plan.md).

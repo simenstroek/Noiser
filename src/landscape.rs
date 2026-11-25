@@ -91,6 +91,9 @@ pub fn bilinear(grid: &[f32], n: usize, x: f32, y: f32) -> f32 {
     (grid[j * n + i] * (1.0 - fx) + grid[j * n + i1] * fx) * (1.0 - fy) + (grid[j1 * n + i] * (1.0 - fx) + grid[j1 * n + i1] * fx) * fy
 }
 
+/// Samples a side of the grid the 3D view draws: the GPU marches it, so it can be finer than a CPU picture could.
+const VIEW_SAMPLES: usize = 1025;
+
 /// The grid as an `m` x `m` one, `m` at most `max`, for drawing.
 fn shrink(grid: &[f32], n: usize, max: usize) -> (Vec<f32>, usize) {
     let m = n.min(max);
@@ -180,8 +183,29 @@ pub fn write_unreal(path: &Path, n: usize, world_m: f32, h: &UnrealHeights) -> R
     Ok(format!("Wrote {} ({n} x {n}, {:.2} cm per step) and {}", path.display(), h.step_cm, side.file_name().unwrap_or_default().to_string_lossy()))
 }
 
-/// The terrain from a camera by ray marching the height grid: metres in, a picture out.
-fn render(metres: &[f32], n: usize, world_m: f32, water: Option<f32>, (yaw, pitch, zoom): (f32, f32, f32), (w, h): (usize, usize)) -> egui::ColorImage {
+/// Where a ray `eye + t·d` (t ≥ 0) is inside the box `lo..hi`: `(t_in, t_out)`, or `None` when it misses.
+#[cfg(test)]
+fn clip_ray(eye: [f32; 3], d: [f32; 3], lo: [f32; 3], hi: [f32; 3]) -> Option<(f32, f32)> {
+    let (mut t_in, mut t_out) = (0.0f32, f32::MAX);
+    for a in 0..3 {
+        if d[a].abs() < 1e-9 {
+            if eye[a] < lo[a] || eye[a] > hi[a] {
+                return None;
+            }
+            continue;
+        }
+        let (t0, t1) = ((lo[a] - eye[a]) / d[a], (hi[a] - eye[a]) / d[a]);
+        t_in = t_in.max(t0.min(t1));
+        t_out = t_out.min(t0.max(t1));
+    }
+    (t_in <= t_out).then_some((t_in, t_out))
+}
+
+/// The terrain from a camera by ray marching the height grid on the CPU: metres in, a picture out. The view draws on
+/// the GPU (`landscape_gpu`); this is the reference the tests hold it to. `min_step_cells` is the smallest step; without
+/// `slope_steps` every step is the smallest one (for checking that the big steps miss nothing).
+#[cfg(test)]
+fn render_steps(metres: &[f32], n: usize, world_m: f32, water: Option<f32>, (yaw, pitch, zoom): (f32, f32, f32), (w, h): (usize, usize), min_step_cells: f32, slope_steps: bool) -> egui::ColorImage {
     use rayon::prelude::*;
     let (lo, hi) = metres.iter().fold((f32::MAX, f32::MIN), |(lo, hi), v| (lo.min(*v), hi.max(*v)));
     let range = (hi - lo).max(1e-3);
@@ -208,6 +232,19 @@ fn render(metres: &[f32], n: usize, world_m: f32, water: Option<f32>, (yaw, pitc
     let up = [right[1] * fwd[2] - right[2] * fwd[1], right[2] * fwd[0] - right[0] * fwd[2], right[0] * fwd[1] - right[1] * fwd[0]];
     let tan_half = (40.0f32.to_radians() * 0.5).tan();
     let light = norm([0.5, 0.35, 0.8]);
+    // The box the surface (ground or water) lives in, and its steepest slope (metres up per metre across).
+    let (floor, top) = (lo.min(level.max(lo)) - 1.0, hi.max(level) + 1.0);
+    let steepest = (0..n * n)
+        .map(|k| {
+            let (i, j) = (k % n, k / n);
+            let h = metres[k].max(level);
+            let dx = if i + 1 < n { (metres[k + 1].max(level) - h).abs() } else { 0.0 };
+            let dy = if j + 1 < n { (metres[k + n].max(level) - h).abs() } else { 0.0 };
+            dx.max(dy)
+        })
+        .fold(0.0f32, f32::max)
+        / cell
+        * 1.5; // diagonal and interpolation margin
     let mut pixels = vec![egui::Color32::BLACK; w * h];
     pixels.par_chunks_mut(w).enumerate().for_each(|(py, row)| {
         for (px, out) in row.iter_mut().enumerate() {
@@ -218,14 +255,19 @@ fn render(metres: &[f32], n: usize, world_m: f32, water: Option<f32>, (yaw, pitc
             let t = (d[2] * 2.0).clamp(0.0, 1.0);
             let sky = [150.0 + (70.0 - 150.0) * t, 180.0 + (110.0 - 180.0) * t, 215.0 + (170.0 - 215.0) * t];
             *out = egui::Color32::from_rgb(sky[0] as u8, sky[1] as u8, sky[2] as u8);
-            // March from the camera until the ray dips below the surface.
-            let step = cell * 0.9;
-            let (mut t, mut prev) = (0.0f32, 0.0f32);
-            let max_t = dist * 3.0;
-            while t < max_t {
+            // March only where the ray is inside the terrain's box (sky pixels and rays past the edge cost nothing),
+            // until it dips below the surface.
+            let Some((t_in, t_out)) = clip_ray(eye, d, [0.0, 0.0, floor], [world_m, world_m, top]) else { continue };
+            let min_step = cell * min_step_cells;
+            // The surface rises at most `steepest` metres per metre, so a ray `gap` above it can safely go
+            // `gap / (|dz| + steepest * horizontal)` before it could touch it: big steps high up, small ones near it.
+            let closing = if slope_steps { d[2].abs() + steepest * (d[0] * d[0] + d[1] * d[1]).sqrt() } else { f32::INFINITY };
+            let (mut t, mut prev) = (t_in, t_in);
+            while t <= t_out {
                 let p = [eye[0] + d[0] * t, eye[1] + d[1] * t, eye[2] + d[2] * t];
-                if p[0] >= 0.0 && p[1] >= 0.0 && p[0] <= world_m && p[1] <= world_m {
-                    if p[2] < surface(p[0], p[1]) {
+                let gap = p[2] - surface(p[0], p[1]);
+                {
+                    if gap < 0.0 {
                         // Refine between the last two steps.
                         let (mut a, mut b) = (prev, t);
                         for _ in 0..5 {
@@ -253,7 +295,7 @@ fn render(metres: &[f32], n: usize, world_m: f32, water: Option<f32>, (yaw, pitc
                     }
                 }
                 prev = t;
-                t += step;
+                t += (gap / closing.max(1e-6)).max(min_step);
             }
         }
     });
@@ -306,8 +348,6 @@ enum Job {
     /// The eroded heights, and the key (see `erosion_key`) they belong to.
     Erode(mpsc::Receiver<Result<Vec<f32>, String>>, Progress, u64),
     Export(mpsc::Receiver<Result<String, String>>, Progress),
-    /// The chunk export, with its log.
-    Chunks(mpsc::Receiver<Result<String, String>>, Progress, std::sync::Arc<std::sync::Mutex<Vec<String>>>),
 }
 
 pub struct LandscapeWorkspace {
@@ -322,12 +362,15 @@ pub struct LandscapeWorkspace {
     eroded: Option<(u64, Vec<f32>)>,
     job: Option<Job>,
     status: String,
-    pub chunks: crate::landscape_chunks::Options,
-    chunk_log: Vec<String>,
     /// A heightmap being exported for the Mesh graph: when it is written, a graph for it opens there.
     to_mesh: Option<PathBuf>,
     view: (f32, f32, f32),
-    picture: Option<(u64, egui::TextureHandle)>,
+    /// The heights the 3D view draws (at most VIEW_SAMPLES a side, in metres), kept and uploaded once per terrain.
+    view_grid: Option<crate::landscape_gpu::Grid>,
+    /// Undo and redo of the graph.
+    history: crate::history::History,
+    /// The erosion preset last loaded or saved: its name and its settings (to show when they have been changed since).
+    erosion_preset: Option<(String, crate::landscape_erosion::Erosion)>,
     /// The painted masks (read by Mask nodes), the selected one, the brush and its tool.
     pub masks: Vec<Mask>,
     mask_selected: usize,
@@ -346,7 +389,7 @@ pub struct LandscapeWorkspace {
 
 impl Default for LandscapeWorkspace {
     fn default() -> Self {
-        LandscapeWorkspace { graph: default_graph(), editor: Editor::default(), path: None, settings: Settings::default(), values: None, sampled_key: None, eroded: None, job: None, status: String::new(), chunks: Default::default(), chunk_log: Vec::new(), to_mesh: None, view: (0.8, 0.6, 1.0), picture: None, masks: Vec::new(), mask_selected: 0, mask_rev: 0, mask_live: 0, brush: Brush::default(), tool: Tool::Paint, map_mode: false, stroke_from: None, new_mask: String::new(), overlay: None, map_picture: None }
+        LandscapeWorkspace { graph: default_graph(), editor: Editor::default(), path: None, settings: Settings::default(), values: None, sampled_key: None, eroded: None, job: None, status: String::new(), to_mesh: None, view: (0.8, 0.6, 1.0), view_grid: None, history: crate::history::History::new(&default_graph()), erosion_preset: None, masks: Vec::new(), mask_selected: 0, mask_rev: 0, mask_live: 0, brush: Brush::default(), tool: Tool::Paint, map_mode: false, stroke_from: None, new_mask: String::new(), overlay: None, map_picture: None }
     }
 }
 
@@ -383,6 +426,68 @@ impl LandscapeWorkspace {
 
     pub fn restore(&mut self, graph: Graph, settings: Settings, path: Option<PathBuf>) {
         (self.graph, self.settings, self.path) = (graph, settings, path);
+        self.history = crate::history::History::new(&self.graph);
+    }
+
+    /// Undo (or redo) the last settled change to the graph.
+    pub fn undo(&mut self, redo: bool) {
+        let g = if redo { self.history.redo(&self.graph) } else { self.history.undo(&self.graph) };
+        if let Some(g) = g {
+            self.graph = g;
+            self.editor.selected.retain(|id| self.graph.nodes.contains_key(id));
+        }
+    }
+
+    pub fn can_undo(&self) -> bool {
+        self.history.can_undo()
+    }
+
+    pub fn can_redo(&self) -> bool {
+        self.history.can_redo()
+    }
+
+    /// Applies an erosion preset file (the working resolution stays as it is).
+    pub fn load_erosion_preset(&mut self, path: &Path) {
+        let result = std::fs::read_to_string(path).map_err(|e| e.to_string()).and_then(|text| self.settings.erosion.with_preset(&text));
+        match result {
+            Ok(e) => {
+                let name = path.file_stem().map_or_else(String::new, |s| s.to_string_lossy().into_owned());
+                self.status = format!("Erosion preset {name} loaded");
+                self.erosion_preset = Some((name, e.clone()));
+                self.settings.erosion = e;
+            }
+            Err(e) => self.status = format!("could not load the preset {}: {e}", path.display()),
+        }
+    }
+
+    /// Asks where to save the erosion settings as a preset (the library's Erosion Presets folder by default).
+    pub fn save_erosion_preset(&mut self) {
+        if let Some(dir) = crate::library::dir(crate::library::Kind::Erosion) {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let start = self.erosion_preset.as_ref().map_or("erosion".to_string(), |(n, _)| n.clone());
+        let dialog = rfd::FileDialog::new().add_filter("Erosion preset", &["erosion"]).set_file_name(format!("{start}.erosion"));
+        let Some(path) = crate::library::dialog(crate::library::Kind::Erosion, dialog).save_file() else { return };
+        self.status = match std::fs::write(&path, self.settings.erosion.to_preset()) {
+            Ok(()) => {
+                let name = path.file_stem().map_or_else(String::new, |s| s.to_string_lossy().into_owned());
+                self.erosion_preset = Some((name.clone(), self.settings.erosion.clone()));
+                format!("Erosion preset {name} saved")
+            }
+            Err(e) => format!("could not save the preset: {e}"),
+        };
+    }
+
+    /// The erosion settings back at their defaults (the working resolution stays as it is).
+    pub fn reset_erosion(&mut self) {
+        self.settings.erosion = self.settings.erosion.reset();
+        self.erosion_preset = None;
+    }
+
+    /// Lays the graph out in columns, inputs on the left.
+    pub fn arrange(&mut self) {
+        crate::editor::arrange(&mut self.graph);
+        self.editor.frame_next = true;
     }
 
     /// Opens the top view as the map, with a mask to paint on if there is none (`--landscape-map`).
@@ -407,6 +512,7 @@ impl LandscapeWorkspace {
         let masks = v.get("masks").and_then(|m| m.as_array()).map(|a| a.iter().filter_map(|m| Mask::from_png(m.get("name")?.as_str()?, &crate::landscape_masks::base64_decode(m.get("png")?.as_str()?)?)).collect()).unwrap_or_default();
         (self.graph, self.settings, self.masks) = (graph, settings, masks);
         (self.mask_selected, self.mask_rev) = (0, self.mask_rev + 1);
+        self.history = crate::history::History::new(&self.graph);
         Ok(())
     }
 
@@ -440,7 +546,7 @@ impl LandscapeWorkspace {
     }
 
     /// A landscape project (graph, settings, masks) or a plain noise graph (the masks stay).
-    fn open(&mut self) {
+    pub fn open(&mut self) {
         let Some(path) = rfd::FileDialog::new().add_filter("Landscape project or noise graph", &["landscape", "noisegraph", "json"]).pick_file() else { return };
         self.open_path(path);
     }
@@ -451,16 +557,51 @@ impl LandscapeWorkspace {
             Ok(t) => t,
             Err(e) => return self.status = format!("could not open: {e}"),
         };
-        let result = if path.extension().is_some_and(|e| e == "landscape") { self.from_project(&text) } else { Graph::from_json(&text).map(|g| self.graph = g) };
+        let result = if path.extension().is_some_and(|e| e == "landscape") {
+            self.from_project(&text)
+        } else {
+            Graph::from_json(&text).map(|g| {
+                self.history = crate::history::History::new(&g);
+                self.graph = g;
+            })
+        };
         match result {
             Ok(()) => self.path = Some(path),
             Err(e) => self.status = format!("could not open: {e}"),
         }
     }
 
+    /// A new landscape: the starting graph and no masks.
+    pub fn new_document(&mut self) {
+        self.graph = default_graph();
+        self.history = crate::history::History::new(&self.graph);
+        self.path = None;
+        self.masks.clear();
+        self.mask_rev += 1;
+    }
+
+    /// Saves the project (graph, settings and masks in one file): to the project it came from, or (with `ask`, or when
+    /// it has no project file yet) to one the user picks.
+    pub fn save_project(&mut self, ask: bool) {
+        match self.path.clone().filter(|p| !ask && p.extension().is_some_and(|e| e == "landscape")) {
+            Some(path) => self.write(&path, true),
+            None => self.save(true),
+        }
+    }
+
+    /// Saves the graph alone as a noise graph file the user picks.
+    pub fn save_graph(&mut self) {
+        self.save(false);
+    }
+
     fn save(&mut self, project: bool) {
         let (title, ext) = if project { ("Landscape project", "landscape") } else { ("Noise graph", "noisegraph") };
         let Some(path) = rfd::FileDialog::new().add_filter(title, &[ext]).set_file_name(format!("terrain.{ext}")).save_file() else { return };
+        self.write(&path, project);
+    }
+
+    fn write(&mut self, path: &Path, project: bool) {
+        let path = path.to_path_buf();
         let text = if project { self.to_project() } else { self.graph.to_json() };
         self.status = match std::fs::write(&path, text) {
             Ok(()) => {
@@ -476,7 +617,6 @@ impl LandscapeWorkspace {
 const TERRAIN: egui::Color32 = egui::Color32::from_rgb(200, 170, 115);
 const MASK_COLOR: egui::Color32 = egui::Color32::from_rgb(235, 135, 85);
 const WATER_COLOR: egui::Color32 = egui::Color32::from_rgb(95, 165, 230);
-const CHUNK_COLOR: egui::Color32 = egui::Color32::from_rgb(115, 205, 150);
 
 /// A collapsible section of the side panel: an icon and a title in the section's colour.
 fn section(ui: &mut egui::Ui, key: &str, icon: &str, title: &str, color: egui::Color32, open: bool, body: impl FnOnce(&mut egui::Ui)) {
@@ -584,8 +724,65 @@ impl LandscapeWorkspace {
 }
 
 impl crate::App {
+    /// The File and Edit menus while the Landscape tab is shown: they act on the landscape project.
+    pub(crate) fn landscape_menus(&mut self, ui: &mut egui::Ui) {
+        ui.menu_button("File", |ui| {
+            if crate::icons::menu_item(ui, "new", "New landscape", "Ctrl+N").clicked() {
+                self.landscape.new_document();
+            }
+            if crate::icons::menu_item(ui, "open", "Open…", "Ctrl+O").on_hover_text("A landscape project, or a noise graph as the terrain").clicked() {
+                self.landscape.open();
+            }
+            if crate::icons::menu_item(ui, "save", "Save", "Ctrl+S").on_hover_text("The project: the graph, the settings and the painted masks, in one file").clicked() {
+                self.landscape.save_project(false);
+            }
+            if crate::icons::menu_item(ui, "save_as", "Save As…", "Ctrl+Shift+S").clicked() {
+                self.landscape.save_project(true);
+            }
+            if crate::icons::menu_item(ui, "graph", "Save graph as noise graph…", "").clicked() {
+                self.landscape.save_graph();
+            }
+        });
+        ui.menu_button("Edit", |ui| {
+            if crate::icons::menu_item_enabled(ui, "undo", "Undo", "Ctrl+Z", self.landscape.can_undo()).clicked() {
+                self.landscape.undo(false);
+            }
+            if crate::icons::menu_item_enabled(ui, "redo", "Redo", "Ctrl+Y", self.landscape.can_redo()).clicked() {
+                self.landscape.undo(true);
+            }
+            ui.separator();
+            if crate::icons::menu_item(ui, "arrange", "Arrange nodes", "").on_hover_text("Lay the graph out in columns, inputs on the left").clicked() {
+                self.landscape.arrange();
+            }
+            if crate::icons::menu_item(ui, "settings", "Preferences…", "").clicked() {
+                self.prefs_open = true;
+                ui.close();
+            }
+        });
+    }
+
     pub(crate) fn landscape_ui(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
+        // New, open and save act on the landscape here.
+        let (save_as, save, open, new) = ui.input(|i| (crate::keymap::pressed(i, crate::keymap::Action::SaveAs), crate::keymap::pressed(i, crate::keymap::Action::Save), crate::keymap::pressed(i, crate::keymap::Action::Open), crate::keymap::pressed(i, crate::keymap::Action::New)));
+        if save_as {
+            self.landscape.save_project(true);
+        } else if save {
+            self.landscape.save_project(false);
+        } else if open {
+            self.landscape.open();
+        } else if new {
+            self.landscape.new_document();
+        }
+        // Undo and redo of the graph, unless a text field has the keyboard.
+        if !ctx.egui_wants_keyboard_input() {
+            let (undo, redo) = ui.input(|i| (crate::keymap::pressed(i, crate::keymap::Action::Undo), crate::keymap::pressed(i, crate::keymap::Action::Redo)));
+            if redo {
+                self.landscape.undo(true);
+            } else if undo {
+                self.landscape.undo(false);
+            }
+        }
         let (device, queue) = (self.rs.device.clone(), self.rs.queue.clone());
         let ls = &mut self.landscape;
 
@@ -602,14 +799,6 @@ impl crate::App {
                 Err(mpsc::TryRecvError::Empty) => ctx.request_repaint_after(std::time::Duration::from_millis(100)),
                 Err(mpsc::TryRecvError::Disconnected) => finished = Some(Err("the erosion stopped unexpectedly".into())),
             },
-            Some(Job::Chunks(rx, _, log)) => {
-                ls.chunk_log = log.lock().unwrap().clone();
-                match rx.try_recv() {
-                    Ok(r) => finished = Some(r.map(Done::Message)),
-                    Err(mpsc::TryRecvError::Empty) => ctx.request_repaint_after(std::time::Duration::from_millis(200)),
-                    Err(mpsc::TryRecvError::Disconnected) => finished = Some(Err("the chunk export stopped unexpectedly".into())),
-                }
-            }
             Some(Job::Export(rx, _)) => match rx.try_recv() {
                 Ok(r) => finished = Some(r.map(Done::Message)),
                 Err(mpsc::TryRecvError::Empty) => ctx.request_repaint_after(std::time::Duration::from_millis(100)),
@@ -665,27 +854,25 @@ impl crate::App {
         }
 
         let (device, queue) = (self.rs.device.clone(), self.rs.queue.clone());
+        let format = self.rs.target_format;
         let ls = &mut self.landscape;
         egui::Panel::right("landscape props").default_size(320.0).show(ui, |ui| egui::ScrollArea::vertical().id_salt("landscape props scroll").auto_shrink([false, false]).show(ui, |ui| {
             ui.horizontal(|ui| {
                 if crate::icons::button(ui, "open", "Open", None, true).on_hover_text("Open a landscape project (graph, settings and masks) or a noise graph as the terrain").clicked() {
                     ls.open();
                 }
-                if crate::icons::button(ui, "save", "Save", None, true).on_hover_text("Save the project: the graph, the settings and the painted masks, in one file").clicked() {
-                    ls.save(true);
+                if crate::icons::button(ui, "save", "Save", None, true).on_hover_text("Save the project (Ctrl+S): the graph, the settings and the painted masks, in one file").clicked() {
+                    ls.save_project(false);
                 }
                 if crate::icons::button(ui, "graph", "Save graph", None, true).on_hover_text("Save the graph alone as a noise graph file").clicked() {
-                    ls.save(false);
+                    ls.save_graph();
                 }
-                if crate::icons::button(ui, "new", "New", None, true).on_hover_text("A new landscape: the starting graph and no masks").clicked() {
-                    ls.graph = default_graph();
-                    ls.path = None;
-                    ls.masks.clear();
-                    ls.mask_rev += 1;
+                if crate::icons::button(ui, "new", "New", None, true).on_hover_text("A new landscape (Ctrl+N): the starting graph and no masks").clicked() {
+                    ls.new_document();
                 }
             });
             ui.separator();
-            let running = matches!(ls.job, Some(Job::Export(..) | Job::Chunks(..) | Job::Erode(..)));
+            let running = matches!(ls.job, Some(Job::Export(..) | Job::Erode(..)));
             section(ui, "terrain", "height", "Terrain", TERRAIN, true, |ui| {
             let d = Settings::default();
             crate::row(ui, &mut ls.settings.seed, d.seed, |ui, v| _ = ui.add(egui::DragValue::new(v).prefix("seed ")));
@@ -715,9 +902,6 @@ impl crate::App {
                 ls.start_export(png, &device, &queue);
             }
             if let Some(Job::Export(_, p)) = &ls.job {
-                ui.add(egui::ProgressBar::new(p.load(Ordering::Relaxed) as f32 / 1000.0).show_percentage());
-            }
-            if let Some(Job::Chunks(_, p, _)) = &ls.job {
                 ui.add(egui::ProgressBar::new(p.load(Ordering::Relaxed) as f32 / 1000.0).show_percentage());
             }
             });
@@ -814,6 +998,44 @@ impl crate::App {
                 let d = crate::landscape_erosion::Erosion::default();
                 let max = crate::landscape_erosion::max_resolution(&device);
                 let up_to_date = ls.current_eroded().is_some();
+                // Presets: pick one from the library's Erosion Presets folder, save these settings as one, load a file
+                // from anywhere, or go back to the defaults. None of them changes the working resolution.
+                ui.horizontal(|ui| {
+                    let shown = match &ls.erosion_preset {
+                        Some((name, e)) if ls.settings.erosion.same_as(e) => name.clone(),
+                        Some((name, _)) => format!("{name} *"),
+                        None if ls.settings.erosion.same_as(&d) => "default".to_string(),
+                        None => "custom".to_string(),
+                    };
+                    let mut pick = None;
+                    egui::ComboBox::from_id_salt("erosion preset").selected_text(shown).width(130.0).show_ui(ui, |ui| {
+                        // Read when the list opens, not every frame: the library may be on a network drive.
+                        let presets = crate::landscape_erosion::library_presets();
+                        if presets.is_empty() {
+                            ui.weak(if crate::library::root().is_some() { "No presets in the library yet" } else { "No library folder set (Preferences)" });
+                        }
+                        for (name, path) in presets {
+                            if ui.selectable_label(false, name).clicked() {
+                                pick = Some(path);
+                            }
+                        }
+                    }).response.on_hover_text("Erosion presets in the library's Erosion Presets folder; * means changed since");
+                    if let Some(path) = pick {
+                        ls.load_erosion_preset(&path);
+                    }
+                    if crate::icons::button(ui, "save", "Save erosion preset", None, true).on_hover_text("Save these erosion settings as a preset (in the library's Erosion Presets folder unless you pick another)").clicked() {
+                        ls.save_erosion_preset();
+                    }
+                    if crate::icons::button(ui, "open", "Load erosion preset", None, true).on_hover_text("Load an erosion preset file from anywhere").clicked() {
+                        let dialog = crate::library::dialog(crate::library::Kind::Erosion, rfd::FileDialog::new().add_filter("Erosion preset", &["erosion"]));
+                        if let Some(path) = dialog.pick_file() {
+                            ls.load_erosion_preset(&path);
+                        }
+                    }
+                    if crate::icons::button(ui, "reset", "Reset erosion", None, !ls.settings.erosion.same_as(&d)).on_hover_text("Put every erosion setting back to its default (the working resolution stays)").clicked() {
+                        ls.reset_erosion();
+                    }
+                });
                 let e = &mut ls.settings.erosion;
                 crate::row(ui, &mut e.resolution, d.resolution, |ui, v| {
                     for r in crate::landscape_erosion::RESOLUTIONS.into_iter().filter(|r| *r <= max) {
@@ -858,59 +1080,6 @@ impl crate::App {
                     _ => "Not eroded. The working resolution is the grid the preview and the erosion use.",
                 });
             });
-            section(ui, "chunks", "chunks", "Nanite chunks", CHUNK_COLOR, true, |ui| {
-                let d = crate::landscape_chunks::Options::default();
-                let o = &mut ls.chunks;
-                ui.horizontal(|ui| {
-                    ui.label("name");
-                    ui.text_edit_singleline(&mut o.name);
-                });
-                ui.horizontal(|ui| {
-                    ui.add(egui::TextEdit::singleline(&mut o.folder).hint_text("folder").desired_width(190.0));
-                    if crate::icons::button(ui, "open", "Browse", None, true).on_hover_text("Choose the folder").clicked() && let Some(f) = rfd::FileDialog::new().pick_folder() {
-                        o.folder = f.display().to_string();
-                    }
-                });
-                crate::row(ui, &mut o.chunk_m, d.chunk_m, |ui, v| _ = ui.add(egui::DragValue::new(v).range(10.0..=20000.0).speed(5.0).prefix("chunk ").suffix(" m")));
-                crate::row(ui, &mut o.budget, d.budget, |ui, v| _ = ui.add(egui::DragValue::new(v).range(2000..=4_000_000).speed(1000.0).prefix("triangles ").suffix(" per chunk")));
-                crate::row(ui, &mut o.tex, d.tex, |ui, v| {
-                    for t in [1024usize, 2048, 4096] {
-                        ui.selectable_value(v, t, format!("{t} px"));
-                    }
-                });
-                crate::row(ui, &mut o.ao_m, d.ao_m, |ui, v| _ = ui.add(egui::DragValue::new(v).range(1.0..=500.0).prefix("AO reach ").suffix(" m")));
-                crate::row(ui, &mut o.glb, d.glb, |ui, v| {
-                    ui.selectable_value(v, true, "GLB");
-                    ui.selectable_value(v, false, "OBJ");
-                });
-                ui.checkbox(&mut o.green_up, "normal map green up (OpenGL)");
-                ui.checkbox(&mut o.pack_udim, "also pack into a UDIM tileset").on_hover_text("Runs UDIM pack into a UDIM folder: one combined mesh, one material, the maps as .1001, .1002 ...");
-                let plan = crate::landscape_chunks::plan(ls.settings.world_m, o.chunk_m, o.budget);
-                ui.weak(format!("{0} x {0} chunks of {1} m, {2} x {2} quads (about {3} triangles) each; tiles 1001 to {4}.", plan.chunks, plan.chunk_m, plan.quads, 2 * plan.quads * plan.quads, crate::udim::udim(plan.chunks * plan.chunks - 1)));
-                if action(ui, "chunks", "Export chunks", CHUNK_COLOR, !running && !o.folder.is_empty()).on_hover_text("Writes every chunk's mesh (centimetres, the chunk's corner at its origin), its normal, occlusion and curvature maps, and a manifest with each chunk's location.").clicked() {
-                    let (graph, s, opts) = (ls.graph.clone(), ls.settings.clone(), o.clone());
-                    let (masks, base) = (ls.mask_map(), ls.base_dir());
-                    let eroded = ls.current_eroded().cloned();
-                    let (tx, rx) = mpsc::channel();
-                    let (progress, log) = (Progress::default(), std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new())));
-                    let (p, l) = (progress.clone(), log.clone());
-                    let (device, queue) = (device.clone(), queue.clone());
-                    std::thread::spawn(move || {
-                        let r = build_evaluator(&device, &queue, &graph, &s, &masks, &base).and_then(|ev| {
-                            let grid = eroded.as_ref().map(|e| (e.as_slice(), side(e.len())));
-                            crate::landscape_chunks::export(&ev, grid, &s, &opts, &p, &mut |m| l.lock().unwrap().push(m.to_string()))
-                        });
-                        let _ = tx.send(r);
-                    });
-                    ls.job = Some(Job::Chunks(rx, progress, log));
-                    ls.status = "Exporting chunks…".into();
-                }
-                egui::ScrollArea::vertical().id_salt("chunk log").max_height(120.0).stick_to_bottom(true).show(ui, |ui| {
-                    for l in &ls.chunk_log {
-                        ui.weak(l);
-                    }
-                });
-            });
             if !ls.status.is_empty() {
                 ui.label(&ls.status);
             }
@@ -944,24 +1113,27 @@ impl crate::App {
                 new_view.2 = (new_view.2 * (1.0 + ui.input(|i| i.smooth_scroll_delta.y) * 0.002)).clamp(0.3, 6.0);
             }
             if let Some(values) = &ls.values {
-                let (w, h) = (((rect.width() * 0.6) as usize).clamp(64, 900), ((rect.height() * 0.6) as usize).clamp(48, 600));
                 let eroded_key = ls.eroded.as_ref().map(|(k, _)| *k).filter(|k| *k == ls.erosion_key());
                 let mut hasher = std::collections::hash_map::DefaultHasher::new();
-                (ls.sampled_key, eroded_key, settings.world_m.to_bits(), settings.height_m.to_bits(), settings.fit, new_view.0.to_bits(), new_view.1.to_bits(), new_view.2.to_bits(), w, h).hash(&mut hasher);
-                let picture_key = hasher.finish();
-                if ls.picture.as_ref().is_none_or(|(k, _)| *k != picture_key) {
-                    // The eroded terrain when it is up to date, otherwise the graph's; drawn from at most 513 x 513 samples.
-                    let metres = match (&ls.eroded, eroded_key) {
-                        (Some((_, e)), Some(_)) => e.clone(),
-                        _ => to_metres(values, &settings),
+                (ls.sampled_key, eroded_key, settings.world_m.to_bits(), settings.height_m.to_bits(), settings.fit, settings.water_m.map(f32::to_bits)).hash(&mut hasher);
+                let grid_key = hasher.finish();
+                // The eroded terrain when it is up to date, otherwise the graph's, at most VIEW_SAMPLES a side: worked out
+                // (and uploaded to the GPU) once per terrain, not on every camera move.
+                if ls.view_grid.as_ref().is_none_or(|g| g.key != grid_key) {
+                    let (grid, m) = match (&ls.eroded, eroded_key) {
+                        (Some((_, e)), Some(_)) => shrink(e, side(e.len()), VIEW_SAMPLES),
+                        _ => {
+                            let metres = to_metres(values, &settings);
+                            shrink(&metres, side(metres.len()), VIEW_SAMPLES)
+                        }
                     };
-                    let (grid, m) = shrink(&metres, side(metres.len()), 513);
-                    let image = render(&grid, m, settings.world_m, settings.water_m, new_view, (w, h));
-                    ls.picture = Some((picture_key, ctx.load_texture("landscape view", image, egui::TextureOptions::LINEAR)));
+                    ls.view_grid = Some(crate::landscape_gpu::Grid::new(grid_key, grid, m, settings.world_m, settings.water_m));
                 }
-                if let Some((_, tex)) = &ls.picture {
-                    ui.painter().image(tex.id(), rect, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), egui::Color32::WHITE);
-                }
+                let grid = ls.view_grid.as_ref().expect("just made");
+                // Drawn on the GPU at the panel's full resolution, straight into egui's pass for this rectangle.
+                let uniforms = crate::landscape_gpu::ViewUniforms::new(grid, settings.world_m, settings.water_m, new_view, rect.width() / rect.height().max(1.0), format.is_srgb(), crate::landscape_gpu::MIN_STEP_CELLS, true);
+                let callback = crate::landscape_gpu::ViewCallback { uniforms, key: grid.key, heights: grid.heights.clone(), n: grid.n, format };
+                ui.painter().add(eframe::egui_wgpu::Callback::new_paint_callback(rect, callback));
             } else {
                 ui.painter().rect_filled(rect, 0.0, egui::Color32::from_gray(30));
                 ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, if matches!(ls.job, Some(Job::Preview(_))) { "Sampling…" } else { "No terrain: the graph has no density output, or has an error" }, egui::FontId::proportional(14.0), egui::Color32::GRAY);
@@ -973,6 +1145,9 @@ impl crate::App {
         let tiling = ls.graph.tiling();
         ls.editor.show(ui, &mut ls.graph, &tiling);
         ls.graph.prune_edges();
+        // One undo step per settled edit (a whole drag is one step).
+        let settled = !ui.input(|i| i.pointer.any_down());
+        ls.history.commit(&ls.graph, settled);
     }
 }
 
@@ -1008,6 +1183,77 @@ pub fn export_headless(project: &Path, out: &Path, erode: bool, log: &mut dyn Fn
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_3d_view_s_big_steps_miss_nothing_the_small_ones_hit() {
+        // Rolling hills with sharp spikes and a lake: thin peaks are what a too-big step would skip.
+        let n = 129;
+        let metres: Vec<f32> = (0..n * n)
+            .map(|k| {
+                let (x, y) = ((k % n) as f32 / (n - 1) as f32, (k / n) as f32 / (n - 1) as f32);
+                let hills = 60.0 * (x * 9.0).sin() * (y * 7.0).cos() + 80.0;
+                let spike = if (k % n) % 17 == 5 && (k / n) % 13 == 3 { 150.0 } else { 0.0 };
+                hills + spike
+            })
+            .collect();
+        for view in [(0.8, 0.6, 1.0), (2.4, 0.15, 2.5), (-1.0, 1.3, 0.4)] {
+            for water in [None, Some(70.0)] {
+                // Truth: a march in twentieths of a cell. Steps of 0.9 cell (the old fixed march) graze past some of the
+                // thin spikes; the slope-safe steps must not miss more than that.
+                let truth = render_steps(&metres, n, 1000.0, water, view, (160, 100), 0.05, false);
+                let fixed = render_steps(&metres, n, 1000.0, water, view, (160, 100), 0.9, false);
+                let fast = render_steps(&metres, n, 1000.0, water, view, (160, 100), 0.9, true);
+                // A hit a fraction of a step off shades a touch differently; a missed peak shows sky or far ground.
+                let far = |a: &egui::Color32, b: &egui::Color32| (0..3).any(|c| (a.to_array()[c] as i32 - b.to_array()[c] as i32).abs() > 40);
+                let wrong = |image: &egui::ColorImage| image.pixels.iter().zip(&truth.pixels).filter(|(a, b)| far(a, b)).count();
+                let (fixed_wrong, fast_wrong) = (wrong(&fixed), wrong(&fast));
+                assert!(fast_wrong <= fixed_wrong + fast.pixels.len() / 400, "view {view:?}, water {water:?}: {fast_wrong} pixels wrong, the fixed march {fixed_wrong}");
+                assert!(fast.pixels.iter().any(|p| p.b() < 200 && p.g() > p.b()), "some ground is drawn");
+            }
+        }
+    }
+
+    #[test]
+    fn the_gpu_view_draws_what_the_cpu_renderer_draws() {
+        let Some(gpu) = crate::gpu_tests::gpu() else { return eprintln!("no GPU adapter; skipping") };
+        let n = 129;
+        let metres: Vec<f32> = (0..n * n)
+            .map(|k| {
+                let (x, y) = ((k % n) as f32 / (n - 1) as f32, (k / n) as f32 / (n - 1) as f32);
+                60.0 * (x * 9.0).sin() * (y * 7.0).cos() + 80.0 + 25.0 * (x * 23.0).cos() * (y * 19.0).sin()
+            })
+            .collect();
+        let (w, h) = (160usize, 100usize);
+        for view in [(0.8, 0.6, 1.0), (2.4, 0.15, 2.5), (-1.0, 1.3, 0.4)] {
+            for water in [None, Some(70.0)] {
+                let grid = crate::landscape_gpu::Grid::new(1, metres.clone(), n, 1000.0, water);
+                let uniforms = crate::landscape_gpu::ViewUniforms::new(&grid, 1000.0, water, view, w as f32 / h as f32, false, crate::landscape_gpu::MIN_STEP_CELLS, true);
+                let gpu_pixels = crate::landscape_gpu::render_image(&gpu.device, &gpu.queue, &grid, &uniforms, (w as u32, h as u32));
+                let cpu = render_steps(&metres, n, 1000.0, water, view, (w, h), crate::landscape_gpu::MIN_STEP_CELLS, true);
+                // Rounding (the CPU truncates to bytes) and single-precision differences shift a few silhouette pixels;
+                // anything else would differ a lot.
+                let far = gpu_pixels.iter().zip(&cpu.pixels).filter(|(g, c)| (0..3).any(|k| (g[k] as i32 - c.to_array()[k] as i32).abs() > 40)).count();
+                assert!(far <= w * h / 100, "view {view:?}, water {water:?}: {far} of {} pixels differ", w * h);
+                assert!(gpu_pixels.iter().any(|p| p[1] > p[2] && p[2] < 200), "some ground is drawn");
+            }
+        }
+    }
+
+    #[test]
+    fn graph_edits_undo_and_redo_and_a_new_document_starts_fresh() {
+        let mut ls = LandscapeWorkspace::default();
+        let before = ls.graph.clone();
+        ls.graph.add(crate::graph::NodeKind::Separate, [0.0; 2]);
+        ls.history.commit(&ls.graph, true);
+        let after = ls.graph.clone();
+        assert!(ls.can_undo());
+        ls.undo(false);
+        assert!(ls.graph == before, "undo puts the graph back");
+        ls.undo(true);
+        assert!(ls.graph == after, "redo brings the edit back");
+        ls.new_document();
+        assert!(!ls.can_undo() && !ls.can_redo(), "a new landscape has no history");
+    }
 
     #[test]
     fn heights_encode_to_the_full_16_bits_and_decode_within_a_step() {

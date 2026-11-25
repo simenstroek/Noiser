@@ -709,6 +709,32 @@ impl FieldView {
         (self.0.lo, self.0.hi)
     }
 
+    /// For a terrain, the box its surface can be in (the square and its heights, widened by how far the surface can
+    /// leave the ground, how high scattered shapes stand, and the other objects' boxes): the field view traces only
+    /// inside it. None for other fields, which trace the whole way.
+    pub fn trace_box(&self) -> Option<([f32; 3], [f32; 3])> {
+        let f = &self.0;
+        let land = f.land.as_ref()?;
+        let pad = f.reach;
+        // Across, exactly the terrain's square (half a sample larger, as the field's own cut is): past it the field is
+        // many times the true distance, and a ray let in there would overshoot into the ground.
+        let (side, half) = (land.heights.world(), 0.5 * land.heights.cell);
+        let mut lo = [-half, -half, f.lo[2] - pad - f.lift.1];
+        let mut hi = [side + half, side + half, f.hi[2] + pad + f.lift.0];
+        for (olo, ohi) in &f.objects {
+            for a in 0..3 {
+                lo[a] = lo[a].min(olo[a] - pad);
+                hi[a] = hi[a].max(ohi[a] + pad);
+            }
+        }
+        // A sliver more up and down, so a surface lying on the top or bottom is not cut by rounding. Not across: just past
+        // the square the field is 1024 times the distance, and a ray let in there would take one huge step into the ground.
+        let margin = 1e-3 * (0..3).map(|a| hi[a] - lo[a]).fold(0.0, f32::max);
+        lo[2] -= margin;
+        hi[2] += margin;
+        Some((lo, hi))
+    }
+
     pub fn march(&self, cam: &crate::meshexport::MarchCamera, w: u32, h: u32) -> Vec<[f32; 4]> {
         let d = Displace { amount: 0.0, tile_size: 1.0, prim_size: 1.0, mask: crate::meshmask::PackedMask::NONE };
         self.0.ev.march(d, cam, w, h)

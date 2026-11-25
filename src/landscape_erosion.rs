@@ -44,6 +44,78 @@ impl Default for Erosion {
     }
 }
 
+/// Erosion presets: `.erosion` files (JSON) in the library's Erosion Presets folder, or anywhere. A preset holds how the
+/// erosion behaves, not the working resolution, which is about the machine and how fine and slow a run is: loading one
+/// keeps the resolution in use.
+impl Erosion {
+    pub fn to_preset(&self) -> String {
+        let mut settings = serde_json::to_value(self).unwrap_or_default();
+        if let Some(map) = settings.as_object_mut() {
+            map.remove("resolution");
+        }
+        serde_json::to_string_pretty(&serde_json::json!({ "noiser_erosion": 1, "settings": settings })).unwrap_or_default()
+    }
+
+    /// These settings with a preset's applied (settings it leaves out take their defaults), keeping the resolution.
+    pub fn with_preset(&self, text: &str) -> Result<Erosion, String> {
+        let v: serde_json::Value = serde_json::from_str(text).map_err(|e| e.to_string())?;
+        let settings = v.get("settings").filter(|_| v.get("noiser_erosion").is_some()).ok_or("not an erosion preset")?;
+        let preset: Erosion = serde_json::from_value(settings.clone()).map_err(|e| e.to_string())?;
+        Ok(Erosion { resolution: self.resolution, ..preset })
+    }
+
+    /// These settings back at their defaults, keeping the resolution.
+    pub fn reset(&self) -> Erosion {
+        Erosion { resolution: self.resolution, ..Erosion::default() }
+    }
+
+    /// The same erosion as `other`, whatever the resolution.
+    pub fn same_as(&self, other: &Erosion) -> bool {
+        *self == Erosion { resolution: self.resolution, ..other.clone() }
+    }
+}
+
+#[cfg(test)]
+mod preset_tests {
+    use super::*;
+
+    #[test]
+    fn a_preset_round_trips_and_leaves_the_resolution_alone() {
+        let mine = Erosion { resolution: 2048, iterations: 3000, rain: 0.1, talus_deg: 30.0, ..Default::default() };
+        let text = mine.to_preset();
+        assert!(!text.contains("resolution"), "a preset does not carry the working resolution");
+        let other = Erosion { resolution: 512, ..Default::default() };
+        let loaded = other.with_preset(&text).unwrap();
+        assert_eq!(loaded.resolution, 512, "loading keeps the resolution in use");
+        assert!(loaded.same_as(&mine), "and takes everything else from the preset");
+        assert!(other.with_preset("{\"graph\": 1}").is_err(), "a file that is not a preset is refused");
+    }
+
+    #[test]
+    fn a_preset_missing_settings_gets_the_defaults_and_reset_keeps_the_resolution() {
+        let base = Erosion { resolution: 4096, iterations: 7, ..Default::default() };
+        let loaded = base.with_preset("{\"noiser_erosion\": 1, \"settings\": {\"rain\": 0.2}}").unwrap();
+        assert_eq!((loaded.rain, loaded.iterations, loaded.resolution), (0.2, Erosion::default().iterations, 4096));
+        let reset = base.reset();
+        assert!(reset.same_as(&Erosion::default()) && reset.resolution == 4096);
+    }
+}
+
+/// The presets in the library's folder, by name, sorted.
+pub fn library_presets() -> Vec<(String, std::path::PathBuf)> {
+    let Some(dir) = crate::library::dir(crate::library::Kind::Erosion) else { return Vec::new() };
+    let mut out: Vec<(String, std::path::PathBuf)> = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("erosion")))
+        .map(|p| (p.file_stem().map_or_else(String::new, |s| s.to_string_lossy().into_owned()), p))
+        .collect();
+    out.sort_by_key(|(name, _)| name.to_lowercase());
+    out
+}
+
 /// Resolutions the settings offer.
 pub const RESOLUTIONS: [usize; 4] = [512, 1024, 2048, 4096];
 

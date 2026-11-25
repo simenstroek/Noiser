@@ -2854,43 +2854,6 @@ fn the_landscape_samples_a_graph_over_the_terrain() {
     }
 }
 
-#[test]
-fn the_landscape_exports_chunks_with_maps_a_manifest_and_a_udim_pack() {
-    let Some(gpu) = gpu() else { return eprintln!("no GPU adapter; skipping") };
-    let dir = std::env::temp_dir().join("noiser_chunks_test");
-    let _ = std::fs::remove_dir_all(&dir);
-    let ev = crate::export::Evaluator::new(&gpu.device, &gpu.queue, &crate::landscape::default_graph(), 0).unwrap();
-    let s = crate::landscape::Settings { world_m: 400.0, ..Default::default() };
-    let o = crate::landscape_chunks::Options { name: "Terrain".into(), folder: dir.display().to_string(), chunk_m: 200.0, budget: 2000, tex: 64, ao_m: 8.0, glb: false, ..Default::default() };
-    let mut log = Vec::new();
-    crate::landscape_chunks::export(&ev, None, &s, &o, &Default::default(), &mut |m| log.push(m.to_string())).unwrap();
-    for stem in ["Terrain_00_00", "Terrain_00_01", "Terrain_01_00", "Terrain_01_01"] {
-        assert!(dir.join(format!("{stem}.obj")).exists(), "{stem} mesh");
-        for map in ["normal_base", "ambient_occlusion", "curvature"] {
-            assert!(dir.join(format!("{stem}_{map}.png")).exists(), "{stem} {map}");
-        }
-    }
-    let manifest: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(dir.join("Terrain_chunks.json")).unwrap()).unwrap();
-    assert_eq!((manifest["chunks"].as_array().unwrap().len(), manifest["chunks"][3]["udim"].clone()), (4, serde_json::json!(1004)));
-    // The UDIM pack: one combined mesh and the maps under tile numbers.
-    let udim = dir.join("UDIM");
-    assert!(udim.join("Terrain.obj").exists(), "{log:?}");
-    assert!(udim.join("Terrain_normal_base.1001.png").exists() && udim.join("Terrain_curvature.1004.png").exists(), "{log:?}");
-}
-
-#[test]
-#[ignore = "timing at full size: 4 x 4 chunks of 1M triangles with 2048 px maps (writes about 1 GB to the temp folder)"]
-fn landscape_chunks_at_full_size() {
-    let Some(gpu) = gpu() else { return eprintln!("no GPU adapter; skipping") };
-    let dir = std::env::temp_dir().join("noiser_chunks_full");
-    let _ = std::fs::remove_dir_all(&dir);
-    let ev = crate::export::Evaluator::new(&gpu.device, &gpu.queue, &crate::landscape::default_graph(), 0).unwrap();
-    let o = crate::landscape_chunks::Options { folder: dir.display().to_string(), ..Default::default() };
-    let t0 = std::time::Instant::now();
-    crate::landscape_chunks::export(&ev, None, &crate::landscape::Settings::default(), &o, &Default::default(), &mut |m| eprintln!("{:>6.1} s  {m}", t0.elapsed().as_secs_f32())).unwrap();
-    eprintln!("total {:.1} s, folder {}", t0.elapsed().as_secs_f32(), dir.display());
-}
-
 /// A smooth hilly grid in metres for the erosion tests: a slope with bumps.
 fn hilly(n: usize) -> Vec<f32> {
     (0..n * n).map(|k| {

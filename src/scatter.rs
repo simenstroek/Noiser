@@ -131,6 +131,9 @@ fn scatter{id}_smin(a: f32, b: f32, k: f32) -> f32 {{
 }}
 // The distance from `p` to the copy planted at `ctr` (1e6 when the ground there is not allowed).
 fn scatter{id}_one(p: vec3f, ctr: vec2f, size: f32, spin: f32, zr: vec2f, middle: vec2f) -> f32 {{
+    // Only where the whole footprint is on the terrain: past its square the ground is the edge's height carried on
+    // forever, which would plant copies all around it.
+    if (!land_inside_{land}(ctr, 0.4 * size)) {{ return 1.0e6; }}
     let g = land_ground_{land}(ctr);
     let slope = length(g.yz);
     let e = (g.x - zr.x) / max(zr.y - zr.x, 1.0e-6);

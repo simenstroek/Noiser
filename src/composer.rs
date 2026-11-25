@@ -162,7 +162,30 @@ fn compose(outer: &Xf, inner: &Xf) -> Xf {
 }
 
 fn group_frame(node: &Node) -> Xf {
-    Xf { t: node.position, r: euler_matrix(node.rotation), s: if node.scale[0] == 0.0 { 1.0 } else { node.scale[0] } }
+    Xf { t: node.position, r: crate::sdf_model::node_frame(node.rotation, node.scale), s: if node.scale[0] == 0.0 { 1.0 } else { node.scale[0].abs() } }
+}
+
+fn signs(v: V3) -> V3 {
+    v.map(|s| if s < 0.0 { -1.0 } else { 1.0 })
+}
+
+/// True when the scale's signs mirror the node (an odd number of negative axes).
+fn is_mirrored(scale: V3) -> bool {
+    scale.iter().filter(|s| **s < 0.0).count() % 2 == 1
+}
+
+/// Flips a node along `axis` of its parent's frame, about its own position, without a negative scale on that axis:
+/// a mirror `M_axis` is `M_axis · R · M_z` (a rotation) followed by a mirror along the node's own Z. So the rotation
+/// becomes `M_axis · R · M_z` and the Z scale changes sign; flipping Z leaves the rotation alone. This is what
+/// SDF Modeler's Flip buttons appear to do (X from no rotation shows (180, 0, 180), Z shows no change).
+fn flip_node(node: &mut Node, axis: usize) {
+    let mut m = euler_matrix(node.rotation);
+    m[axis] = m[axis].map(|v| -v);
+    for row in m.iter_mut() {
+        row[2] = -row[2];
+    }
+    node.rotation = euler_from_matrix(&m).map(|a| if a.abs() < 1e-12 { 0.0 } else { a });
+    node.scale[2] = -node.scale[2];
 }
 
 fn column(m: &M3, i: usize) -> V3 {
@@ -460,7 +483,7 @@ impl Composer {
         let Some(g) = self.gizmo_geometry(rect) else { return };
         let Some(path) = self.selection.clone() else { return };
         let Some(node) = node_at(self.shapes(), &path) else { return };
-        let size = if node.kind == "group" { 1.0 } else { node.scale[0].max(node.scale[1]).max(node.scale[2]) };
+        let size = if node.kind == "group" { 1.0 } else { node.scale[0].abs().max(node.scale[1].abs()).max(node.scale[2].abs()) };
         let reach = (size * 0.75 * g.parent.s).max(0.05);
         self.camera = self.camera.framing([g.origin[0] - reach, g.origin[1] - reach, g.origin[2] - reach], [g.origin[0] + reach, g.origin[1] + reach, g.origin[2] + reach]);
     }
@@ -565,7 +588,8 @@ impl Composer {
         self.export_samples = samples.clamp(48, 640);
     }
 
-    pub fn menus(&mut self, ui: &mut egui::Ui) {
+    /// The File and Edit menus while the composer is shown; Edit > Preferences sets `open_prefs`.
+    pub fn menus(&mut self, ui: &mut egui::Ui, open_prefs: &mut bool) {
         ui.menu_button("File", |ui| {
             if crate::icons::menu_item(ui, "new", "New", "Ctrl+N").clicked() {
                 self.request(Pending::New);
@@ -596,6 +620,11 @@ impl Composer {
             }
             if crate::icons::menu_item_enabled(ui, "redo", "Redo", "Ctrl+Y", !self.redo.is_empty()).clicked() {
                 self.redo();
+                ui.close();
+            }
+            ui.separator();
+            if crate::icons::menu_item(ui, "settings", "Preferences…", "").clicked() {
+                *open_prefs = true;
                 ui.close();
             }
         });
@@ -978,29 +1007,98 @@ impl Composer {
 
 // ---- widgets --------------------------------------------------------------------------------------------------------
 
-fn number(ui: &mut egui::Ui, label: &str, value: &mut f64, speed: f64, range: Option<std::ops::RangeInclusive<f64>>) -> bool {
-    let mut changed = false;
+/// Width of the label column, so every field starts at the same x whatever its label says.
+const LABEL_WIDTH: f32 = 92.0;
+/// Width of the slot at the end of each row (a reset button, or empty), so every field ends at the same x too.
+const ROW_BUTTON: f32 = 24.0;
+/// Line heights for labelled_block: a row of icon buttons, and a row of fields or checkboxes.
+const ICON_LINE: f32 = 24.0;
+/// (0 stands for the style's field height, which the user's style settings can change.)
+const FIELD_LINE: f32 = 0.0;
+
+/// A label in the fixed-width label column (cut short with an ellipsis if it does not fit).
+fn row_label(ui: &mut egui::Ui, text: &str) -> egui::Response {
+    row_label_sized(ui, text, ui.spacing().interact_size.y)
+}
+
+/// `row_label` centred on a line `height` tall (icon buttons are taller than fields).
+fn row_label_sized(ui: &mut egui::Ui, text: &str, height: f32) -> egui::Response {
+    ui.allocate_ui_with_layout(egui::vec2(LABEL_WIDTH, height), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+        ui.set_min_width(LABEL_WIDTH);
+        ui.add(egui::Label::new(text).truncate())
+    })
+    .inner
+}
+
+/// One inspector row: the label column, the field area (`add` gets the label's id and the area's width), and the end
+/// slot, which holds a reset button when `reset` is `Some((enabled, tooltip))`. Returns `add`'s result and whether the
+/// reset button was clicked.
+fn field_row<R>(ui: &mut egui::Ui, label: &str, reset: Option<(bool, &str)>, add: impl FnOnce(&mut egui::Ui, egui::Id, f32) -> R) -> (R, bool) {
     ui.horizontal(|ui| {
-        let name = ui.label(label);
-        let mut widget = egui::DragValue::new(value).speed(speed);
-        if let Some(range) = range {
-            widget = widget.range(range);
-        }
-        let response = ui.add(widget).labelled_by(name.id);
-        changed = response.changed();
-    });
-    changed
+        let name = row_label(ui, label);
+        let spacing = ui.spacing().item_spacing.x;
+        // Two gaps follow: label to field area, and field area to the end slot.
+        let width = (ui.available_width() - ROW_BUTTON - 2.0 * spacing).max(48.0);
+        let height = ui.spacing().interact_size.y;
+        let result = ui
+            .allocate_ui_with_layout(egui::vec2(width, height), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                ui.set_width(width);
+                add(ui, name.id, width)
+            })
+            .inner;
+        let clicked = match reset {
+            Some((enabled, tip)) => {
+                // As tall as the fields, so a row with a reset button is no taller than one without.
+                egui_extras::install_image_loaders(ui.ctx());
+                let tint = if enabled { ui.visuals().widgets.inactive.fg_stroke.color } else { ui.visuals().weak_text_color() };
+                let button = egui::Button::image(crate::icons::image("reset", 14.0, tint)).min_size(egui::vec2(ROW_BUTTON, height));
+                let response = ui.add_enabled(enabled, button);
+                response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, enabled, tip));
+                response.on_hover_text(tip).clicked()
+            }
+            None => {
+                ui.add_space(ROW_BUTTON);
+                false
+            }
+        };
+        (result, clicked)
+    })
+    .inner
+}
+
+fn drag_value<'a>(value: &'a mut f64, speed: f64, range: Option<std::ops::RangeInclusive<f64>>) -> egui::DragValue<'a> {
+    let widget = egui::DragValue::new(value).speed(speed);
+    match range {
+        Some(range) => widget.range(range),
+        None => widget,
+    }
+}
+
+fn number(ui: &mut egui::Ui, label: &str, value: &mut f64, speed: f64, range: Option<std::ops::RangeInclusive<f64>>) -> bool {
+    number_reset(ui, label, value, speed, range, None).0
+}
+
+/// `number` with a reset button: returns (edited, reset clicked).
+fn number_reset(ui: &mut egui::Ui, label: &str, value: &mut f64, speed: f64, range: Option<std::ops::RangeInclusive<f64>>, reset: Option<(bool, &str)>) -> (bool, bool) {
+    let height = ui.spacing().interact_size.y;
+    field_row(ui, label, reset, |ui, name, width| ui.add_sized([width, height], drag_value(value, speed, range)).labelled_by(name).changed())
 }
 
 fn vec3(ui: &mut egui::Ui, label: &str, value: &mut [f64; 3], speed: f64) -> bool {
-    let mut changed = false;
-    ui.horizontal(|ui| {
-        let name = ui.label(label);
+    vec3_reset(ui, label, value, speed, None).0
+}
+
+/// Three equal fields; with a reset button when `reset` is given. Returns (edited, reset clicked).
+fn vec3_reset(ui: &mut egui::Ui, label: &str, value: &mut [f64; 3], speed: f64, reset: Option<(bool, &str)>) -> (bool, bool) {
+    let height = ui.spacing().interact_size.y;
+    field_row(ui, label, reset, |ui, name, width| {
+        let each = (width - 2.0 * ui.spacing().item_spacing.x) / 3.0;
+        let mut changed = false;
         for component in value.iter_mut() {
-            changed |= ui.add(egui::DragValue::new(component).speed(speed)).labelled_by(name.id).changed();
+            changed |= ui.add_sized([each, height], egui::DragValue::new(component).speed(speed)).labelled_by(name).changed();
         }
-    });
-    changed
+        changed
+    })
 }
 
 fn param_number(ui: &mut egui::Ui, node: &mut Node, key: &str, label: &str, default: f64, speed: f64, range: Option<std::ops::RangeInclusive<f64>>) -> bool {
@@ -1025,19 +1123,102 @@ fn param_choice(ui: &mut egui::Ui, node: &mut Node, key: &str, label: &str, opti
     let current = node.text(key).unwrap_or(options[0].0).to_string();
     let shown = options.iter().find(|(id, _)| *id == current).map_or(current.as_str(), |(_, name)| name);
     let mut chosen = current.clone();
-    ui.horizontal(|ui| {
-        let name = ui.label(label);
-        egui::ComboBox::from_id_salt(("composer choice", key)).selected_text(shown).show_ui(ui, |ui| {
+    field_row(ui, label, None, |ui, name, width| {
+        egui::ComboBox::from_id_salt(("composer choice", key)).selected_text(shown).width(width).show_ui(ui, |ui| {
             for (id, option) in options {
                 ui.selectable_value(&mut chosen, id.to_string(), *option);
             }
-        }).response.labelled_by(name.id);
+        }).response.labelled_by(name);
     });
     if chosen != current {
         node.set(key, Value::from(chosen));
         return true;
     }
     false
+}
+
+/// A label in the label column with a block of widgets (that may wrap) beside it, top-aligned.
+fn labelled_block<R>(ui: &mut egui::Ui, label: &str, line_height: f32, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    ui.horizontal_top(|ui| {
+        // Centred on the block's first line: ICON_LINE for a row of icon buttons, a field's height otherwise.
+        let height = if line_height > 0.0 { line_height } else { ui.spacing().interact_size.y };
+        row_label_sized(ui, label, height);
+        ui.vertical(add).inner
+    })
+    .inner
+}
+
+/// A single-line text field in an inspector row.
+fn text_row(ui: &mut egui::Ui, label: &str, text: &mut String) -> bool {
+    let height = ui.spacing().interact_size.y;
+    field_row(ui, label, None, |ui, name, width| ui.add_sized([width, height], egui::TextEdit::singleline(text)).labelled_by(name).changed()).0
+}
+
+/// The Flip row: X, Y and Z buttons with the flip icon; returns the axis clicked.
+fn flip_row(ui: &mut egui::Ui, mirrored: bool) -> Option<usize> {
+    let mut clicked = None;
+    labelled_block(ui, "Flip", FIELD_LINE, |ui| {
+        ui.horizontal(|ui| {
+            egui_extras::install_image_loaders(ui.ctx());
+            let tint = ui.visuals().widgets.inactive.fg_stroke.color;
+            for (axis, name) in ["X", "Y", "Z"].iter().enumerate() {
+                let button = egui::Button::image_and_text(crate::icons::image("flip", 14.0, tint), *name).min_size(egui::vec2(40.0, ui.spacing().interact_size.y));
+                let tip = format!("Flip along {name}: mirrors the shape about its position, along the parent's {name} axis");
+                let response = ui.add(button);
+                response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, format!("Flip {name}")));
+                if response.on_hover_text(tip).clicked() {
+                    clicked = Some(axis);
+                }
+            }
+            if mirrored {
+                ui.weak("mirrored").on_hover_text("This node is a mirror image: its Z scale is stored as negative. Flip again to undo it.");
+            }
+        });
+    });
+    clicked
+}
+
+/// Position, rotation (shown in degrees) and scale rows, each with a reset button. The scale shows its magnitude: its
+/// signs are a flip (see `flip_node`), which editing and resetting the scale keep. `uniform` shows one scale field.
+fn transform_rows(ui: &mut egui::Ui, position: &mut V3, rotation: &mut V3, scale: &mut V3, uniform: bool) -> bool {
+    let mut edited = false;
+    let (changed, reset) = vec3_reset(ui, "Position", position, 0.01, Some((*position != [0.0; 3], "Reset position to 0, 0, 0")));
+    edited |= changed;
+    if reset {
+        *position = [0.0; 3];
+        edited = true;
+    }
+    let mut degrees = rotation.map(f64::to_degrees);
+    let (changed, reset) = vec3_reset(ui, "Rotation", &mut degrees, 0.5, Some((*rotation != [0.0; 3], "Reset rotation to 0, 0, 0")));
+    if changed {
+        *rotation = degrees.map(f64::to_radians);
+        edited = true;
+    }
+    if reset {
+        *rotation = [0.0; 3];
+        edited = true;
+    }
+    let flips = signs(*scale);
+    let mut size = scale.map(f64::abs);
+    let unit = size == [1.0; 3];
+    let tip = if is_mirrored(*scale) { "Reset scale to 1, 1, 1 (the flip stays)" } else { "Reset scale to 1, 1, 1" };
+    let (changed, reset) = if uniform {
+        let mut single = size[0];
+        let result = number_reset(ui, "Scale", &mut single, 0.01, Some(0.001..=1000.0), Some((!unit, tip)));
+        size = [single; 3];
+        result
+    } else {
+        vec3_reset(ui, "Scale", &mut size, 0.01, Some((!unit, tip)))
+    };
+    if changed {
+        *scale = [0, 1, 2].map(|k| size[k].abs().max(0.001) * flips[k]);
+        edited = true;
+    }
+    if reset {
+        *scale = flips;
+        edited = true;
+    }
+    edited
 }
 
 /// A row of icon toggles for a choice; returns the new id when one is picked.
@@ -1062,21 +1243,8 @@ impl Composer {
             if let Some(layer) = self.file.layers.get_mut(self.layer) {
                 ui.heading("Layer");
                 ui.weak("Where this layer sits in the scene. Select a shape in the hierarchy or click one in the view to edit it.");
-                ui.horizontal(|ui| {
-                    let name = ui.label("Name");
-                    edited |= ui.text_edit_singleline(&mut layer.name).labelled_by(name.id).changed();
-                });
-                edited |= vec3(ui, "Position", &mut layer.position, 0.01);
-                let mut degrees = layer.rotation.map(f64::to_degrees);
-                if vec3(ui, "Rotation", &mut degrees, 0.5) {
-                    layer.rotation = degrees.map(f64::to_radians);
-                    edited = true;
-                }
-                let mut uniform = layer.scale[0];
-                if number(ui, "Scale", &mut uniform, 0.01, Some(0.001..=1000.0)) {
-                    layer.scale = [uniform; 3];
-                    edited = true;
-                }
+                edited |= text_row(ui, "Name", &mut layer.name);
+                edited |= transform_rows(ui, &mut layer.position, &mut layer.rotation, &mut layer.scale, true);
             }
             if edited {
                 self.touch();
@@ -1095,46 +1263,30 @@ impl Composer {
             ui.weak(format!("A {} is kept in the file but not shown or edited yet.", node.kind));
             return;
         }
-        ui.horizontal(|ui| {
-            let name = ui.label("Name");
-            edited |= ui.text_edit_singleline(&mut node.name).labelled_by(name.id).changed();
-        });
+        edited |= text_row(ui, "Name", &mut node.name);
         if is_shape {
-            ui.label("Form");
-            if let Some(brush) = icon_choice(ui, node.text("brush").unwrap_or("sphere"), &BRUSHES, crate::icons::brush_icon, None) {
+            if let Some(brush) = labelled_block(ui, "Form", ICON_LINE, |ui| icon_choice(ui, node.text("brush").unwrap_or("sphere"), &BRUSHES, crate::icons::brush_icon, None)) {
                 node.set("brush", Value::from(brush));
                 edited = true;
             }
         }
         ui.separator();
-        edited |= vec3(ui, "Position", &mut node.position, 0.01);
-        let mut degrees = node.rotation.map(f64::to_degrees);
-        if vec3(ui, "Rotation", &mut degrees, 0.5) {
-            node.rotation = degrees.map(f64::to_radians);
+        edited |= transform_rows(ui, &mut node.position, &mut node.rotation, &mut node.scale, !is_shape);
+        if let Some(axis) = flip_row(ui, is_mirrored(node.scale)) {
+            flip_node(node, axis);
             edited = true;
         }
         if is_shape {
-            edited |= vec3(ui, "Scale", &mut node.scale, 0.01);
-        } else {
-            let mut uniform = node.scale[0];
-            if number(ui, "Scale", &mut uniform, 0.01, Some(0.001..=1000.0)) {
-                node.scale = [uniform; 3];
-                edited = true;
-            }
-        }
-        if is_shape {
             let mut color = node.color.map(|c| c as f32);
-            ui.horizontal(|ui| {
-                let name = ui.label("Color");
-                if ui.color_edit_button_rgb(&mut color).labelled_by(name.id).changed() {
+            field_row(ui, "Color", None, |ui, name, _| {
+                if ui.color_edit_button_rgb(&mut color).labelled_by(name).changed() {
                     node.color = color.map(f64::from);
                     edited = true;
                 }
             });
         }
         ui.separator();
-        ui.label("Operation");
-        if let Some(mode) = icon_choice(ui, node.text("mode").unwrap_or("add"), &MODES, crate::icons::mode_icon, Some(crate::icons::mode_color)) {
+        if let Some(mode) = labelled_block(ui, "Operation", ICON_LINE, |ui| icon_choice(ui, node.text("mode").unwrap_or("add"), &MODES, crate::icons::mode_icon, Some(crate::icons::mode_color))) {
             node.set("mode", Value::from(mode));
             edited = true;
         }
@@ -1143,7 +1295,7 @@ impl Composer {
         if matches!(mode.as_str(), "push" | "avoid" | "emboss" | "deboss" | "shell") {
             edited |= param_number(ui, node, "blend_strength", "Radius", 0.0, 0.002, Some(0.0..=10.0));
         }
-        edited |= param_flag(ui, node, "chamfer", "Chamfer blend");
+        edited |= labelled_block(ui, "Blend edge", FIELD_LINE, |ui| param_flag(ui, node, "chamfer", "Chamfer"));
         if is_shape {
             let brush = node.text("brush").unwrap_or("sphere").to_string();
             ui.separator();
@@ -1180,11 +1332,12 @@ impl Composer {
                 }
             }
             ui.separator();
-            ui.label("Symmetry");
-            ui.horizontal(|ui| {
-                for (key, label) in [("mirror_x", "X"), ("mirror_y", "Y"), ("mirror_z", "Z")] {
-                    edited |= param_flag(ui, node, key, label);
-                }
+            labelled_block(ui, "Symmetry", FIELD_LINE, |ui| {
+                ui.horizontal(|ui| {
+                    for (key, label) in [("mirror_x", "X"), ("mirror_y", "Y"), ("mirror_z", "Z")] {
+                        edited |= param_flag(ui, node, key, label);
+                    }
+                });
             });
             if node.flag("mirror_x").unwrap_or(false) || node.flag("mirror_y").unwrap_or(false) || node.flag("mirror_z").unwrap_or(false) {
                 edited |= param_number(ui, node, "mirror_blend", "Mirror blend", 0.0, 0.005, Some(0.0..=10.0));
@@ -1780,12 +1933,15 @@ impl Composer {
             // Dragging right grows, left shrinks; 100 pixels is a factor of e.
             let factor = ((pointer.x - drag.start_pointer.x) as f64 / 100.0).exp();
             for axis in 0..3 {
-                node.scale[axis] = snapped((drag.start_scale[axis] * factor).max(0.001), 0.05).max(0.001);
+                node.scale[axis] = snapped((drag.start_scale[axis].abs() * factor).max(0.001), 0.05).max(0.001);
             }
             if is_group {
                 let uniform = node.scale[0];
                 node.scale = [uniform; 3];
             }
+            // The signs are a flip (see `flip_node`); scaling keeps them.
+            let flips = signs(drag.start_scale);
+            node.scale = [0, 1, 2].map(|k| node.scale[k] * flips[k]);
             self.touch();
             return;
         }
@@ -1821,9 +1977,10 @@ impl Composer {
                     node.position = [0, 1, 2].map(|k| snapped(drag.start_position[k] + direction[k] * parent_units, 0.05));
                 } else if is_group {
                     let factor = (along / g.length).exp();
-                    node.scale = drag.start_scale.map(|s| (s * factor).max(0.001));
+                    node.scale = drag.start_scale.map(|s| (s.abs() * factor).max(0.001) * s.signum());
                 } else {
-                    node.scale[drag.axis] = snapped((drag.start_scale[drag.axis] + 2.0 * parent_units).max(0.001), 0.05).max(0.001);
+                    let start = drag.start_scale[drag.axis];
+                    node.scale[drag.axis] = snapped((start.abs() + 2.0 * parent_units).max(0.001), 0.05).max(0.001) * signs(drag.start_scale)[drag.axis];
                 }
             }
             Tool::Rotate => {
@@ -1903,8 +2060,7 @@ impl Composer {
         }
         if ctx.input(|i| pressed(i, Key::New)) {
             self.request(Pending::New);
-        }
-        for dropped in ctx.input(|i| i.raw.dropped_files.clone()) {
+        }        for dropped in ctx.input(|i| i.raw.dropped_files.clone()) {
             let path = dropped.path().to_path_buf();
             if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("sdf")) {
                 self.request(Pending::Path(path));
@@ -2042,6 +2198,109 @@ mod tests {
                     assert!((a[i][j] - b[i][j]).abs() < 1e-9, "{angles:?}");
                 }
             }
+        }
+    }
+
+    fn distance_of(c: &Composer, p: V3) -> f64 {
+        layer_fields(&c.file)[0].distance(p).unwrap()
+    }
+
+    /// `p` mirrored along a parent axis about `centre`.
+    fn mirrored(p: V3, axis: usize, centre: V3) -> V3 {
+        let mut m = p;
+        m[axis] = 2.0 * centre[axis] - p[axis];
+        m
+    }
+
+    const PROBES: [V3; 6] = [[0.9, 0.1, -0.2], [-0.3, 0.7, 0.4], [0.2, -0.6, 0.8], [1.4, 0.3, 0.1], [0.0, 0.0, 0.0], [-0.8, -0.5, -0.9]];
+
+    #[test]
+    fn flipping_from_no_rotation_matches_sdf_modeler() {
+        use std::f64::consts::PI;
+        for (axis, rotation) in [(0, [PI, 0.0, PI]), (1, [PI, 0.0, 0.0]), (2, [0.0, 0.0, 0.0])] {
+            let mut node = new_shape("cube");
+            flip_node(&mut node, axis);
+            let (want, got) = (euler_matrix(rotation), euler_matrix(node.rotation));
+            for i in 0..3 {
+                for j in 0..3 {
+                    assert!((want[i][j] - got[i][j]).abs() < 1e-9, "axis {axis}: {:?}", node.rotation);
+                }
+            }
+            assert_eq!(node.scale, [1.0, 1.0, -1.0], "axis {axis}");
+        }
+    }
+
+    #[test]
+    fn a_flip_mirrors_an_asymmetric_shape_and_twice_undoes_it() {
+        // A prism and a coned cube are not symmetric, so a rotation alone could not mirror them.
+        for (brush, extra) in [("prism", None), ("cube", Some(("cone", 0.6)))] {
+            for axis in 0..3 {
+                let mut c = Composer::default();
+                let mut node = new_shape(brush);
+                if let Some((key, value)) = extra {
+                    node.set(key, Value::from(value));
+                }
+                node.position = [0.4, 0.2, -0.3];
+                node.rotation = [0.3, -0.5, 1.1];
+                node.scale = [1.2, 0.8, 1.5];
+                c.add_node(node.clone());
+                let before: Vec<f64> = PROBES.iter().map(|p| distance_of(&c, *p)).collect();
+                flip_node(&mut c.file.assemblies[0].shapes[0], axis);
+                for (p, d) in PROBES.iter().zip(&before) {
+                    let after = distance_of(&c, mirrored(*p, axis, node.position));
+                    assert!((after - d).abs() < 1e-9, "{brush} axis {axis} at {p:?}: {after} != {d}");
+                }
+                flip_node(&mut c.file.assemblies[0].shapes[0], axis);
+                let again = &c.file.assemblies[0].shapes[0];
+                let (a, b) = (euler_matrix(again.rotation), euler_matrix(node.rotation));
+                for i in 0..3 {
+                    for j in 0..3 {
+                        assert!((a[i][j] - b[i][j]).abs() < 1e-9, "{brush} axis {axis}: rotation not restored");
+                    }
+                }
+                assert_eq!(again.scale, node.scale);
+            }
+        }
+    }
+
+    #[test]
+    fn flipping_a_group_mirrors_its_children() {
+        for axis in 0..3 {
+            let mut c = Composer::default();
+            let mut prism = new_shape("prism");
+            prism.position = [0.5, 0.3, 0.2];
+            prism.rotation = [0.2, 0.7, -0.4];
+            c.add_node(prism);
+            c.group_selected();
+            let group = &mut c.file.assemblies[0].shapes[0];
+            group.position = [0.1, -0.2, 0.3];
+            group.rotation = [0.5, 0.1, 0.9];
+            let centre = group.position;
+            let before: Vec<f64> = PROBES.iter().map(|p| distance_of(&c, *p)).collect();
+            flip_node(&mut c.file.assemblies[0].shapes[0], axis);
+            for (p, d) in PROBES.iter().zip(&before) {
+                let after = distance_of(&c, mirrored(*p, axis, centre));
+                assert!((after - d).abs() < 1e-9, "axis {axis} at {p:?}: {after} != {d}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_uniform_negative_group_scale_reads_as_before() {
+        // Old files may hold a group scale of (-s, -s, -s): a point reflection, as it was before flips existed.
+        let mut c = Composer::default();
+        let mut prism = new_shape("prism");
+        prism.position = [0.5, 0.3, 0.2];
+        c.add_node(prism);
+        c.group_selected();
+        c.file.assemblies[0].shapes[0].scale = [-1.5; 3];
+        for p in PROBES {
+            let inverted = p.map(|v| -v / 1.5);
+            let child = layer_fields(&c.file)[0].node_distance(&[0, 0], p).unwrap();
+            c.file.assemblies[0].shapes[0].scale = [1.0; 3];
+            let plain = layer_fields(&c.file)[0].distance(inverted).unwrap() * 1.5;
+            c.file.assemblies[0].shapes[0].scale = [-1.5; 3];
+            assert!((child - plain).abs() < 1e-9, "at {p:?}: {child} != {plain}");
         }
     }
 
@@ -2508,6 +2767,50 @@ mod ui_tests {
         assert!(moved > 0.1, "the shape's x moved to {moved}");
         assert_eq!(h.state().shapes()[0].position[1], 0.0);
         assert!(h.state().undo.len() == 2 || h.state().changed, "the move is an undo step (or about to become one)");
+    }
+
+    #[test]
+    fn the_inspector_keeps_its_width_and_its_fields_line_up() {
+        use egui::accesskit::Role;
+        let mut h = harness();
+        h.run();
+        click(&mut h, "Add cylinder");
+        h.run();
+        let view = h.state().last_view;
+        for _ in 0..20 {
+            h.run();
+        }
+        assert_eq!(h.state().last_view, view, "the inspector does not grow frame by frame");
+        let rects = |h: &Harness<'static, Composer>, label: &str| -> Vec<egui::Rect> { h.get_all_by_role_and_label(Role::SpinButton, label).map(|n| n.rect()).collect() };
+        let (position, scale, round) = (rects(&h, "Position"), rects(&h, "Scale"), rects(&h, "Round"));
+        assert_eq!((position.len(), scale.len(), round.len()), (3, 3, 1));
+        for (p, s) in position.iter().zip(&scale) {
+            assert!((p.left() - s.left()).abs() < 0.5 && (p.width() - s.width()).abs() < 0.5, "Position and Scale fields line up: {p:?} {s:?}");
+        }
+        assert!((position[0].left() - round[0].left()).abs() < 0.5, "every field starts at the same x");
+        assert!((position[2].right() - round[0].right()).abs() < 0.5, "and ends at the same x");
+    }
+
+    #[test]
+    fn the_reset_and_flip_buttons_edit_the_transform() {
+        let mut h = harness();
+        h.run();
+        click(&mut h, "Add prism");
+        h.state_mut().file.assemblies[0].shapes[0].position = [1.0, 2.0, 3.0];
+        h.state_mut().file.assemblies[0].shapes[0].scale = [2.0, 3.0, 4.0];
+        h.run();
+        click(&mut h, "Reset position to 0, 0, 0");
+        assert_eq!(h.state().shapes()[0].position, [0.0; 3]);
+        click(&mut h, "Flip X");
+        let node = &h.state().shapes()[0];
+        assert_eq!(node.scale, [2.0, 3.0, -4.0], "a flip is a negative Z scale");
+        assert!((node.rotation[0].abs() - std::f64::consts::PI).abs() < 1e-9 && (node.rotation[2].abs() - std::f64::consts::PI).abs() < 1e-9, "{:?}", node.rotation);
+        click(&mut h, "Reset scale to 1, 1, 1 (the flip stays)");
+        assert_eq!(h.state().shapes()[0].scale, [1.0, 1.0, -1.0]);
+        click(&mut h, "Reset rotation to 0, 0, 0");
+        assert_eq!(h.state().shapes()[0].rotation, [0.0; 3]);
+        click(&mut h, "Flip Z");
+        assert_eq!(h.state().shapes()[0].scale, [1.0; 3], "flipping Z again undoes the mirror");
     }
 
     #[test]

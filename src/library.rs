@@ -15,10 +15,12 @@ pub enum Kind {
     MeshGraph,
     Bake,
     Udim,
+    /// Erosion settings saved from the Landscape tab.
+    Erosion,
 }
 
 impl Kind {
-    pub const ALL: [Kind; 5] = [Kind::Sdf, Kind::Noise, Kind::MeshGraph, Kind::Bake, Kind::Udim];
+    pub const ALL: [Kind; 6] = [Kind::Sdf, Kind::Noise, Kind::MeshGraph, Kind::Bake, Kind::Udim, Kind::Erosion];
     /// The kinds the drawer lists (the others are only output folders).
     pub const SHOWN: [Kind; 3] = [Kind::Sdf, Kind::Noise, Kind::MeshGraph];
 
@@ -29,6 +31,7 @@ impl Kind {
             Kind::MeshGraph => "Mesh Graphs",
             Kind::Bake => "Bakes",
             Kind::Udim => "UDIM Packs",
+            Kind::Erosion => "Erosion Presets",
         }
     }
 
@@ -37,6 +40,7 @@ impl Kind {
             Kind::Sdf => Some("sdf"),
             Kind::Noise => Some("noisegraph"),
             Kind::MeshGraph => Some("meshgraph"),
+            Kind::Erosion => Some("erosion"),
             Kind::Bake | Kind::Udim => None,
         }
     }
@@ -48,6 +52,7 @@ impl Kind {
             Kind::MeshGraph => "mesh_graph",
             Kind::Bake => "bake",
             Kind::Udim => "udim",
+            Kind::Erosion => "erosion",
         }
     }
 }

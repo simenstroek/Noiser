@@ -165,7 +165,11 @@ fn brush_distance(kind: u32, hs: vec3f, b: vec4f, p: vec3f) -> f32 {
             return (length_scaled - 1.0) * min(hs.x, min(hs.y, hs.z));
         }
         case 1u: { return uber(vec3f(p.x, -p.y, p.z), vec4f(hs, b.x), vec3f(b.y, b.z, b.w)); }
-        case 2u: { return cylinder(p, hs - vec3f(b.x)) - b.x; }
+        case 2u: {
+            // Rounding all the way would shrink the inner ellipse to a point, which the ellipse distance divides by.
+            let r = min(b.x, 0.999 * min(hs.x, hs.z));
+            return cylinder(p, hs - vec3f(r)) - r;
+        }
         case 3u: { return prism(p, hs - vec3f(b.y), max(b.y - b.x, 0.0)) - b.x; }
         default: { return polygon(p, vec2f(hs.x - b.y, hs.y - b.x), b.z, b.w, max(b.y - b.x, 0.0)) - b.x; }
     }

@@ -25,7 +25,23 @@ pub fn euler_matrix(angles: V3) -> M3 {
     multiply(&rz, &multiply(&ry, &rx))
 }
 
-fn multiply(a: &M3, b: &M3) -> M3 {
+/// A node's frame: its rotation with the signs of its scale folded in, `R · diag(sign(scale))`. A negative scale on an
+/// axis mirrors the node along that axis of its own frame (the composer's Flip buttons store a flip that way, as a
+/// negative Z scale plus a rotation). The matrix stays orthogonal, so its transpose is still its inverse; sizes come from
+/// the scale's magnitude.
+pub fn node_frame(rotation: V3, scale: V3) -> M3 {
+    let mut m = euler_matrix(rotation);
+    for (j, s) in scale.iter().enumerate() {
+        if *s < 0.0 {
+            for row in m.iter_mut() {
+                row[j] = -row[j];
+            }
+        }
+    }
+    m
+}
+
+pub(crate) fn multiply(a: &M3, b: &M3) -> M3 {
     let mut out = [[0.0; 3]; 3];
     for (i, row) in out.iter_mut().enumerate() {
         for (j, cell) in row.iter_mut().enumerate() {
@@ -285,7 +301,8 @@ enum Brush {
 
 impl Brush {
     fn from_node(node: &Node) -> Option<Brush> {
-        let half = [node.scale[0] * 0.5, node.scale[1] * 0.5, node.scale[2] * 0.5];
+        // A negative scale is a mirror (see `node_frame`); the size is its magnitude.
+        let half = node.scale.map(|s| s.abs() * 0.5);
         let smallest = half[0].min(half[1]).min(half[2]);
         let round = node.number("round").unwrap_or(0.0);
         let bevel = node.number("bevel").unwrap_or(0.0);
@@ -360,7 +377,9 @@ impl Brush {
                 uber_primitive([p[0], -p[1], p[2]], [half[0], half[1], half[2], *wall], [*vertical_radius, *edge_radius, *taper])
             }
             Brush::Cylinder { half, rounding } => {
-                cylinder_distance(p, [half[0] - rounding, half[1] - rounding, half[2] - rounding]) - rounding
+                // Rounding all the way would shrink the inner ellipse to a point, which the ellipse distance divides by.
+                let r = rounding.min(0.999 * half[0].min(half[2]));
+                cylinder_distance(p, [half[0] - r, half[1] - r, half[2] - r]) - r
             }
             Brush::Prism { half, rounding, inset } => {
                 prism_distance(p, [half[0] - inset, half[1] - inset, half[2] - inset], (inset - rounding).max(0.0)) - rounding
@@ -580,7 +599,7 @@ fn compile_nodes(nodes: &[Node], has_unsupported: &mut bool) -> Vec<Item> {
                 items.push(Item::Shape(Shape {
                     placement: Placement::from_node(node),
                     position: node.position,
-                    rotation: euler_matrix(node.rotation),
+                    rotation: node_frame(node.rotation, node.scale),
                     brush,
                     repeat: Repeat::from_node(node),
                     mirror: [
@@ -595,8 +614,8 @@ fn compile_nodes(nodes: &[Node], has_unsupported: &mut bool) -> Vec<Item> {
             "group" => items.push(Item::Group(Group {
                 placement: Placement::from_node(node),
                 position: node.position,
-                rotation: euler_matrix(node.rotation),
-                scale: if node.scale[0] == 0.0 { 1.0 } else { node.scale[0] },
+                rotation: node_frame(node.rotation, node.scale),
+                scale: if node.scale[0] == 0.0 { 1.0 } else { node.scale[0].abs() },
                 children: compile_nodes(node.children(), has_unsupported),
             })),
             _ => {
@@ -1037,6 +1056,16 @@ mod tests {
         assert!(cube.distance([0.0, 1.0, 0.0]).unwrap().abs() < 1e-9);
         assert!((cube.distance([3.0, 0.0, 0.0]).unwrap() - 2.0).abs() < 1e-9);
         assert!(cube.distance([0.5, 0.5, 0.5]).unwrap() < 0.0);
+    }
+
+    #[test]
+    fn a_fully_rounded_cylinder_stays_round() {
+        let round = field(&[node("cylinder", "").replace(r#""round":0"#, r#""round":1"#)]);
+        // The side and the caps stay where they were, and a box corner is outside.
+        assert!(round.distance([1.0, 0.0, 0.0]).unwrap().abs() < 1e-6);
+        assert!(round.distance([0.0, 1.0, 0.0]).unwrap().abs() < 1e-6);
+        let corner = round.distance([0.9, 0.0, 0.9]).unwrap();
+        assert!(corner.is_finite() && corner > 0.0, "corner distance {corner}");
     }
 
     #[test]
