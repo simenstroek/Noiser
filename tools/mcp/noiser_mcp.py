@@ -51,9 +51,8 @@ def run(name, args):
         p = subprocess.run([EXE, *TOOLS[name][2](args)], capture_output=True, text=True, timeout=3600)
     text = (p.stdout + p.stderr).strip()
     if len(text) > 6000:  # a long run logs a line per chunk and map: keep the start and the end, which has the result
-        text = text[:1500] + f"
-... ({len(text) - 5500} characters left out; the full log is next to the graph file as .log) ...
-" + text[-4000:]
+        omitted = len(text) - 5500
+        text = text[:1500] + f"\n... ({omitted} characters left out; the full log is next to the graph file as .log) ...\n" + text[-4000:]
     return (text or "(no output)") + ("" if p.returncode == 0 else f"\n[exit code {p.returncode}]"), p.returncode != 0
 
 

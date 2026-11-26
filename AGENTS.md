@@ -34,6 +34,26 @@ ring facing the middle); `Remesh` turns the field into triangles (`LoadMesh` wit
 Nanite chunks); `AutoUv` (`planar: true` for terrain) unwraps; `Bake` makes normal/occlusion/curvature maps from a field; `OutMesh`
 and `OutImage` write files. A graph needs at least one output node to do anything.
 
+## The Landscape graph
+
+A `.landscape` project is a graph over one tile (x and y across the terrain, 0 to 1) whose Density Output is the height, plus
+`settings` (`seed`, `world_m`, `height_m`, `resolution` of the working grid, `fit`, `water_m`). `noiser --build spec.json
+out.landscape` takes the usual spec plus an optional `"settings"` object; `--preview P.landscape out.png` draws the map from above
+and a 3D view side by side (Erosion nodes run, Layer colours painted); `--describe` shows graph and settings. Landscape nodes:
+`Map` (a painted mask), `Heightmap` (a PNG/EXR image), `Stamp` (an `.sdf` pressed in from above: Add, Max or Cut), `Slope`,
+`Select` (a range with soft edges), `Terrace`, `Craters`, `Erosion` (kind Water or Wind; outputs height, flow, deposition, wear),
+`Layer` (an output: a paint layer; exports write one normalised 8-bit weightmap each), `Noise Graph`.
+
+* **Set `fit: false`.** With fit on, the whole terrain is rescaled to 0..`height_m` after your nodes, so heights and thresholds in
+  Select/Stamp/Erosion/Layer (in height units: 1 = `height_m`; slopes in degrees; maps 0..1) no longer mean what they say.
+  `--validate` warns about it.
+* Heights are in units of `height_m`: a noise of amount 1 is the full height. Lift a terrain above 0 with a Math Add if water is on.
+* `noiser --headless --landscape-export P.landscape out.png` writes the heightmap, its sidecar and `out_<layer>.png` weightmaps.
+  `noiser --terrain-graph out.png chunks.meshgraph` writes the Mesh graph that cuts it into Nanite chunks (paint layers loaded and
+  baked per chunk as `terrain_splat`), ready for `--headless --mesh-graph` and `tools/unreal_import_terrain.py` (its material blends
+  the layers' colours by the splat map). In the Mesh graph, `Scatter` has `density_map` (a paint layer named in the terrain Load
+  Mesh node's `maps`) and `TerrainLayer` reads a layer at a position.
+
 ## From shape to Unreal
 
 SDF Composer (`.sdf`, made in the app) -> Landscape tab (heightmap, masks, water; `noiser --headless --landscape-export P.landscape
@@ -69,6 +89,6 @@ fixed: `gpu_tests::radial_positions_and_displacement_outputs`. Node kinds live i
 
 ## MCP
 
-`tools/mcp/noiser_mcp.py` is a small stdio MCP server over the commands above (schema, describe, build, validate, preview, run
+`tools/mcp/noiser_mcp.py` is a small stdio MCP server over the commands above (schema, describe, build, validate, preview, terrain graph, run
 mesh graph, landscape export). It needs only Python 3 and a built `noiser.exe`; set `NOISER_EXE` if it is not at
 `target/release/noiser.exe`. Register it with `claude mcp add noiser -- python tools/mcp/noiser_mcp.py`.

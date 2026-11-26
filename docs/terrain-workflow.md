@@ -38,7 +38,16 @@ in other graphs, so `lerp(plains, mountains, Mask("range"))` is a mountain range
 and height, run *erosion*, and when the terrain looks right press **Open as Nanite chunks in the Mesh graph** and choose a
 folder: the heightmap is written there and a ready Mesh graph opens.
 
-Headless: `noiser --headless --landscape-export Terrain.landscape heightmap.png --erode`.
+More nodes build on that (see `docs/terrain-maps-plan.md`): **Heightmap** brings in an image (a PNG the tab exported comes back in
+metres), **Stamp** presses an `.sdf` shape into the height seen from above (Add, Max or Cut), **Erosion** is a node (Water: rain,
+rivers, slides; Wind: dunes) whose flow, deposition and wear outputs are maps, **Terrace** and **Craters** shape the height, and
+**Select** (a height, slope or map range with soft edges) feeding a **Layer** makes a paint layer. Every Layer is exported as an
+8-bit weightmap (normalised so the layers sum to 1) next to the heightmap and painted in its colour in the 3D view. Turn *fit the
+height range* off when you use these: the nodes work in height units, and fit rescales the terrain after them.
+
+Headless: `noiser --headless --landscape-export Terrain.landscape heightmap.png` (heightmap, sidecar, weightmaps), then
+`noiser --terrain-graph heightmap.png Terrain.meshgraph` writes the Mesh graph for step 4 with the layers loaded and baked per
+chunk. Scatter's *density map* names a layer, so mushrooms grow on the grass layer and boulders on the rock layer.
 
 ## 4. Chunks and shapes (Mesh graph)
 

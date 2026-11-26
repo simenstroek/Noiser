@@ -307,6 +307,24 @@ fn check_graph(g: &Graph, mesh: bool, base: &Path, errors: &mut Vec<String>, war
                 }
             }
         }
+        // Paint layers: the maps a terrain loads must be in its sidecar, and what reads them must be among them.
+        if mesh {
+            let terrain_maps = crate::codegen::terrain_maps(g);
+            let asked = match &n.kind {
+                NodeKind::TerrainLayer { name } => Some(name.as_str()),
+                NodeKind::Scatter(p) if !p.density_map.is_empty() => Some(p.density_map.as_str()),
+                _ => None,
+            };
+            if let Some(name) = asked.filter(|n| !terrain_maps.iter().any(|m| m == n)) {
+                errors.push(format!("{}: the paint layer \"{name}\" is not among the terrain Load Mesh node's maps ({})", label(*id), if terrain_maps.is_empty() { "none".to_string() } else { terrain_maps.join(", ") }));
+            }
+            if let NodeKind::LoadMesh(p) = &n.kind && crate::landscape_field::is_heightmap(&p.path) && !p.maps.is_empty() {
+                let known = crate::landscape_field::sidecar_layers(&crate::meshgraph::resolve_in(base, &p.path));
+                for m in p.maps.iter().filter(|m| !known.iter().any(|(n, _)| n == *m)) {
+                    errors.push(format!("{}: the heightmap's sidecar lists no paint layer called \"{m}\" (it has: {})", label(*id), known.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>().join(", ")));
+                }
+            }
+        }
         let resolve = |p: &str| if Path::new(p).is_absolute() { PathBuf::from(p) } else { base.join(p) };
         let files: Vec<(&str, &str)> = match &n.kind {
             NodeKind::LoadMesh(p) => vec![("path", &p.path)],

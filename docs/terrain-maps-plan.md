@@ -115,3 +115,7 @@ Each phase is usable on its own and tested before the next.
   layers of the heights' 3D texture (no new bindings; each costs as much video memory as the heights). *Terrain layer*
   (Mesh graph node, `TerrainLayer { name }`) reads one at a position: wire it to a Bake node's extra inputs for per-chunk
   layer weights. Scatter has `density_map`, a layer that scales its density.
+- **Landscape-plan leftovers done so far:** Terrace and Craters nodes; hydraulic erosion with eight pipes (the diagonals make
+  gullies less axis-aligned); `noiser --build/--describe/--preview` for `.landscape`, `--terrain-graph` and the MCP tool of the
+  same name; paint layers baked per chunk as an RGBA `terrain_splat` map, named in the chunk manifest (`layers`), blended by
+  the Unreal import script's material; validation of paint layer names and landscape files; a warning when *fit* is on.
