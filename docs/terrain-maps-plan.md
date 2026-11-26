@@ -1,6 +1,6 @@
 # Terrain maps, erosion and layer nodes, stamps: plan
 
-Status: agreed 2026-11-26. Phases 0 to 2 done (see Progress at the end); defaults decided: imported maps up to 2049 a side, Erosion auto-run on by default. Covers five features picked after looking at TerraForge3D:
+Status: agreed 2026-11-26. Phases 0 to 6 done (see Progress at the end); defaults decided: imported maps up to 2049 a side, Erosion auto-run on by default. Covers five features picked after looking at TerraForge3D:
 
 1. Erosion output maps (flow, deposition, wear).
 2. Unreal paint-layer weightmaps from the Landscape.

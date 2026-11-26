@@ -727,8 +727,9 @@ impl Editor {
                 painter.text(at, egui::Align2::LEFT_CENTER, s, small.clone(), Color32::from_gray(190));
             }
             if let Some(badge) = self.badges.get(&id) {
-                let at = Pos2::new(l.rect.right() - 8.0 * z, l.rect.bottom() - 9.0 * z);
-                painter.text(at, egui::Align2::RIGHT_CENTER, badge, small.clone(), Color32::from_rgb(150, 200, 235));
+                // On the input side, beside the first output: the rows under the single "Height" input are empty.
+                let at = Pos2::new(l.rect.left() + 8.0 * z, l.rect.top() + (HEADER_H + ROW_H * 1.5) * z);
+                painter.text(at, egui::Align2::LEFT_CENTER, badge, small.clone(), Color32::from_rgb(150, 200, 235));
             }
 
             // Cache toggle, beside the eye.
