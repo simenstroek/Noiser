@@ -24,6 +24,8 @@ pub enum ErosionKind {
     Water,
     /// Saltation by wind: windward faces wear, dunes build in the lee (`landscape_wind`).
     Wind,
+    /// Learned detail of real terrain, added to a coarser copy of the input (`landscape_detail`).
+    Detail,
 }
 
 /// The settings of an Erosion node (Landscape graph). The grid it erodes on is the terrain's working resolution.
@@ -58,6 +60,14 @@ pub struct Erosion {
     /// Thermal iterations, and the angle of repose in degrees.
     pub thermal_iterations: u32,
     pub talus_deg: f32,
+    /// Detail: the kind of real terrain whose detail is learned (one of `landscape_detail::TYPES`).
+    pub detail_type: String,
+    /// Detail: how many times coarser the input is read before detail is added back (4 or 16).
+    pub detail_scale: u32,
+    /// Detail: sampling steps (more: slower; 8 looked the same as 32 in tests).
+    pub detail_steps: u32,
+    /// Detail: 0 keeps the input, 1 is the full result.
+    pub detail_amount: f32,
     /// Run again by itself when what feeds it changes (otherwise it keeps its last result, marked out of date, until
     /// Run is pressed).
     pub auto: bool,
@@ -67,7 +77,7 @@ pub struct Erosion {
 
 impl Default for Erosion {
     fn default() -> Self {
-        Erosion { kind: ErosionKind::Water, wind_deg: 0.0, wind_iterations: 150, wind_lift: 0.04, wind_hop_m: 24.0, wind_shadow_deg: 12.0, wind_deposit: 0.15, iterations: 1000, rain: 0.04, capacity: 0.05, dissolve: 0.05, deposit: 0.05, evaporation: 0.05, thermal_iterations: 20, talus_deg: 35.0, auto: true, preset: String::new() }
+        Erosion { kind: ErosionKind::Water, wind_deg: 0.0, wind_iterations: 150, wind_lift: 0.04, wind_hop_m: 24.0, wind_shadow_deg: 12.0, wind_deposit: 0.15, iterations: 1000, rain: 0.04, capacity: 0.05, dissolve: 0.05, deposit: 0.05, evaporation: 0.05, thermal_iterations: 20, talus_deg: 35.0, detail_type: "hills".into(), detail_scale: 16, detail_steps: 8, detail_amount: 1.0, auto: true, preset: String::new() }
     }
 }
 
@@ -183,13 +193,30 @@ pub fn node_ui(ui: &mut eframe::egui::Ui, e: &mut Erosion) {
         }
     });
     crate::row(ui, &mut e.kind, d.kind, |ui, v| {
-        egui::ComboBox::from_id_salt("erosion kind").selected_text(match v { ErosionKind::Water => "Water", ErosionKind::Wind => "Wind" }).show_ui(ui, |ui| {
+        egui::ComboBox::from_id_salt("erosion kind").selected_text(match v { ErosionKind::Water => "Water", ErosionKind::Wind => "Wind", ErosionKind::Detail => "Detail" }).show_ui(ui, |ui| {
             ui.selectable_value(v, ErosionKind::Water, "Water: rain, rivers and slides");
             ui.selectable_value(v, ErosionKind::Wind, "Wind: dunes and wear");
+            ui.selectable_value(v, ErosionKind::Detail, "Detail: learned from real terrain");
         });
     });
     ui.checkbox(&mut e.auto, "run by itself").on_hover_text("Run again when what feeds this node changes. Off: the last result stays (marked out of date) until you press Run.");
-    if e.kind == ErosionKind::Wind {
+    if e.kind == ErosionKind::Detail {
+        crate::row(ui, &mut e.detail_type, d.detail_type.clone(), |ui, v| {
+            egui::ComboBox::from_id_salt("detail type").selected_text(v.clone()).show_ui(ui, |ui| {
+                for t in crate::landscape_detail::TYPES {
+                    ui.selectable_value(v, t.to_string(), t);
+                }
+            }).response.on_hover_text("The kind of real terrain whose detail is added.");
+        });
+        crate::row(ui, &mut e.detail_scale, d.detail_scale, |ui, v| {
+            egui::ComboBox::from_id_salt("detail scale").selected_text(format!("{v}x")).show_ui(ui, |ui| {
+                ui.selectable_value(v, 4, "4x: fine detail only");
+                ui.selectable_value(v, 16, "16x: shapes and detail");
+            }).response.on_hover_text("The input is read this many times coarser, then detail is added back to the working grid. The model was trained for 1 m output cells (a 1 km terrain at 1024).");
+        });
+        crate::row(ui, &mut e.detail_steps, d.detail_steps, |ui, v| _ = ui.add(egui::DragValue::new(v).range(1..=64).speed(0.2).prefix("steps ")).on_hover_text("Sampling steps: more is slower."));
+        crate::row(ui, &mut e.detail_amount, d.detail_amount, |ui, v| _ = ui.add(egui::DragValue::new(v).range(0.0..=2.0).speed(0.01).prefix("amount ")).on_hover_text("0 keeps the input, 1 is the full result."));
+    } else if e.kind == ErosionKind::Wind {
         crate::row(ui, &mut e.wind_deg, d.wind_deg, |ui, v| _ = ui.add(egui::DragValue::new(v).speed(1.0).prefix("blows towards ").suffix("°")).on_hover_text("Counter-clockwise from east (the +x side of the terrain): 90 blows towards north."));
         crate::row(ui, &mut e.wind_iterations, d.wind_iterations, |ui, v| _ = ui.add(egui::DragValue::new(v).range(0..=20000).speed(5.0).prefix("iterations ")));
         crate::row(ui, &mut e.wind_lift, d.wind_lift, |ui, v| _ = ui.add(egui::DragValue::new(v).range(0.0..=1.0).speed(0.001).prefix("lift ").suffix(" m")).on_hover_text("How much ground the wind picks up per iteration where it reaches it."));
@@ -452,6 +479,9 @@ pub struct ErosionResult {
 pub fn erode(device: &wgpu::Device, queue: &wgpu::Queue, heights: &[f32], n: usize, cell_m: f32, e: &Erosion, progress: &Progress) -> Result<ErosionResult, String> {
     if e.kind == ErosionKind::Wind {
         return crate::landscape_wind::erode_wind(device, queue, heights, n, cell_m, e, progress);
+    }
+    if e.kind == ErosionKind::Detail {
+        return crate::landscape_detail::detail(device, queue, heights, n, cell_m, e, 0, progress);
     }
     if heights.len() != n * n {
         return Err("the grid has the wrong size".into());

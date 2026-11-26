@@ -35,6 +35,24 @@ with the coarse input (each coarse cell keeps its mean height).
   trained on 4).
 - **Demo** (`demo.py`): regenerates the 16x images, optionally with a Noiser heightmap.
 
+## In the app
+
+The Erosion node's third kind, **Detail** (`src/landscape_detail.rs`): settings terrain type, 4x or 16x, steps (default 8)
+and amount (0 keeps the input, 1 is the full result). The input is averaged to 4 or 16 times coarser cells on the working
+grid, and detail is generated back to the working grid; the seed is the terrain's. Trained for 1 m output cells: a 1 km
+terrain at working resolution 1024. Flow is the input's flow accumulation; deposition and wear are where the result rose
+and fell.
+
+- A port of `flow.enhance`: the inputs on the CPU (rayon), the U-Net in WGSL compute (GroupNorm in two reduction passes,
+  3x3 convolutions through workgroup memory, 16 output channels per workgroup), tiles blended every step. Checked against
+  `tools/ml/flow.py`'s answers (`tests/fixtures/detail_fixture.nmlw`, made by `export_weights.py fixtures`): the inputs,
+  one network call and a 3-step, 4-tile sampler agree within 0.2 to 0.5% (`cargo test --release landscape_detail`, with
+  `NOISER_DETAIL_WEIGHTS` set to the weights' folder).
+- Weights: `export_weights.py weights` writes `detail_16m_4m.nmlw` and `detail_4m_1m.nmlw` (6 MB each, f16). The app reads
+  them from `ml\` next to the program, or the folder in `NOISER_DETAIL_WEIGHTS`.
+- RTX 4070 SUPER: 1 km at working resolution 1024 (16x, 8 steps) 2.3 s; 4096 42 s (441 tiles in the second stage). Peak GPU
+  memory of a whole 4096 export about 1.2 GB.
+
 ## Cost
 
 RTX 4070 SUPER, the Python reference, one tile at a time (not optimised):

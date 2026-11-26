@@ -103,19 +103,27 @@ def sample(net, feats, tid, sigma, cell_m, scale, steps=8, gen=None):
     x = torch.randn(feats.shape[0], 1, *feats.shape[-2:], device=feats.device, generator=gen)
     for i in range(steps):
         t = torch.full((feats.shape[0],), i / steps, device=feats.device)
-        with torch.autocast("cuda", dtype=torch.bfloat16):
+        with torch.autocast("cuda", dtype=torch.bfloat16, enabled=feats.is_cuda):
             v = net(x, feats, t, tid, sigma, cell_m).float()
         x = x + v / steps
     return T.zero_block_mean(x * scale / RES)
 
 
 @torch.no_grad()
-def enhance(coarse, kind, cell_m, net, scale, steps=8, seed=0, dev="cuda", tile=T.PATCH, overlap=64):
-    """Whole map: coarse [H, W] metres (H, W multiples of 4, at least tile/4) -> [4H, 4W]. Tiles of the training size share one
-    noise field and their velocities are blended every step, so there are no seams and no averaging of unrelated samples."""
+def enhance(coarse, kind, cell_m, net, scale, steps=8, seed=0, dev="cuda", tile=T.PATCH, overlap=64, x0=None):
+    """Whole map: coarse [H, W] metres -> [4H, 4W]. Tiles of the training size share one noise field and their velocities are
+    blended every step, so there are no seams and no averaging of unrelated samples. A map smaller than a tile is padded with
+    its edge values to one tile and cropped after. `x0`: the starting noise [4H, 4W] (default: from `seed`). This is the
+    reference the app's port (src/landscape_detail.rs) is tested against."""
     from prep_lidar import flow_accumulation
 
     H, W = coarse.shape
+    ct = tile // T.FACTOR
+    if H < ct or W < ct:
+        assert x0 is None, "pass x0 only for maps of at least one tile"
+        padded = np.pad(coarse, ((0, max(ct - H, 0)), (0, max(ct - W, 0))), mode="edge")
+        return enhance(padded, kind, cell_m, net, scale, steps, seed, dev, tile, overlap)[: 4 * H, : 4 * W]
+    amp = dict(device_type="cuda", dtype=torch.bfloat16, enabled=dev == "cuda")
     acc = np.log1p(flow_accumulation(coarse.astype(np.float64))).astype(np.float32)  # whole map: real watersheds
     c_all = torch.from_numpy(coarse.astype(np.float32))[None, None].to(dev)
     a_all = torch.from_numpy(acc)[None, None].to(dev)
@@ -138,19 +146,22 @@ def enhance(coarse, kind, cell_m, net, scale, steps=8, seed=0, dev="cuda", tile=
     wsum = torch.zeros(1, 1, FH, FW, device=dev)
     for y, x, _, _ in tiles:
         wsum[..., y : y + tile, x : x + tile] += win
-    g = torch.Generator(dev).manual_seed(seed)
-    xs = torch.randn(1, 1, FH, FW, device=dev, generator=g)
+    if x0 is None:
+        xs = torch.randn(1, 1, FH, FW, device=dev, generator=torch.Generator(dev).manual_seed(seed))
+    else:
+        xs = torch.from_numpy(np.asarray(x0, np.float32))[None, None].to(dev)
     for i in range(steps):
         t = torch.full((1,), i / steps, device=dev)
         v = torch.zeros_like(xs)
         for y, x, feats, sigma in tiles:
-            with torch.autocast("cuda", dtype=torch.bfloat16):
+            with torch.autocast(**amp):
                 v[..., y : y + tile, x : x + tile] += net(xs[..., y : y + tile, x : x + tile], feats, t, tid, sigma, cell).float() * win
         xs = xs + v / wsum / steps
     res = torch.zeros_like(xs)
     for y, x, _, sigma in tiles:  # per-tile relief scale, blended
-        res[..., y : y + tile, x : x + tile] += T.zero_block_mean(xs[..., y : y + tile, x : x + tile] * scale / RES) * sigma * win
-    return (T.upsample(c_all) + T.zero_block_mean(res / wsum))[0, 0].cpu().numpy()  # blending broke exact agreement; restore it
+        res[..., y : y + tile, x : x + tile] += xs[..., y : y + tile, x : x + tile] * (scale / RES) * sigma * win
+    # Zero mean over every coarse cell, once for the whole map: the output agrees exactly with the input.
+    return (T.upsample(c_all) + T.zero_block_mean(res / wsum))[0, 0].cpu().numpy()
 
 
 def load(path, dev="cuda"):

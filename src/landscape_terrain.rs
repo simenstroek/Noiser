@@ -248,7 +248,12 @@ fn run_erosion(
     // Erosion works in metres: one unit of the graph is the height setting.
     let k = s.height_m.max(1e-3);
     let metres: Vec<f32> = values.iter().map(|v| v * k).collect();
-    let result = erode(device, queue, &metres, n, s.world_m / (n - 1) as f32, params, progress)?;
+    let cell_m = s.world_m / (n - 1) as f32;
+    let result = if params.kind == crate::landscape_erosion::ErosionKind::Detail {
+        crate::landscape_detail::detail(device, queue, &metres, n, cell_m, params, s.seed, progress)?
+    } else {
+        erode(device, queue, &metres, n, cell_m, params, progress)?
+    };
     let extra = ErosionMaps::new(&metres, &result);
     let height: Vec<f32> = result.heights.iter().map(|m| m / k).collect();
     Ok(Eroded { key, side: n, outputs: [Arc::new(height), Arc::new(extra.flow), Arc::new(extra.deposition), Arc::new(extra.wear)] })

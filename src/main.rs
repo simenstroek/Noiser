@@ -31,6 +31,7 @@ mod landscape_layers;
 mod landscape_heightmap;
 mod landscape_stamp;
 mod landscape_wind;
+mod landscape_detail;
 mod terrain_maps;
 mod scatter;
 mod landscape_masks;
