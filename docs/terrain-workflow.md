@@ -136,3 +136,34 @@ What this scene showed, as a list of things a person would trip over. Each was f
 * A chunk of 500 m at 1M triangles has triangles about 70 cm across: noise finer than about 4 m is not resolved.
 * Extraction is fast (about a second per million triangles); the maps cost more (ambient occlusion at 4096 px about a minute).
 * Units: the Mesh graph's field is in the units of the terrain's Load Mesh node: centimetres for Unreal.
+
+## A third scene, built only through the command line and the MCP server
+
+`noiser_mcp.py` was used end to end (build, validate, preview, export, terrain graph, run) to make a 2 km valley with a mesa
+(a Stamp of `Crag.sdf`, mode Max), water and wind erosion, craters, four paint layers (rock by slope, sand by low height,
+grass, snow by height) and Scatter nodes whose density maps are the grass and rock layers; 16 chunks of 90k triangles and a
+`terrain_splat` map per chunk, imported into Unreal 5.8 by `tools/unreal_import_terrain.py`.
+
+![The valley in Unreal Engine](screenshots/terrain-layers-unreal.png)
+![The same landscape previewed from the command line](screenshots/landscape-preview-layers.png)
+
+Things this run showed, and what was done:
+
+* **"Fit the height range" misleads every node that works in height units.** Select thresholds, Stamp heights and Erosion's
+  metres all mean something different once fit rescales the result. The Landscape tab and `--validate` now warn; use `fit: false`.
+* **The headless commands logged only to a console**, so a tool that ran them got empty output. They now write to stdout too.
+* **`--validate` for a `.landscape` checked nothing but the JSON.** It now reports missing Stamp/Heightmap files, unwired
+  Layer/Select/Erosion nodes, and (for a mesh graph) paint layer names the terrain does not load.
+* **The MCP server returned every line of a long run.** It keeps the start and the end now.
+* **There was no way to get the chunk graph without the app.** `noiser --terrain-graph` and the `noiser_terrain_graph` tool write it,
+  with the paint layers loaded and baked per chunk.
+* **Scattered objects take the ground's layer colour** (mushrooms on grass are green). Bake an *objects* map as in the Eiffel scene
+  if they should be stone.
+* **Unreal's Landscape import is a dialog, not a script**, so the weightmaps were checked against the importer's source instead
+  (8-bit grayscale PNG per layer, treated as linear): they match. The chunk import was run in the editor.
+* The flow output of an Erosion node, selected high (0.88 and up) and fed to a Layer, paints the drainage of the terrain:
+
+![Flow-selected sand layer in the valleys](screenshots/landscape-rivers-flow-layers.png)
+
+Not done: adaptive remeshing per chunk and skirts (no cracks between chunks were seen in the editor, but only from the air),
+tiled builds beyond 4k, click-to-place for Stamps on the map view (they are placed by typing x and y).
