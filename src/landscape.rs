@@ -98,6 +98,12 @@ pub fn bilinear(grid: &[f32], n: usize, x: f32, y: f32) -> f32 {
 /// Samples a side of the grid the 3D view draws: the GPU marches it, so it can be finer than a CPU picture could.
 const VIEW_SAMPLES: usize = 1025;
 
+/// Whether "fit the height range" is on while nodes work in the graph's own height units (Erosion, Stamp, Select,
+/// Layer): fit rescales the terrain after them, so their heights, slopes and thresholds no longer mean what they say.
+pub fn fit_misleads(graph: &Graph, fit: bool) -> bool {
+    fit && graph.nodes.values().any(|n| !n.muted && matches!(n.kind, NodeKind::Erosion(_) | NodeKind::Stamp(_) | NodeKind::Select { .. } | NodeKind::Layer(_)))
+}
+
 /// The grid as an `m` x `m` one, `m` at most `max`, for drawing.
 fn shrink(grid: &[f32], n: usize, max: usize) -> (Vec<f32>, usize) {
     let m = n.min(max);
@@ -387,18 +393,18 @@ pub(crate) fn export_terrain(
     if crate::landscape_layers::has_layers(&prepared.graph) {
         let layers = crate::landscape_layers::sample_layers(device, queue, &prepared, s, base, UNREAL_RES, progress)?;
         let files = crate::landscape_layers::write_weightmaps(path, UNREAL_RES, &layers)?;
-        add_layers_to_sidecar(path, &files)?;
+        add_layers_to_sidecar(path, &files, &layers)?;
         message += &format!("; {} weightmaps ({})", files.len(), files.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>().join(", "));
     }
     Ok(message)
 }
 
 /// Adds the weightmaps (layer name, file name) to the heightmap's sidecar.
-fn add_layers_to_sidecar(heightmap: &Path, files: &[(String, String)]) -> Result<(), String> {
+fn add_layers_to_sidecar(heightmap: &Path, files: &[(String, String)], layers: &[crate::landscape_layers::Layer]) -> Result<(), String> {
     let side = PathBuf::from(format!("{}.json", heightmap.display()));
     let text = std::fs::read_to_string(&side).map_err(|e| format!("{}: {e}", side.display()))?;
     let mut json: serde_json::Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
-    json["layers"] = files.iter().map(|(name, file)| serde_json::json!({ "name": name, "file": file })).collect();
+    json["layers"] = files.iter().zip(layers).map(|((name, file), l)| serde_json::json!({ "name": name, "file": file, "color": l.color })).collect();
     json["layers_note"] = "8-bit grayscale weightmaps, one per layer, same size as the heightmap; they add up to 255 in every cell. Landscape mode > Import from File > Paint layers: one file per layer.".into();
     std::fs::write(&side, serde_json::to_string_pretty(&json).unwrap_or_default()).map_err(|e| format!("{}: {e}", side.display()))
 }
@@ -1007,6 +1013,9 @@ impl crate::App {
                 });
             });
             crate::row(ui, &mut ls.settings.fit, d.fit, |ui, v| _ = ui.checkbox(v, "fit the height range").on_hover_text("On: the lowest point is 0 and the highest is the height. Off: the graph's output times the height, around 0."));
+            if fit_misleads(&ls.graph, ls.settings.fit) {
+                ui.colored_label(crate::editor::ORANGE, "Fit rescales the heights after Erosion, Stamp, Select and Layer nodes, so their heights and thresholds (in height units) are not the final metres. Turn it off for predictable results.");
+            }
             ui.weak("The terrain is one tile of the graph (x and y from 0 to 1) with the density output as height, so any noise graph works. Tiling graphs make a terrain whose edges match.");
             if action(ui, "export", "Export heightmap for Unreal…", TERRAIN, !running && ls.values.is_some()).on_hover_text(format!("A 16-bit PNG at {UNREAL_RES} x {UNREAL_RES} (a valid landscape size) and a .json with the import settings.")).clicked()
                 && let Some(path) = rfd::FileDialog::new().add_filter("16-bit PNG", &["png"]).set_file_name("heightmap.png").save_file() {
@@ -1255,6 +1264,9 @@ pub fn preview_project(project: &Path, size: u32) -> Result<image::RgbImage, Str
                 // Hillshade brightness, layer colours as the hue.
                 let lum = (rgb[0] + rgb[1] + rgb[2]) / (3.0 * 190.0);
                 rgb = [t[k * 4] as f32 * lum, t[k * 4 + 1] as f32 * lum, t[k * 4 + 2] as f32 * lum];
+                if s.water_m.is_some_and(|w| metres[k] < w) {
+                    rgb = [rgb[0] * 0.3, rgb[1] * 0.55 + 30.0, rgb[2] * 0.4 + 90.0];
+                }
             }
             img.put_pixel(x, y, image::Rgb(rgb.map(|v| v.clamp(0.0, 255.0) as u8)));
         }

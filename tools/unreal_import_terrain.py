@@ -30,7 +30,7 @@ import sys
 import unreal
 
 MESH_EXTENSIONS = (".obj", ".glb", ".gltf", ".fbx")
-LINEAR_WORDS = ("normal", "occlusion", "curvature", "height", "depth", "position", "thickness", "objects")
+LINEAR_WORDS = ("normal", "occlusion", "curvature", "height", "depth", "position", "thickness", "objects", "splat")
 FOLDER = "NoiserTerrain"
 
 
@@ -49,7 +49,7 @@ def _imported(task):
     return [unreal.load_asset(p) for p in task.get_editor_property("imported_object_paths")]
 
 
-def make_material(destination, defaults):
+def make_material(destination, defaults, layers=None):
     """The terrain material: colour from slope and height (VertexNormalWS, WorldPosition), times the AO texture parameter,
     lit up a little by the curvature texture parameter. `defaults` maps a parameter name to a linear texture to use as its
     default (a parameter's default must have the sampler's type, or the material does not compile)."""
@@ -121,6 +121,25 @@ def make_material(destination, defaults):
         n.set_editor_property("sampler_type", unreal.MaterialSamplerType.SAMPLERTYPE_LINEAR_COLOR)
         return n
 
+    # The Landscape tab's paint layers, baked per chunk and packed into one image (the first four, one per channel): when the
+    # export has them, the ground takes its colour from them instead of from slope and height.
+    layers = [l for l in (layers or []) if l.get("channel") in ("r", "g", "b", "a")]
+    if defaults.get("Splat") and layers:
+        splat = texture_parameter("Splat", 1500)
+        total = None
+        for k, layer in enumerate(layers):
+            r, g, b = (max(0.0, c) ** 2.2 for c in layer.get("color", [0.5, 0.5, 0.5]))  # the tab's colours are display colours
+            part = node(unreal.MaterialExpressionMultiply, -450, 1500 + 120 * k)
+            link(colour(r, g, b, 1500 + 120 * k), part, "A")
+            link(splat, part, "B", layer["channel"].upper())
+            if total is None:
+                total = part
+            else:
+                added = node(unreal.MaterialExpressionAdd, -250, 1500 + 120 * k)
+                link(total, added, "A")
+                link(part, added, "B")
+                total = added
+        base = total
     # Everything that is not ground (baked from the field: 0 on the terrain, 1 on objects) is stone, whatever its height. Only when
     # the export has such a map (a Bake custom map named Objects).
     if defaults.get("Objects"):
@@ -218,10 +237,11 @@ def import_terrain(manifest_path, destination="/Game/NoiserTerrain", level=None,
             unreal.EditorAssetLibrary.save_loaded_asset(asset)
 
     material = make_material(destination, {
+        "Splat": next((t for n, t in textures.items() if "_splat_" in n), None),
         "Occlusion": next((t for n, t in textures.items() if n.endswith("_ambient_occlusion")), None),
         "Curvature": next((t for n, t in textures.items() if n.endswith("_curvature")), None),
         "Objects": next((t for n, t in textures.items() if n.endswith("_objects")), None),
-    })
+    }, manifest.get("layers"))
 
     meshes = []
     for task in mesh_tasks:
@@ -238,8 +258,9 @@ def import_terrain(manifest_path, destination="/Game/NoiserTerrain", level=None,
                 unreal.EditorAssetLibrary.delete_asset(instance_path)
             instance = tools.create_asset(instance_name, destination + "/Materials", unreal.MaterialInstanceConstant, unreal.MaterialInstanceConstantFactoryNew())
             instance.set_editor_property("parent", material)
-            for parameter, suffix in (("Occlusion", "_ambient_occlusion"), ("Curvature", "_curvature"), ("Objects", "_objects")):
-                texture = textures.get((stem + suffix).lower())
+            splat_name = stem.lower().replace("terrain_", "terrain_splat_", 1) + "_combined"
+            for parameter, name in (("Occlusion", stem + "_ambient_occlusion"), ("Curvature", stem + "_curvature"), ("Objects", stem + "_objects"), ("Splat", splat_name)):
+                texture = textures.get(name.lower())
                 if texture:
                     unreal.MaterialEditingLibrary.set_material_instance_texture_parameter_value(instance, parameter, texture)
             unreal.MaterialEditingLibrary.update_material_instance(instance)

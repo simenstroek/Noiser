@@ -491,7 +491,10 @@ let (mut lo, mut hi) = if loaded.is_empty() && sdf_boxes.is_empty() { ([0.0; 3],
             let path = dir.join("terrain_chunks.json");
             let terrain = graph.nodes.values().filter_map(|n| if let NodeKind::LoadMesh(p) = &n.kind { Some(p) } else { None }).find(|p| crate::landscape_field::is_heightmap(&p.path));
             let water_cm = terrain.and_then(|p| crate::landscape_field::water_level_cm(&resolve_in(&self.base, &p.path)));
-            let json = serde_json::json!({"chunks_per_side": n, "unit_cm": terrain.map_or(1.0, |p| p.unit_cm), "water_level_cm": water_cm, "chunks": manifest});
+            // The paint layers baked per chunk: the first four of the terrain's maps are the channels of the "splat" image.
+            let colours = terrain.map(|p| crate::landscape_field::sidecar_layer_colours(&resolve_in(&self.base, &p.path))).unwrap_or_default();
+            let layers: Vec<_> = terrain.map(|p| p.maps.iter().take(4).enumerate().map(|(k, name)| serde_json::json!({"name": name, "channel": "rgba".chars().nth(k).map(String::from).unwrap_or_default(), "color": colours.iter().find(|(n, _)| n == name).map_or([0.5; 3], |(_, c)| *c)})).collect()).unwrap_or_default();
+            let json = serde_json::json!({"chunks_per_side": n, "unit_cm": terrain.map_or(1.0, |p| p.unit_cm), "water_level_cm": water_cm, "layers": layers, "chunks": manifest});
             std::fs::write(&path, serde_json::to_string_pretty(&json).unwrap_or_default()).map_err(|e| format!("{}: {e}", path.display()))?;
             (self.log)(&format!("wrote {}", path.display()));
         }

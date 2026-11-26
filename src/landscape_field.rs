@@ -56,6 +56,16 @@ pub fn sidecar_layers(path: &Path) -> Vec<(String, String)> {
     json["layers"].as_array().map(|a| a.iter().filter_map(|l| Some((l["name"].as_str()?.to_string(), l["file"].as_str()?.to_string()))).collect()).unwrap_or_default()
 }
 
+/// The paint layers beside a heightmap with the colour the Landscape tab painted each in (grey when the sidecar has none).
+pub fn sidecar_layer_colours(path: &Path) -> Vec<(String, [f32; 3])> {
+    let Ok(text) = std::fs::read_to_string(format!("{}.json", path.display())) else { return Vec::new() };
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) else { return Vec::new() };
+    json["layers"].as_array().map(|a| a.iter().filter_map(|l| {
+        let c = l["color"].as_array().filter(|c| c.len() == 3).map(|c| [0, 1, 2].map(|i| c[i].as_f64().unwrap_or(0.5) as f32)).unwrap_or([0.5; 3]);
+        Some((l["name"].as_str()?.to_string(), c))
+    }).collect()).unwrap_or_default()
+}
+
 /// `load`, with the paint layers called `names` (from the sidecar's `layers`) as weightmaps. A weightmap of another size
 /// is resampled to the heights'.
 pub fn load_with_maps(path: &Path, unit_cm: f32, names: &[String]) -> Result<Heights, String> {
@@ -244,11 +254,13 @@ pub fn terrain_graph(png: &Path, world_m: f32) -> crate::graph::Graph {
     let mut g = Graph::default();
     let chunks = (world_m / 500.0).round().clamp(1.0, 16.0) as u32;
     let folder = png.parent().unwrap_or(Path::new(".")).join("chunks").to_string_lossy().into_owned();
-    let land = g.add(NodeKind::LoadMesh(LoadMeshParams { path: png.to_string_lossy().into_owned(), unit_cm: 1.0, chunks, ..Default::default() }), [0.0, 0.0]);
+    // Paint layers beside the heightmap (the Landscape tab writes them for its Layer nodes) are loaded too and baked per chunk.
+    let layers: Vec<String> = sidecar_layers(png).into_iter().map(|(name, _)| name).take(8).collect();
+    let land = g.add(NodeKind::LoadMesh(LoadMeshParams { path: png.to_string_lossy().into_owned(), unit_cm: 1.0, chunks, maps: layers.clone(), ..Default::default() }), [0.0, 0.0]);
     let remesh = g.add(NodeKind::Remesh { triangles: 250_000, adaptivity: 1.0 }, [320.0, 0.0]);
     let uv = g.add(NodeKind::AutoUv(crate::uvgen::UvParams { planar: true, ..Default::default() }), [600.0, 0.0]);
     let out = g.add(NodeKind::OutMesh(OutParams { folder: folder.clone(), name: "terrain".into(), ..Default::default() }), [880.0, 0.0]);
-    let bake = g.add(NodeKind::Bake(crate::bake::Settings { channels: vec![crate::bake::Channel::Normal, crate::bake::Channel::Occlusion, crate::bake::Channel::Curvature], ..Default::default() }), [880.0, 160.0]);
+    let bake = g.add(NodeKind::Bake(crate::bake::Settings { channels: vec![crate::bake::Channel::Normal, crate::bake::Channel::Occlusion, crate::bake::Channel::Curvature], custom: layers.clone(), ..Default::default() }), [880.0, 160.0]);
     g.connect(land, remesh, 0);
     g.connect(remesh, uv, 0);
     g.connect(uv, out, 0);
@@ -257,6 +269,19 @@ pub fn terrain_graph(png: &Path, world_m: f32) -> crate::graph::Graph {
     for i in 0..3 {
         let img = g.add(NodeKind::OutImage(OutParams { folder: folder.clone(), name: "terrain".into(), ..Default::default() }), [1160.0, 160.0 + 90.0 * i as f32]);
         g.connect_from(bake, i, img, 0);
+    }
+    if !layers.is_empty() {
+        // Each layer's weights as a custom map, the first four packed into one RGBA "splat" image for the material.
+        for (k, name) in layers.iter().enumerate() {
+            let layer = g.add(NodeKind::TerrainLayer { name: name.clone() }, [600.0, 320.0 + 70.0 * k as f32]);
+            g.connect(layer, bake, 2 + k);
+        }
+        let combine = g.add(NodeKind::ImageCombine, [1160.0, 440.0]);
+        for k in 0..layers.len().min(4) {
+            g.connect_from(bake, 3 + k, combine, k);
+        }
+        let splat = g.add(NodeKind::OutImage(OutParams { folder, name: "terrain_splat".into(), ..Default::default() }), [1440.0, 440.0]);
+        g.connect(combine, splat, 0);
     }
     g
 }

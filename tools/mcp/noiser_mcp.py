@@ -15,20 +15,25 @@ EXE = os.environ.get("NOISER_EXE") or os.path.join(ROOT, "target", "release", "n
 
 TOOLS = {
     "noiser_schema": ("Every Noiser node kind with default settings, enum values and file formats (JSON). Read this before writing a graph.", {}, lambda a: ["--schema"]),
-    "noiser_describe": ("A .noisegraph/.meshgraph as a name-based spec (the format noiser_build takes).", {"file": "path of the graph"}, lambda a: ["--describe", a["file"]]),
+    "noiser_describe": ("A .noisegraph/.meshgraph/.landscape as a name-based spec (the format noiser_build takes; a .landscape also shows its settings).", {"file": "path of the graph"}, lambda a: ["--describe", a["file"]]),
     "noiser_build": (
-        "Build a graph file from a spec: {\"nodes\": {name: node}, \"edges\": [[from, to, input_port, (output_port)]]}. Settings left out keep defaults. Relative file paths in nodes are relative to the output file's folder. The result is validated.",
+        "Build a graph file from a spec: {\"nodes\": {name: node}, \"edges\": [[from, to, input_port, (output_port)]]}. Settings left out keep defaults. Relative file paths in nodes are relative to the output file's folder. The result is validated. For a .landscape output the spec may also have \"settings\": {seed, world_m, height_m, resolution, fit, water_m}; Landscape nodes (Erosion, Stamp, Heightmap, Select, Layer, Terrace, Craters, Map, Slope) are listed by noiser_schema.",
         {"spec": "the spec as a JSON object", "output": "path of the .noisegraph or .meshgraph to write"},
         None,
     ),
     "noiser_validate": ("Check a .noisegraph, .meshgraph, .sdf or .landscape file: errors and warnings.", {"file": "path"}, lambda a: ["--validate", a["file"]]),
     "noiser_preview": (
-        "Render a PNG of a .noisegraph (slice), .sdf (front/side/top) or mesh (.obj/.ply/.glb) so you can look at it (read the PNG afterwards).",
+        "Render a PNG of a .noisegraph (slice), .sdf (front/side/top), mesh (.obj/.ply/.glb) or .landscape (map from above and 3D view side by side, painted in the Layer colours, Erosion nodes run) so you can look at it (read the PNG afterwards).",
         {"file": "input path", "output": "PNG path", "size": "optional pixels per view", "up": "optional: 'y' when the mesh is Y-up (OBJ from the SDF side)"},
         lambda a: ["--preview", a["file"], a["output"]] + (["--size", str(a["size"])] if a.get("size") else []) + (["--up", a["up"]] if a.get("up") else []),
     ),
+    "noiser_terrain_graph": (
+        "Write the Mesh graph that cuts an exported heightmap into Nanite chunks (Load Mesh in cm with the paint layers loaded, Remesh 250k per chunk, planar UVs, normal/occlusion/curvature maps, the layers' weights baked per chunk and packed as terrain_splat). Edit it with noiser_describe / noiser_build, run it with noiser_run_meshgraph.",
+        {"heightmap": "the .png written by noiser_landscape_export (its .json beside it)", "output": "path of the .meshgraph to write"},
+        lambda a: ["--terrain-graph", a["heightmap"], a["output"]],
+    ),
     "noiser_run_meshgraph": ("Run a .meshgraph headless: writes its meshes and images. Can take minutes for big terrains.", {"file": "path of the .meshgraph"}, lambda a: ["--headless", "--mesh-graph", a["file"]]),
-    "noiser_landscape_export": ("Export a Landscape project's heightmap PNG (with a .json sidecar) headless.", {"project": "a .landscape file", "output": "PNG path"}, lambda a: ["--headless", "--landscape-export", a["project"], a["output"]]),
+    "noiser_landscape_export": ("Export a Landscape project's 4033 x 4033 heightmap PNG (with a .json sidecar), and one 8-bit weightmap PNG per Layer node (<name>_<layer>.png, listed in the sidecar), headless. Erosion nodes run first.", {"project": "a .landscape file", "output": "PNG path"}, lambda a: ["--headless", "--landscape-export", a["project"], a["output"]]),
 }
 
 
@@ -45,6 +50,10 @@ def run(name, args):
     else:
         p = subprocess.run([EXE, *TOOLS[name][2](args)], capture_output=True, text=True, timeout=3600)
     text = (p.stdout + p.stderr).strip()
+    if len(text) > 6000:  # a long run logs a line per chunk and map: keep the start and the end, which has the result
+        text = text[:1500] + f"
+... ({len(text) - 5500} characters left out; the full log is next to the graph file as .log) ...
+" + text[-4000:]
     return (text or "(no output)") + ("" if p.returncode == 0 else f"\n[exit code {p.returncode}]"), p.returncode != 0
 
 

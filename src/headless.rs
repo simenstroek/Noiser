@@ -440,9 +440,18 @@ struct Log {
 
 impl Log {
     fn line(&mut self, s: &str) {
-        let console = if cfg!(windows) { "CONOUT$" } else { "/dev/stdout" };
-        if let Ok(mut con) = std::fs::OpenOptions::new().write(true).open(console) {
-            let _ = writeln!(con, "{s}");
+        // Redirected output (a pipe, a file: how a tool or the MCP server runs us) arrives on stdout; on Windows this GUI
+        // program has no stdout when it is not redirected, so the console it borrowed is written to as well.
+        #[cfg(windows)]
+        {
+            let _ = writeln!(std::io::stdout(), "{s}");
+            if let Ok(mut con) = std::fs::OpenOptions::new().write(true).open("CONOUT$") {
+                let _ = writeln!(con, "{s}");
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = writeln!(std::io::stdout(), "{s}");
         }
         if let Some(f) = &mut self.file {
             let _ = writeln!(f, "{s}");

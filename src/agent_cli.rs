@@ -228,10 +228,12 @@ pub fn validate(path: &Path) -> Result<(Vec<String>, Vec<String>), String> {
                         errors.push(format!("missing \"{key}\""));
                     }
                 }
-                if let Some(g) = v.get("graph").and_then(|g| g.as_str().map(String::from).or_else(|| Some(g.to_string())))
-                    && let Err(e) = Graph::from_json(&g) {
-                        errors.push(format!("graph: {e}"));
+                if let Some(g) = v.get("graph").and_then(|g| g.as_str().map(String::from).or_else(|| Some(g.to_string()))) {
+                    match Graph::from_json(&g) {
+                        Err(e) => errors.push(format!("graph: {e}")),
+                        Ok(graph) => check_landscape(&graph, v.get("settings"), path.parent().unwrap_or(Path::new(".")), &mut errors, &mut warnings),
                     }
+                }
             }
             Err(e) => errors.push(e.to_string()),
         },
@@ -245,6 +247,27 @@ pub fn validate(path: &Path) -> Result<(Vec<String>, Vec<String>), String> {
         _ => return Err(format!("{}: expected a .noisegraph, .meshgraph, .sdf or .landscape file", path.display())),
     }
     Ok((errors, warnings))
+}
+
+/// Landscape project checks: missing files, unwired Layer and Stamp nodes, and the fit setting that misleads them.
+fn check_landscape(g: &Graph, settings: Option<&Value>, base: &Path, errors: &mut Vec<String>, warnings: &mut Vec<String>) {
+    let exists = |file: &str| !file.trim().is_empty() && (Path::new(file).is_absolute() && Path::new(file).exists() || base.join(file).exists());
+    for (id, n) in &g.nodes {
+        if n.muted {
+            continue;
+        }
+        match &n.kind {
+            NodeKind::Heightmap(p) if !exists(&p.file) => errors.push(format!("Heightmap node {id}: the file \"{}\" does not exist (relative paths are looked for next to the project)", p.file)),
+            NodeKind::Stamp(p) if !exists(&p.file) => errors.push(format!("Stamp node {id}: the file \"{}\" does not exist (relative paths are looked for next to the project)", p.file)),
+            NodeKind::Layer(l) if g.input_from(*id, 0).is_none() => warnings.push(format!("Layer node {id} ({}) has nothing wired in: its weight is 0 everywhere", l.name)),
+            NodeKind::Select { .. } | NodeKind::Erosion(_) | NodeKind::Terrace { .. } if g.input_from(*id, 0).is_none() => warnings.push(format!("{} node {id} has no input", kind_name(&n.kind))),
+            _ => {}
+        }
+    }
+    let fit = settings.and_then(|s| s.get("fit")).and_then(|f| f.as_bool()).unwrap_or(true);
+    if crate::landscape::fit_misleads(g, fit) {
+        warnings.push("\"fit\" is on: it rescales the terrain after Erosion, Stamp, Select and Layer nodes, so their heights and thresholds (in height units) are not the final metres. Set settings.fit to false for predictable heights".into());
+    }
 }
 
 fn check_graph(g: &Graph, mesh: bool, base: &Path, errors: &mut Vec<String>, warnings: &mut Vec<String>) {
@@ -494,7 +517,7 @@ fn preview_mesh(file: &Path, size: u32, y_up: bool) -> Result<image::RgbImage, S
 /// Runs one of the commands above when the arguments ask for it; returns the exit code.
 pub fn try_run() -> Option<i32> {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let at = args.iter().position(|a| matches!(a.as_str(), "--schema" | "--describe" | "--build" | "--validate" | "--preview"))?;
+    let at = args.iter().position(|a| matches!(a.as_str(), "--schema" | "--describe" | "--build" | "--validate" | "--preview" | "--terrain-graph"))?;
     crate::headless::attach_console();
     let arg = |i: usize, what: &str| args.get(at + i).cloned().ok_or(format!("{} needs {what}", args[at]));
     let result: Result<i32, String> = (|| match args[at].as_str() {
@@ -542,6 +565,16 @@ pub fn try_run() -> Option<i32> {
             report(&errors, &warnings);
             println!("wrote {}", out.display());
             Ok(i32::from(!errors.is_empty()))
+        }
+        "--terrain-graph" => {
+            // The Mesh graph that cuts an exported heightmap (with its sidecar, and paint layers beside it) into Nanite chunks.
+            let (png, out) = (PathBuf::from(arg(1, "an exported heightmap .png")?), PathBuf::from(arg(2, "an output .meshgraph")?));
+            let side = std::fs::read_to_string(format!("{}.json", png.display())).map_err(|e| format!("{}.json: {e} (the sidecar the Landscape tab writes next to the heightmap)", png.display()))?;
+            let world_m = serde_json::from_str::<Value>(&side).ok().and_then(|v| v["size_m"].as_f64()).ok_or("the sidecar has no size_m")? as f32;
+            let g = crate::landscape_field::terrain_graph(&png, world_m);
+            std::fs::write(&out, g.to_json()).map_err(|e| format!("{}: {e}", out.display()))?;
+            println!("wrote {} ({} nodes): edit it with --describe / --build, run it with --headless --mesh-graph", out.display(), g.nodes.len());
+            Ok(0)
         }
         "--validate" => {
             let (errors, warnings) = validate(Path::new(&arg(1, "a file")?))?;
