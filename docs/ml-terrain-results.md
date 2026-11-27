@@ -22,9 +22,9 @@ with the coarse input (each coarse cell keeps its mean height).
   site per type held out (`_HOLD`). The first stage uses the same tiles averaged to 4 m (`prep_lidar.py E:/_NoiserML/lidar 4
   E:/_NoiserML/lidar_4m`). Flow accumulation (priority-flood filling, multiple flow directions) is computed per whole tile.
   Plains was dropped: its farmland gave a field grid as "detail" on anything labelled plains.
-- **Gaea data** (`prep_gaea.py`): 27 terrains made in Gaea (5 x 2.5 km, 4096 px, so 1.22 m cells; 4.88 m for the first
+- **Gaea data** (`prep_gaea.py`): 25 terrains made in Gaea (5 x 2.5 km, 4096 px, so 1.22 m cells; 4.88 m for the first
   stage), giving four made-up types: craters, fantasy (two fantasy landscapes), rocky (rocky outcrops and sharp rocks) and
-  icelandic; snow-covered cliffs join alpine. One terrain per group is held out. Tiles keep their own cell size (`cell` in the
+  icelandic; snow-covered cliffs join alpine. One terrain per group is held out (none of the cliffs). Tiles keep their own cell size (`cell` in the
   npz), which the model is conditioned on. The canyon export was a colour image, not heights, and is not used.
 - **Inputs** (`terrain_ml.py`): the coarse height upsampled smoothly (bicubic, a light blur and 4 back-projection passes:
   plain bicubic of block means leaves a strong 4-cell grid, [before and after](ml/upsample_grid_fix.png)), its slope,
@@ -98,8 +98,8 @@ crops each, 8 steps:
 Both models make less detail than real terrain (the right kind, in the right places, but weaker), and the current one about
 12% less than the first. Most of that 12% is the residual's normalising scale, which the Gaea tiles lowered (0.343 against
 0.383 in the first stage, 0.177 against 0.185 in the second): run with the first model's scales, the current one is within
-about 5 to 10% of it everywhere. Two levers in the app make up for it: amount above 1 (the slider goes to 2), and more steps
-(32 steps instead of 8 add 20 to 30% detail, at 4 times the time). In exchange it has the four Gaea types, and hills no longer
+about 15% of it everywhere. Two levers in the app make up for it: amount above 1 (the slider goes to 2), and more steps
+(32 steps instead of 8 added 20 to 30% detail to the first model, at 4 times the time). In exchange it has the four Gaea types, and hills no longer
 draws plains' field grid. Sheets (256 m corners at 1 m): [one noise heightmap as every type](ml/types16.png), [held-out
 lidar: real, first model, current](ml/types16_lidar_vs_first.png), [noise-made inputs: first model, current](ml/noise_inputs16.png).
 
@@ -118,7 +118,7 @@ block means, and straight compass-line channels from single-direction (D8) flow 
 2. **Data**: 15 training tiles from one country. More sites, and landform labels per patch instead of site labels.
 3. **Artist input**: tested on 12 noise-made heightmaps (ridged, Worley, terraces, warped noise) as well as Gaea's. Training
    with noise heightmaps added to a share of the coarse inputs (`flow.py --noise`, 36 maps; the target detail stays the
-   real terrain's) made the detail about 20% weaker everywhere, noise inputs included, so it is off.
+   real terrain's) gave no more detail on held-out lidar than the same training without it, so it is off.
 4. **Metrics**: the per-type loss and visual side-by-sides only.
 5. **Port**: `flow.enhance` is the reference to test a WGSL version against.
 6. **Licensing**: USGS 3DEP is public domain, so trained weights carry no data licence; the earlier Copernicus data is no
