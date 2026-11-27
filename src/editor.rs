@@ -168,6 +168,8 @@ pub fn title(kind: &NodeKind) -> String {
         NodeKind::Stamp(s) => std::path::Path::new(&s.file).file_stem().map_or("Stamp".into(), |f| format!("Stamp: {}", f.to_string_lossy())),
         NodeKind::Heightmap(h) => std::path::Path::new(&h.file).file_stem().map_or("Heightmap".into(), |s| format!("Heightmap: {}", s.to_string_lossy())),
         NodeKind::Layer(l) => if l.name.is_empty() { "Layer".into() } else { format!("Layer: {}", l.name) },
+        NodeKind::Erosion(e) if e.kind == crate::landscape_erosion::ErosionKind::Detail => "Learned Detail".into(),
+        NodeKind::Erosion(e) if e.kind == crate::landscape_erosion::ErosionKind::Blur => "Blur".into(),
         NodeKind::Erosion(e) => if e.preset.is_empty() { "Erosion".into() } else { format!("Erosion: {}", e.preset) },
         NodeKind::Noise(n) => n.kind.name().into(),
         NodeKind::OutDensity => "Density Output".into(),
@@ -257,6 +259,8 @@ fn header_tint(kind: &NodeKind) -> Color32 {
         // The Landscape tab's own nodes: earth tones, like the tab.
         NodeKind::Mask { .. } => Color32::from_rgb(130, 82, 52),
         NodeKind::Slope { .. } => Color32::from_rgb(112, 96, 58),
+        NodeKind::Erosion(e) if e.kind == crate::landscape_erosion::ErosionKind::Detail => Color32::from_rgb(110, 80, 140),
+        NodeKind::Erosion(e) if e.kind == crate::landscape_erosion::ErosionKind::Blur => Color32::from_rgb(90, 100, 110),
         NodeKind::Erosion(_) => Color32::from_rgb(70, 110, 150),
         NodeKind::Select { .. } => Color32::from_rgb(120, 100, 60),
         NodeKind::Terrace { .. } | NodeKind::Craters(_) => Color32::from_rgb(112, 96, 58),
@@ -313,6 +317,9 @@ fn palette() -> Vec<(&'static str, NodeKind)> {
             ("Terrace", NodeKind::Terrace { steps: 8.0, sharpness: 4.0 }),
             ("Craters", NodeKind::Craters(Default::default())),
             ("Erosion", NodeKind::Erosion(Default::default())),
+            // An Erosion underneath (same caching, Run and outputs), shown as its own node.
+            ("Learned Detail", NodeKind::Erosion(crate::landscape_erosion::Erosion { kind: crate::landscape_erosion::ErosionKind::Detail, ..Default::default() })),
+            ("Blur", NodeKind::Erosion(crate::landscape_erosion::Erosion { kind: crate::landscape_erosion::ErosionKind::Blur, ..Default::default() })),
             ("Layer", NodeKind::Layer(Default::default())),
             ("Noise Graph", NodeKind::NoiseGraph(Default::default())),
         ]);

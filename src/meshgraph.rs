@@ -183,7 +183,9 @@ pub fn headless_gpu() -> Result<(eframe::wgpu::Device, eframe::wgpu::Queue), Str
     use eframe::wgpu;
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor { backends: crate::view::preferred_backends(), ..wgpu::InstanceDescriptor::new_without_display_handle() });
     let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default())).map_err(|e| format!("no GPU adapter: {e}"))?;
-    pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).map_err(|e| format!("no GPU device: {e}"))
+    let mut desc = wgpu::DeviceDescriptor::default();
+    crate::view::big_buffers(&adapter, &mut desc.required_limits);
+    pollster::block_on(adapter.request_device(&desc)).map_err(|e| format!("no GPU device: {e}"))
 }
 
 /// What a node of the operation part of the graph produced.

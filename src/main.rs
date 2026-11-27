@@ -31,6 +31,7 @@ mod landscape_layers;
 mod landscape_heightmap;
 mod landscape_stamp;
 mod landscape_wind;
+mod landscape_detail;
 mod terrain_maps;
 mod scatter;
 mod landscape_masks;
@@ -549,6 +550,9 @@ impl App {
         }
         if let Some(n) = select_arg.filter(|n| app.workspace == meshworkspace::Workspace::Mesh && app.mesh_ws.graph.nodes.contains_key(n)) {
             app.mesh_ws.editor.selected.insert(n);
+        }
+        if let Some(n) = select_arg.filter(|n| app.workspace == meshworkspace::Workspace::Landscape && app.landscape.graph.nodes.contains_key(n)) {
+            app.landscape.editor.selected.insert(n);
         }
         if let Some(n) = select_arg.filter(|n| app.graph.nodes.contains_key(n)) {
             app.editor.selected.insert(n);

@@ -94,6 +94,8 @@ pub fn prepare(
     let n = s.resolution.max(2);
     lower_heightmaps(&mut g, &mut maps, base, s.height_m)?;
     lower_stamps(&mut g, &mut maps, base, s)?;
+    // The result key behind each eroded map: a later erosion reading it hashes that, not just the map's fixed name.
+    let mut map_keys: HashMap<String, u64> = HashMap::new();
     loop {
         let erosion: Vec<NodeId> = g.nodes.iter().filter(|(_, node)| !node.muted && matches!(node.kind, NodeKind::Erosion(_))).map(|(id, _)| *id).collect();
         // The first whose input has no Erosion node of its own before it.
@@ -109,6 +111,9 @@ pub fn prepare(
             for u in upstream(&g, src) {
                 let node = &g.nodes[&u];
                 (u, serde_json::to_string(&node.kind).unwrap_or_default()).hash(&mut h);
+                if let NodeKind::Mask { name } = &node.kind {
+                    map_keys.get(name).hash(&mut h);
+                }
                 for p in 0..node.kind.input_count() {
                     g.input_from(u, p).hash(&mut h);
                 }
@@ -140,6 +145,7 @@ pub fn prepare(
                 None => (2, Arc::new(vec![0.0; 4])),
             };
             maps.insert(map_name(id, port), side, data, Source::Erosion);
+            map_keys.insert(map_name(id, port), eroded.as_ref().map_or(0, |e| e.key));
         }
         let pos = g.nodes[&id].pos;
         let readers: Vec<NodeId> = (0..4).map(|port| g.add(NodeKind::Mask { name: map_name(id, port) }, pos)).collect();
@@ -248,7 +254,12 @@ fn run_erosion(
     // Erosion works in metres: one unit of the graph is the height setting.
     let k = s.height_m.max(1e-3);
     let metres: Vec<f32> = values.iter().map(|v| v * k).collect();
-    let result = erode(device, queue, &metres, n, s.world_m / (n - 1) as f32, params, progress)?;
+    let cell_m = s.world_m / (n - 1) as f32;
+    let result = if params.kind == crate::landscape_erosion::ErosionKind::Detail {
+        crate::landscape_detail::detail(device, queue, &metres, n, cell_m, params, s.seed, progress)?
+    } else {
+        erode(device, queue, &metres, n, cell_m, params, progress)?
+    };
     let extra = ErosionMaps::new(&metres, &result);
     let height: Vec<f32> = result.heights.iter().map(|m| m / k).collect();
     Ok(Eroded { key, side: n, outputs: [Arc::new(height), Arc::new(extra.flow), Arc::new(extra.deposition), Arc::new(extra.wear)] })
@@ -304,6 +315,25 @@ mod tests {
             }
         }
         assert_eq!(prep(&gpu, &g3, &cache, &BTreeSet::new()).states[&ero], State::Ran);
+    }
+
+    #[test]
+    fn a_change_before_a_chain_of_erosions_reruns_all_of_them() {
+        let Some(gpu) = gpu() else { return eprintln!("no GPU adapter; skipping") };
+        let (mut g, first) = graph(true);
+        let out = g.nodes.iter().find(|(_, n)| matches!(n.kind, NodeKind::OutDensity)).map(|(id, _)| *id).unwrap();
+        let second = g.add(NodeKind::Erosion(Erosion { iterations: 20, thermal_iterations: 2, ..Default::default() }), [500.0, 0.0]);
+        g.connect(first, second, 0);
+        g.connect(second, out, 0);
+        let cache = ErosionCache::default();
+        prep(&gpu, &g, &cache, &BTreeSet::new());
+        for node in g.nodes.values_mut() {
+            if let NodeKind::Noise(p) = &mut node.kind {
+                p.scale = 5.0;
+            }
+        }
+        let again = prep(&gpu, &g, &cache, &BTreeSet::new());
+        assert_eq!((again.states[&first], again.states[&second]), (State::Ran, State::Ran));
     }
 
     #[test]
