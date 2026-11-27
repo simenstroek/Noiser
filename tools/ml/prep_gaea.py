@@ -7,6 +7,7 @@ Each export is <folder>/*.exr, one float channel of normalised height. Every pro
 range at 4096 px (read from its .terrain file), so cells are 1.22 m (4.88 m for the first stage). Pixels at the exact
 minimum or maximum are marked invalid: Gaea clamps there, and clamped flats are not terrain. The type comes from the folder
 name (GROUPS); folders not in GROUPS are skipped (canyonWithRiverBed's export is a colour image, not heights).
+More variations of a project: tools/ml/gaea_seeds.ps1 builds it with other mutation seeds through Gaea's Build Swarm.
 """
 
 import glob
@@ -20,7 +21,7 @@ import OpenEXR
 from prep_lidar import COARSE, flow_accumulation
 
 GROUPS = {"Craters": "craters", "Fantasy01": "fantasy", "Fantasy02": "fantasy", "icelandic": "icelandic",
-          "rockyOutcrops": "rocky", "sharpRocky": "rocky", "snowCoveredCliffs": "alpine"}
+          "rockyOutcrops": "rocky", "sharpRocky": "rocky", "snowCoveredCliffs": "alpine", "Alpine": "alpine"}
 HOLD = {"Craters004", "Fantasy01016", "Fantasy02020", "icelandic004", "rockyOutcrops004", "sharpRocky004"}  # one per project
 
 

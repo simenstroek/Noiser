@@ -31,15 +31,18 @@ def load_tiles(data_dir, holdout):
         if is_hold != holdout or kind not in out:
             continue
         z = np.load(path)
-        valid = z["valid"].astype(np.float32)
-        # Integral image of validity: the share of valid cells under any window in O(1).
-        integral = np.pad(valid.cumsum(0).cumsum(1), ((1, 0), (1, 0)))
+        valid = z["valid"]
+        # Integral image of validity: the share of valid cells under any window in O(1). None when every cell is valid
+        # (most Gaea tiles): it is as big as the tile.
+        integral = None if valid.all() else np.pad(valid.astype(np.float32).cumsum(0).cumsum(1), ((1, 0), (1, 0)))
         cell = float(z["cell"]) if "cell" in z else CELL  # Gaea tiles store theirs (1.22 m); the lidar is CELL
         out[kind].append((z["dem"], z["acc"], integral, name, cell))
     return {k: v for k, v in out.items() if v}
 
 
 def valid_share(integral, y, x, size):
+    if integral is None:
+        return 1.0
     return (integral[y + size, x + size] - integral[y, x + size] - integral[y + size, x] + integral[y, x]) / (size * size)
 
 
@@ -73,7 +76,13 @@ def sample_batch(tiles, n, rng, scale_choices=(1, 2), fixed_type=None, noise=Non
         kind = fixed_type if fixed_type else kinds[rng.integers(len(kinds))]
         if kind not in tiles:
             continue
-        dem, acc, integral, _, tile_cell = tiles[kind][rng.integers(len(tiles[kind]))]
+        # A type with both real lidar and Gaea tiles (alpine) draws from each half the time, so many Gaea builds do not
+        # outvote the few lidar sites.
+        pool = tiles[kind]
+        lidar = [t for t in pool if "__gaea_" not in t[3]]
+        if lidar and len(lidar) < len(pool):
+            pool = lidar if rng.random() < 0.5 else [t for t in pool if "__gaea_" in t[3]]
+        dem, acc, integral, _, tile_cell = pool[rng.integers(len(pool))]
         s = int(rng.choice(scale_choices))  # 2: the same terrain read at twice the cell size
         size = PATCH * s
         if dem.shape[0] <= size or dem.shape[1] <= size:
@@ -171,8 +180,12 @@ def features(coarse_m, acc, cell_m):
 
     Returns (x [n,4,P,P] input channels, sigma [n] metres, mean [n] metres). cell_m [n] is the fine cell size in metres.
     """
-    n = coarse_m.shape[0]
-    up = upsample(coarse_m)
+    return features_up(upsample(coarse_m), acc, cell_m)
+
+
+def features_up(up, acc, cell_m):
+    """features() from a height already on the fine grid [n,1,P,P] (the sharpen stage's soft input)."""
+    n = up.shape[0]
     mean = up.mean(dim=(1, 2, 3), keepdim=True)
     sigma = torch.maximum(up.flatten(1).std(dim=1), 0.1 * cell_m).view(n, 1, 1, 1)  # floor: 0.1 m at 1 m cells
     h = (up - mean) / sigma

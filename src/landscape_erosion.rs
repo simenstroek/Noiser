@@ -24,8 +24,33 @@ pub enum ErosionKind {
     Water,
     /// Saltation by wind: windward faces wear, dunes build in the lee (`landscape_wind`).
     Wind,
-    /// Learned detail of real terrain, added to a coarser copy of the input (`landscape_detail`).
+    /// Learned detail of real terrain, added to a coarser copy of the input (`landscape_detail`); shown as its own node,
+    /// Learned Detail.
     Detail,
+    /// A Gaussian blur: softens hard edges (before Learned Detail, say); shown as its own node, Blur.
+    Blur,
+}
+
+/// One stage of Learned Detail.
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct DetailStage {
+    pub on: bool,
+    /// Sampling steps (more: slower; 8 looked the same as 32 in tests).
+    pub steps: u32,
+    /// How strongly the chosen terrain type is pushed away from an average one (1: the model as trained; more: the
+    /// types differ more and the detail is stronger; each step then costs twice).
+    pub guidance: f32,
+    /// How much of this stage's added detail is kept: 0 none, 1 all, above 1 strengthened.
+    pub amount: f32,
+    /// How closely the input's shape is kept: 1 exactly; lower lets the model reshape it (landforms stage only).
+    pub adherence: f32,
+}
+
+impl Default for DetailStage {
+    fn default() -> Self {
+        DetailStage { on: true, steps: 8, guidance: 2.0, amount: 1.0, adherence: 1.0 }
+    }
 }
 
 /// The settings of an Erosion node (Landscape graph). The grid it erodes on is the terrain's working resolution.
@@ -62,12 +87,11 @@ pub struct Erosion {
     pub talus_deg: f32,
     /// Detail: the kind of real terrain whose detail is learned (one of `landscape_detail::TYPES`).
     pub detail_type: String,
-    /// Detail: how many times coarser the input is read before detail is added back (4 or 16).
-    pub detail_scale: u32,
-    /// Detail: sampling steps (more: slower; 8 looked the same as 32 in tests).
-    pub detail_steps: u32,
-    /// Detail: 0 keeps the input, 1 is the full result.
-    pub detail_amount: f32,
+    /// Detail: the stages, coarse to fine: 16x to 4x (landforms), 4x to the grid (fine detail), sharpen (the finest
+    /// grain, on the grid itself).
+    pub detail_stages: [DetailStage; 3],
+    /// Blur: the Gaussian's radius (standard deviation) in metres.
+    pub blur_m: f32,
     /// Run again by itself when what feeds it changes (otherwise it keeps its last result, marked out of date, until
     /// Run is pressed).
     pub auto: bool,
@@ -77,7 +101,7 @@ pub struct Erosion {
 
 impl Default for Erosion {
     fn default() -> Self {
-        Erosion { kind: ErosionKind::Water, wind_deg: 0.0, wind_iterations: 150, wind_lift: 0.04, wind_hop_m: 24.0, wind_shadow_deg: 12.0, wind_deposit: 0.15, iterations: 1000, rain: 0.04, capacity: 0.05, dissolve: 0.05, deposit: 0.05, evaporation: 0.05, thermal_iterations: 20, talus_deg: 35.0, detail_type: "hills".into(), detail_scale: 16, detail_steps: 8, detail_amount: 1.0, auto: true, preset: String::new() }
+        Erosion { kind: ErosionKind::Water, wind_deg: 0.0, wind_iterations: 150, wind_lift: 0.04, wind_hop_m: 24.0, wind_shadow_deg: 12.0, wind_deposit: 0.15, iterations: 1000, rain: 0.04, capacity: 0.05, dissolve: 0.05, deposit: 0.05, evaporation: 0.05, thermal_iterations: 20, talus_deg: 35.0, detail_type: "hills".into(), detail_stages: Default::default(), blur_m: 10.0, auto: true, preset: String::new() }
     }
 }
 
@@ -139,6 +163,18 @@ mod preset_tests {
     }
 
     #[test]
+    fn blur_softens_a_step_and_keeps_flat_ground() {
+        let Some(gpu) = crate::gpu_tests::gpu() else { return eprintln!("no GPU adapter; skipping") };
+        let n = 64;
+        let step: Vec<f32> = (0..n * n).map(|k| if k % n < n / 2 { 0.0 } else { 10.0 }).collect();
+        let e = Erosion { kind: ErosionKind::Blur, blur_m: 4.0, ..Default::default() };
+        let r = erode(&gpu.device, &gpu.queue, &step, n, 1.0, &e, &Default::default()).unwrap();
+        let row = &r.heights[10 * n..11 * n];
+        assert!((row[0] - 0.0).abs() < 1e-4 && (row[n - 1] - 10.0).abs() < 1e-4, "far from the step stays put");
+        assert!(row[n / 2 - 2] > 1.0 && row[n / 2 + 1] < 9.0, "the step is softened: {:?}", &row[n / 2 - 3..n / 2 + 3]);
+    }
+
+    #[test]
     fn a_preset_missing_settings_gets_the_defaults_and_reset_keeps_auto() {
         let base = Erosion { iterations: 7, auto: false, ..Default::default() };
         let loaded = base.with_preset("{\"noiser_erosion\": 1, \"settings\": {\"rain\": 0.2, \"resolution\": 4096}}", "p").unwrap();
@@ -151,6 +187,12 @@ mod preset_tests {
 /// the simulation settings. Whether its result is up to date, and Run, are shown by the Landscape tab beside this.
 pub fn node_ui(ui: &mut eframe::egui::Ui, e: &mut Erosion) {
     use eframe::egui;
+    if e.kind == ErosionKind::Detail {
+        return detail_ui(ui, e);
+    }
+    if e.kind == ErosionKind::Blur {
+        return blur_ui(ui, e);
+    }
     let d = Erosion::default();
     let before = e.clone();
     ui.horizontal(|ui| {
@@ -193,30 +235,13 @@ pub fn node_ui(ui: &mut eframe::egui::Ui, e: &mut Erosion) {
         }
     });
     crate::row(ui, &mut e.kind, d.kind, |ui, v| {
-        egui::ComboBox::from_id_salt("erosion kind").selected_text(match v { ErosionKind::Water => "Water", ErosionKind::Wind => "Wind", ErosionKind::Detail => "Detail" }).show_ui(ui, |ui| {
+        egui::ComboBox::from_id_salt("erosion kind").selected_text(match v { ErosionKind::Water => "Water", ErosionKind::Wind => "Wind", ErosionKind::Detail => "Learned Detail", ErosionKind::Blur => "Blur" }).show_ui(ui, |ui| {
             ui.selectable_value(v, ErosionKind::Water, "Water: rain, rivers and slides");
             ui.selectable_value(v, ErosionKind::Wind, "Wind: dunes and wear");
-            ui.selectable_value(v, ErosionKind::Detail, "Detail: learned from real terrain");
         });
     });
     ui.checkbox(&mut e.auto, "run by itself").on_hover_text("Run again when what feeds this node changes. Off: the last result stays (marked out of date) until you press Run.");
-    if e.kind == ErosionKind::Detail {
-        crate::row(ui, &mut e.detail_type, d.detail_type.clone(), |ui, v| {
-            egui::ComboBox::from_id_salt("detail type").selected_text(v.clone()).show_ui(ui, |ui| {
-                for t in crate::landscape_detail::TYPES {
-                    ui.selectable_value(v, t.to_string(), t);
-                }
-            }).response.on_hover_text("The kind of real terrain whose detail is added.");
-        });
-        crate::row(ui, &mut e.detail_scale, d.detail_scale, |ui, v| {
-            egui::ComboBox::from_id_salt("detail scale").selected_text(format!("{v}x")).show_ui(ui, |ui| {
-                ui.selectable_value(v, 4, "4x: fine detail only");
-                ui.selectable_value(v, 16, "16x: shapes and detail");
-            }).response.on_hover_text("The input is read this many times coarser, then detail is added back to the working grid. The model was trained for 1 m output cells (a 1 km terrain at 1024).");
-        });
-        crate::row(ui, &mut e.detail_steps, d.detail_steps, |ui, v| _ = ui.add(egui::DragValue::new(v).range(1..=64).speed(0.2).prefix("steps ")).on_hover_text("Sampling steps: more is slower."));
-        crate::row(ui, &mut e.detail_amount, d.detail_amount, |ui, v| _ = ui.add(egui::DragValue::new(v).range(0.0..=2.0).speed(0.01).prefix("amount ")).on_hover_text("0 keeps the input, 1 is the full result."));
-    } else if e.kind == ErosionKind::Wind {
+    if e.kind == ErosionKind::Wind {
         crate::row(ui, &mut e.wind_deg, d.wind_deg, |ui, v| _ = ui.add(egui::DragValue::new(v).speed(1.0).prefix("blows towards ").suffix("°")).on_hover_text("Counter-clockwise from east (the +x side of the terrain): 90 blows towards north."));
         crate::row(ui, &mut e.wind_iterations, d.wind_iterations, |ui, v| _ = ui.add(egui::DragValue::new(v).range(0..=20000).speed(5.0).prefix("iterations ")));
         crate::row(ui, &mut e.wind_lift, d.wind_lift, |ui, v| _ = ui.add(egui::DragValue::new(v).range(0.0..=1.0).speed(0.001).prefix("lift ").suffix(" m")).on_hover_text("How much ground the wind picks up per iteration where it reaches it."));
@@ -475,10 +500,55 @@ pub struct ErosionResult {
     pub flow: Vec<f32>,
 }
 
+/// The Blur node's settings: the radius, and whether it runs by itself.
+fn blur_ui(ui: &mut eframe::egui::Ui, e: &mut Erosion) {
+    use eframe::egui;
+    let d = Erosion::default();
+    ui.checkbox(&mut e.auto, "run by itself").on_hover_text("Run again when what feeds this node changes. Off: the last result stays (marked out of date) until you press Run.");
+    crate::row(ui, &mut e.blur_m, d.blur_m, |ui, v| _ = ui.add(egui::DragValue::new(v).range(0.0..=100.0).speed(0.2).prefix("radius ").suffix(" m")).on_hover_text("The Gaussian's radius (standard deviation) in metres: hard edges and steps soften over about twice this."));
+}
+
+/// The Learned Detail node's settings: the terrain type, then each stage on or off with its own steps, guidance and amount.
+fn detail_ui(ui: &mut eframe::egui::Ui, e: &mut Erosion) {
+    use eframe::egui;
+    let d = Erosion::default();
+    ui.checkbox(&mut e.auto, "run by itself").on_hover_text("Run again when what feeds this node changes. Off: the last result stays (marked out of date) until you press Run.");
+    crate::row(ui, &mut e.detail_type, d.detail_type.clone(), |ui, v| {
+        egui::ComboBox::from_id_salt("detail type").selected_text(v.clone()).show_ui(ui, |ui| {
+            for t in crate::landscape_detail::TYPES {
+                ui.selectable_value(v, t.to_string(), t);
+            }
+        }).response.on_hover_text("The kind of real terrain whose detail is added.");
+    });
+    let names = [("Landforms: 16x to 4x", "Reads the input 16 times coarser and adds ridges, gullies and slopes back to 4 times coarser. Trained for 4 m output cells."),
+                 ("Fine detail: 4x to the grid", "Reads the input (or the stage before) 4 times coarser and adds the finest detail back to the working grid. Trained for 1 m cells (a 1 km terrain at 1024)."),
+                 ("Sharpen: finest grain", "Adds the finest grain on the working grid itself (no coarser copy), to the stages above or to the input. Trained for 1 m cells. Experimental: an early model.")];
+    for (i, (name, tip)) in names.iter().enumerate() {
+        let (s, ds) = (&mut e.detail_stages[i], d.detail_stages[i]);
+        ui.separator();
+        ui.checkbox(&mut s.on, *name).on_hover_text(*tip);
+        ui.add_enabled_ui(s.on, |ui| {
+            ui.push_id(i, |ui| {
+                crate::row(ui, &mut s.steps, ds.steps, |ui, v| _ = ui.add(egui::DragValue::new(v).range(1..=64).speed(0.2).prefix("steps ")).on_hover_text("Sampling steps: more is slower."));
+                crate::row(ui, &mut s.guidance, ds.guidance, |ui, v| _ = ui.add(egui::DragValue::new(v).range(0.0..=8.0).speed(0.01).prefix("guidance ")).on_hover_text("How strongly the terrain type shows: 1 is the model as trained; higher pushes it away from an average terrain, so the types look more different and the detail stronger. Other than 1, each step costs twice as long."));
+                crate::row(ui, &mut s.amount, ds.amount, |ui, v| _ = ui.add(egui::DragValue::new(v).range(0.0..=3.0).speed(0.01).prefix("amount ")).on_hover_text("How much of this stage's detail is kept: 0 none, 1 all, above 1 strengthened."));
+                if i == 0 {
+                    crate::row(ui, &mut s.adherence, ds.adherence, |ui, v| _ = ui.add(egui::DragValue::new(v).range(0.0..=1.0).speed(0.005).prefix("adherence ")).on_hover_text("How closely the input's shape is followed: 1 keeps it exactly; lower lets the model reshape it into landforms of the chosen type. Around 0.9 the shapes stay and the ground gets rougher; at 0.75 and below, hills up to about a kilometre across are replaced. Below 1 the result no longer matches the input exactly."));
+                }
+            });
+        });
+    }
+}
+
 /// Erodes `heights` (`n` x `n` metres, rows along y) on a grid whose cells are `cell_m` metres apart.
 pub fn erode(device: &wgpu::Device, queue: &wgpu::Queue, heights: &[f32], n: usize, cell_m: f32, e: &Erosion, progress: &Progress) -> Result<ErosionResult, String> {
     if e.kind == ErosionKind::Wind {
         return crate::landscape_wind::erode_wind(device, queue, heights, n, cell_m, e, progress);
+    }
+    if e.kind == ErosionKind::Blur {
+        let sigma = e.blur_m / cell_m;
+        let heights = if sigma < 0.1 || heights.len() != n * n { heights.to_vec() } else { crate::landscape_detail::gauss(heights, n, n, sigma) };
+        return Ok(ErosionResult { heights, flow: vec![0.0; n * n] });
     }
     if e.kind == ErosionKind::Detail {
         return crate::landscape_detail::detail(device, queue, heights, n, cell_m, e, 0, progress);

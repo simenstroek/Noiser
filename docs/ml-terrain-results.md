@@ -26,13 +26,19 @@ with the coarse input (each coarse cell keeps its mean height).
   stage), giving four made-up types: craters, fantasy (two fantasy landscapes), rocky (rocky outcrops and sharp rocks) and
   icelandic; snow-covered cliffs join alpine. One terrain per group is held out (none of the cliffs). Tiles keep their own cell size (`cell` in the
   npz), which the model is conditioned on. The canyon export was a colour image, not heights, and is not used.
+  `gaea_seeds.ps1` rebuilds eight projects (Alpine, Craters, both Fantasy, icelandic, rocky outcrops, sharp rocky, cliffs)
+  with ten more mutation seeds each through Gaea's Build Swarm: 81 more terrains. Within a type, batches draw lidar and Gaea
+  tiles half and half, so alpine (now mostly Gaea) stays real. `gaea_add_export.py` adds an Export node to projects without
+  one (Gaea's examples); unused so far (the one build tried timed out).
 - **Inputs** (`terrain_ml.py`): the coarse height upsampled smoothly (bicubic, a light blur and 4 back-projection passes:
   plain bicubic of block means leaves a strong 4-cell grid, [before and after](ml/upsample_grid_fix.png)), its slope,
   curvature, log flow accumulation, the terrain type, the relief and the cell size. Training inputs are randomly blurred and
   given smooth noise, so they are less like clean block averages.
-- **Model** (`flow.py`): a 3.0 M parameter U-Net (6 MB in fp16, 4 levels, receptive field a few hundred cells) trained by
-  rectified flow matching to generate the residual (fine minus the smooth upsample), 16 000 steps per stage (62 min on an
-  RTX 4070 SUPER; 11 types, so about the same steps per type as the first 8-type model's 12 000), EMA weights. Inference: 8 Euler steps from noise (32 look the same); the residual is projected to zero mean
+- **Model** (`flow.py`): a 4.7 M parameter U-Net (40, 80, 120, 160 channels, `--chs`; 9 MB in fp16, 4 levels, receptive
+  field a few hundred cells) trained by rectified flow matching to generate the residual (fine minus the smooth upsample),
+  24 000 steps per stage (about 2 h each on an RTX 4070 SUPER), EMA weights. One sample in ten is trained with the mean
+  type embedding instead of its own (`--drop_type 0.1`), so guidance has a learned "any terrain" to push away from. The
+  channel widths are stored in the weights; 48 to 192 channels did not fit in 12 GB. Inference: 8 Euler steps from noise (32 look the same); the residual is projected to zero mean
   over every coarse cell. About 0.2 M multiply-adds per output pixel per step.
 - **Whole maps** (`flow.enhance`): 256-cell tiles share one noise field and their velocities are blended at every step, so
   there are no seams (mean height step at joins 0.45 m against 0.47 m elsewhere). Agreement with the input: 3 cm RMS,
@@ -42,11 +48,28 @@ with the coarse input (each coarse cell keeps its mean height).
 
 ## In the app
 
-The Erosion node's third kind, **Detail** (`src/landscape_detail.rs`): settings terrain type (alpine, desert, badlands,
-hills, volcanic, karst, coastal from lidar; craters, fantasy, rocky, icelandic from Gaea), 4x or 16x, steps (default 8)
-and amount (0 keeps the input, 1 is the full result). The input is averaged to 4 or 16 times coarser cells on the working
-grid, and detail is generated back to the working grid; the seed is the terrain's. Trained for 1 m output cells: a 1 km
-terrain at working resolution 1024. Flow is the input's flow accumulation; deposition and wear are where the result rose
+The **Learned Detail** node (`src/landscape_detail.rs`; in files an Erosion node of kind Detail, so it shares erosion's
+cached results, Run and outputs): terrain type (alpine, desert, badlands, hills, volcanic, karst, coastal from lidar;
+craters, fantasy, rocky, icelandic from Gaea), then each stage on or off with its own steps (default 8), guidance (default
+2, up to 8) and amount (how much of that stage's detail is kept, up to 3). Landforms (16x to 4x) and fine detail (4x to the
+grid): both on read the input 16x coarser, one alone 4x. Sharpen (the third stage, experimental: an early 4 000-step
+model) adds the finest grain on the grid itself, trained on lidar blurred by 1 to 2.5 cells (`flow.py --sharpen`).
+**Adherence** (landforms stage): 1 keeps the input's coarse shape exactly; lower lets the model reshape it. Trained
+(`flow.py --adhere 1.0`) with smooth noise of random strength lam (up to the patch's relief) added to the coarse input,
+the model conditioned on lam, and for lam > 0 the target taken against the noisy input with no zero block mean; each noise
+level is generated at unit variance (`flow.gain`). On a noise terrain, rocky at lam 0.3 to 0.6 breaks Simplex swirls into
+crags and gullies; alpine gets blander. The training noise reaches shapes up to a quarter of a tile (about 1 km at 62 m coarse cells), so on a 2 km Perlin terrain adherence 0.9 keeps the main hill and roughens the ground, while 0.75 and below replace the hill itself. Strict
+(adherence 1) it gives more detail on held-out lidar than v4. Longer training lowered the held-out loss (0.422 at 12 000
+steps, 0.407 at 24 000) but made strict output softer (alpine detail 0.93 to 0.61 m against a real 0.98), even at 8
+steps, so the app has the 12 000-step model.
+Guidance is classifier-free guidance: the model is also run with the mean of the type embeddings (an average terrain,
+trained as such by type dropout), and the velocity is pushed away from that one, v_mean + w (v_type - v_mean). On a noise
+terrain at 2 m cells the types differ by 34% of the detail at w = 1, 46% at 1.5 and 60% at 2.5, and the detail is stronger
+(1.03, 1.13, 1.35 m std); each step then costs two network runs. (The previous, smaller model without type dropout: 42% and
+56% at 1 and 1.5, but less detail, 0.86 and 1.00 m.) Tried and not kept: a temperature (starting noise times 1.2 gives the
+same pebbly texture for every type) and Heun steps (about what twice the Euler steps give). Detail is generated back to the working grid; the seed is the terrain's. Trained for 1 m output cells: a 1 km
+terrain at working resolution 1024. A **Blur** node (an Erosion of kind Blur underneath; Gaussian, radius in metres) softens hard edges of the input before
+Learned Detail. Flow is the input's flow accumulation; deposition and wear are where the result rose
 and fell.
 
 - A port of `flow.enhance`: the inputs on the CPU (rayon), the U-Net in WGSL compute (GroupNorm in two reduction passes,
@@ -54,7 +77,7 @@ and fell.
   `tools/ml/flow.py`'s answers (`tests/fixtures/detail_fixture.nmlw`, made by `export_weights.py fixtures`): the inputs,
   one network call and a 3-step, 4-tile sampler agree within 0.2 to 0.5% (`cargo test --release landscape_detail`, with
   `NOISER_DETAIL_WEIGHTS` set to the weights' folder).
-- Weights: `export_weights.py weights` writes `detail_16m_4m.nmlw` and `detail_4m_1m.nmlw` (6 MB each, f16). The app reads
+- Weights: `export_weights.py weights` writes `detail_16m_4m.nmlw` and `detail_4m_1m.nmlw` (9 MB each, f16). The app reads
   them from `ml\` next to the program, or the folder in `NOISER_DETAIL_WEIGHTS`. Weights list their terrain types; files
   with a different list (the first 8-type model) are refused with a message, not run with the wrong labels.
 - RTX 4070 SUPER: 1 km at working resolution 1024 (16x, 8 steps) 2.3 s; 4096 42 s (441 tiles in the second stage). Peak GPU
@@ -85,15 +108,19 @@ and artist input (one Noiser heightmap tested) differs from real terrain.
 Standard deviation of the detail (16x result minus the smooth 16x upsample, metres), held-out lidar sites, three 1 km
 crops each, 8 steps:
 
-| site | real | first model (8 types) | current (11 types) |
-|---|---|---|---|
-| alpine | 1.48 | 1.06 | 0.89 |
-| desert | 0.58 | 0.39 | 0.31 |
-| badlands | 0.35 | 0.22 | 0.17 |
-| hills | 0.37 | 0.31 | 0.29 |
-| volcanic | 5.24 | 1.57 | 1.34 |
-| karst | 0.17 | 0.21 | 0.17 |
-| coastal | 0.97 | 0.40 | 0.36 |
+| site | real | first model (8 types) | v3 (11 types) | current (v4, bigger) |
+|---|---|---|---|---|
+| alpine | 1.48 | 1.06 | 0.89 | 0.93 |
+| desert | 0.58 | 0.39 | 0.31 | 0.34 |
+| badlands | 0.35 | 0.22 | 0.17 | 0.17 |
+| hills | 0.37 | 0.31 | 0.29 | 0.27 |
+| volcanic | 5.24 | 1.57 | 1.34 | 1.75 |
+| karst | 0.17 | 0.21 | 0.17 | 0.16 |
+| coastal | 0.97 | 0.40 | 0.36 | 0.37 |
+
+The bigger v4 (more channels, longer training, type dropout, the Gaea seeds) gains most on volcanic and a little on
+alpine and desert; up close it is still softer than lidar ([held-out sites: real, v3, v4, v4 at guidance 1.5](ml/compare_v4_lidar.png),
+[noise terrain as five types, v3 and v4 at several guidance values](ml/compare_v4_types.png)).
 
 Both models make less detail than real terrain (the right kind, in the right places, but weaker), and the current one about
 12% less than the first. Most of that 12% is the residual's normalising scale, which the Gaea tiles lowered (0.343 against
@@ -114,7 +141,8 @@ block means, and straight compass-line channels from single-direction (D8) flow 
 
 ## Limits
 
-1. **Finest scale** is a little too smooth; more training, a larger top level, or a third stage could help.
+1. **Finest scale** is a little too smooth; a 1.6x bigger model trained 1.5x longer helped only a little, so a third stage
+   or a different loss weighting at fine scales is the next thing to try.
 2. **Data**: 15 training tiles from one country. More sites, and landform labels per patch instead of site labels.
 3. **Artist input**: tested on 12 noise-made heightmaps (ridged, Worley, terraces, warped noise) as well as Gaea's. Training
    with noise heightmaps added to a share of the coarse inputs (`flow.py --noise`, 36 maps; the target detail stays the

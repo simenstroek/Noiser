@@ -8,7 +8,7 @@
 //! docs/ml-terrain-results.md.
 
 use crate::export::Progress;
-use crate::landscape_erosion::{Erosion, ErosionResult};
+use crate::landscape_erosion::{DetailStage, Erosion, ErosionResult};
 use eframe::wgpu;
 use rayon::prelude::*;
 use std::collections::HashMap;
@@ -25,6 +25,7 @@ const OVERLAP: usize = 64;
 /// Weight files: stage 1 (16 m -> 4 m cells) and stage 2 (4 m -> 1 m).
 const STAGE1: &str = "detail_16m_4m.nmlw";
 const STAGE2: &str = "detail_4m_1m.nmlw";
+const SHARPEN: &str = "detail_sharpen.nmlw";
 
 // ---------------------------------------------------------------------------------------------------------------------
 // Weight files (`tools/ml/export_weights.py`): a u32 header length, a JSON header, then f16/f32 data.
@@ -38,6 +39,21 @@ impl Tensors {
     fn get(&self, name: &str) -> Result<&[f32], String> {
         self.t.get(name).map(|(_, v)| v.as_slice()).ok_or_else(|| format!("the weights have no tensor {name}"))
     }
+    /// The U-Net's channels per level (`chs` in the weights; older files are the first model's 32, 64, 96, 128).
+    fn chs(&self) -> [usize; 4] {
+        let read = self.meta["chs"].as_array().and_then(|a| a.iter().map(|v| v.as_u64().map(|c| c as usize)).collect::<Option<Vec<_>>>());
+        read.and_then(|v| v.try_into().ok()).unwrap_or([32, 64, 96, 128])
+    }
+
+    /// Weights of the sharpen stage (same grid in and out) rather than a 4x stage.
+    fn lam(&self) -> bool {
+        self.meta.get("lam").and_then(|m| m.as_bool()) == Some(true)
+    }
+
+    fn sharpen(&self) -> bool {
+        self.meta.get("mode").and_then(|m| m.as_str()) == Some("sharpen")
+    }
+
     fn meta_f32(&self, key: &str) -> Result<f32, String> {
         self.meta.get(key).and_then(|v| v.as_f64()).map(|v| v as f32).ok_or_else(|| format!("the weights have no {key}"))
     }
@@ -116,7 +132,7 @@ fn load_weights(name: &str) -> Result<Arc<Tensors>, String> {
 // tools/ml/terrain_ml.py (the fixture test checks).
 
 /// Gaussian blur with edge replication; the kernel has 2 round(3 sigma) + 1 taps (Python rounds halves to even).
-fn gauss(x: &[f32], h: usize, w: usize, sigma: f32) -> Vec<f32> {
+pub(crate) fn gauss(x: &[f32], h: usize, w: usize, sigma: f32) -> Vec<f32> {
     let k = 2 * (3.0 * sigma).round_ties_even() as usize + 1;
     let r = (k / 2) as isize;
     let mut g: Vec<f32> = (0..k).map(|i| (-((i as f32 - r as f32).powi(2)) / (2.0 * sigma * sigma)).exp()).collect();
@@ -319,9 +335,13 @@ pub fn flow_accumulation(h: &[f64], n: usize, m: usize) -> Vec<f32> {
 /// The network's four input channels for one tile, from its coarse heights and log flow accumulation (both [h][w]), and
 /// the tile's relief scale sigma in metres. `cell_m` is the output cell size.
 pub fn features(c: &[f32], acc: &[f32], h: usize, w: usize, cell_m: f32) -> (Vec<f32>, f32) {
+    features_up(&upsample(c, h, w), acc, h, w, cell_m)
+}
+
+/// features() from heights already on the fine grid ([4h][4w]; the sharpen stage's soft input), acc still [h][w].
+fn features_up(up: &[f32], acc: &[f32], h: usize, w: usize, cell_m: f32) -> (Vec<f32>, f32) {
     let (fh, fw) = (h * FACTOR, w * FACTOR);
     let n = fh * fw;
-    let up = upsample(c, h, w);
     let mean = (up.iter().map(|&v| v as f64).sum::<f64>() / n as f64) as f32;
     let var = up.iter().map(|&v| ((v - mean) as f64).powi(2)).sum::<f64>() / (n - 1) as f64;
     let sigma = (var.sqrt() as f32).max(0.1 * cell_m);
@@ -356,7 +376,7 @@ struct P {
     wo: u32, bo: u32, go: u32, beo: u32,
     fmul: u32, fadd: u32, flags: u32, dst_off: u32,
     src_off: u32, ty: u32, tx: u32, gw: u32,
-    inv_steps: f32, aux_off: u32, count: u32, pad: u32,
+    factor: f32, aux_off: u32, count: u32, pad: u32,
 };
 @group(0) @binding(0) var<uniform> p: P;
 @group(0) @binding(1) var<storage, read> wt: array<f32>;
@@ -527,14 +547,14 @@ fn gather(@builtin(workgroup_id) wid: vec3u, @builtin(num_workgroups) nw: vec3u,
     dst[p.dst_off + i] = src[(p.ty + i / p.w) * p.gw + p.tx + i % p.w];
 }
 
-// The tile's velocity into the map's, windowed (aux: the 1D window).
+// The tile's velocity into the map's, windowed (aux: the 1D window) and weighted (guidance).
 @compute @workgroup_size(256)
 fn scatter(@builtin(workgroup_id) wid: vec3u, @builtin(num_workgroups) nw: vec3u, @builtin(local_invocation_index) li: u32) {
     let i = flat(wid, nw, li);
     if (i >= p.h * p.w) { return; }
     let y = i / p.w; let x = i % p.w;
     let j = (p.ty + y) * p.gw + p.tx + x;
-    dst[j] = dst[j] + src[i] * aux[y] * aux[x];
+    dst[j] = dst[j] + src[i] * aux[y] * aux[x] * p.factor;
 }
 
 // One Euler step for the whole map (src: the blended velocity, cleared; dst: the residual; aux: the window sum).
@@ -542,7 +562,7 @@ fn scatter(@builtin(workgroup_id) wid: vec3u, @builtin(num_workgroups) nw: vec3u
 fn euler(@builtin(workgroup_id) wid: vec3u, @builtin(num_workgroups) nw: vec3u, @builtin(local_invocation_index) li: u32) {
     let i = flat(wid, nw, li);
     if (i >= p.count) { return; }
-    dst[i] = dst[i] + src[i] / aux[i] * p.inv_steps;
+    dst[i] = dst[i] + src[i] / aux[i] * p.factor;
     src[i] = 0.0;
 }
 ";
@@ -566,7 +586,8 @@ struct Params {
     ty: u32,
     tx: u32,
     gw: u32,
-    inv_steps: f32,
+    /// Euler: 1 / steps; scatter: the weight of the tile's velocity (guidance).
+    factor: f32,
     aux_off: u32,
     count: u32,
     pad: u32,
@@ -614,8 +635,7 @@ struct Block {
     cout: usize,
 }
 
-fn blocks() -> Vec<Block> {
-    let chs = [32, 64, 96, 128];
+fn blocks(chs: [usize; 4]) -> Vec<Block> {
     let mut out = Vec::new();
     let mut c = chs[0];
     for (l, &ch) in chs.iter().enumerate() {
@@ -693,7 +713,7 @@ impl<'a> Net<'a> {
         let weights = device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("detail weights"), contents: bytemuck::cast_slice(&all), usage: wgpu::BufferUsages::STORAGE });
         let mut film_offsets = Vec::new();
         let mut film_len = 0usize;
-        for b in blocks() {
+        for b in blocks(w.chs()) {
             film_offsets.push((film_len as u32, (film_len + b.cout) as u32));
             film_len += 2 * b.cout;
         }
@@ -762,7 +782,9 @@ impl<'a> Net<'a> {
         let dummy = self.buffer(4);
         debug_assert_eq!(dummy, 0);
         let s0 = self.tile;
-        let maxc = [96usize, 160, 224, 256];
+        let chs = self.w.chs();
+        // A level's widest buffer is its concatenation: its own channels and the level below's.
+        let maxc: Vec<usize> = (0..4).map(|l| chs[l] + chs[(l + 1).min(3)]).collect();
         let sizes: Vec<usize> = (0..4).map(|l| s0 >> l).collect();
         let mut lv = Vec::new(); // per level: a, b, tmp, h, k, skip, cat
         for l in 0..4 {
@@ -772,7 +794,7 @@ impl<'a> Net<'a> {
         let stats = self.buffer(16 + 8 * 32 * 3);
         self.input = self.buffer(5 * s0 * s0);
         self.output = self.buffer(s0 * s0);
-        let bl = blocks();
+        let bl = blocks(chs);
         let mut k = 0usize;
         // A residual block: src -> dst at level l.
         let mut block = |net: &mut Net, l: usize, src: Buf, dst: Buf| -> Result<(), String> {
@@ -794,8 +816,7 @@ impl<'a> Net<'a> {
             Ok(())
         };
         let [a0, ..] = lv[0];
-        self.conv3("inp", 5, 32, s0, self.input, a0, None)?;
-        let chs = [32usize, 64, 96, 128];
+        self.conv3("inp", 5, chs[0], s0, self.input, a0, None)?;
         for l in 0..4 {
             let [a, b, _, _, _, skip, _] = lv[l];
             block(self, l, a, b)?;
@@ -810,7 +831,7 @@ impl<'a> Net<'a> {
         block(self, 3, skip3, a3)?;
         // Up: the level's input is [h, skip] in its cat buffer.
         let mut cur = a3;
-        let mut c = 128usize;
+        let mut c = chs[3];
         for (i, l) in (0..4).rev().enumerate() {
             let [a, b, _, _, _, skip, cat] = lv[l];
             let s = sizes[l];
@@ -828,8 +849,8 @@ impl<'a> Net<'a> {
             c = chs[l];
         }
         let [_, _, tmp0, ..] = lv[0];
-        self.norm("out.0", 32, s0, cur, tmp0, stats, None)?;
-        self.conv3("out.2", 32, 1, s0, tmp0, self.output, None)?;
+        self.norm("out.0", chs[0], s0, cur, tmp0, stats, None)?;
+        self.conv3("out.2", chs[0], 1, s0, tmp0, self.output, None)?;
         Ok(())
     }
 
@@ -883,23 +904,30 @@ impl<'a> Net<'a> {
     }
 
     /// The conditioning vector (flow.FlowNet.mlp) and every block's FiLM multiplier and offset, for one tile and time.
-    fn film_values(&self, tid: usize, sigma: f32, cell_m: f32, t: f32) -> Result<Vec<f32>, String> {
+    /// `tid` None: the mean of the type embeddings, an average terrain (what guidance steers away from).
+    fn film_values(&self, tid: Option<usize>, sigma: f32, cell_m: f32, t: f32, lam: f32) -> Result<Vec<f32>, String> {
         let linear = |name: &str, x: &[f32]| -> Result<Vec<f32>, String> {
             let (wt, b) = (self.w.get(&format!("{name}.weight"))?, self.w.get(&format!("{name}.bias"))?);
             Ok((0..b.len()).map(|o| b[o] + x.iter().enumerate().map(|(i, v)| v * wt[o * x.len() + i]).sum::<f32>()).collect())
         };
         let embed = self.w.get("embed.weight")?;
         let cond = embed.len() / TYPES.len();
-        let mut x: Vec<f32> = embed[tid * cond..(tid + 1) * cond].to_vec();
+        let mut x: Vec<f32> = match tid {
+            Some(tid) => embed[tid * cond..(tid + 1) * cond].to_vec(),
+            None => (0..cond).map(|j| (0..TYPES.len()).map(|k| embed[k * cond + j]).sum::<f32>() / TYPES.len() as f32).collect(),
+        };
         x.push(sigma.ln() / 3.0);
         x.push((cell_m / self.cell).log2());
         let ang: Vec<f32> = (0..16).map(|j| t * 1000.0 * (-(10000.0f32).ln() * j as f32 / 16.0).exp()).collect();
         x.extend(ang.iter().map(|a| a.sin()));
         x.extend(ang.iter().map(|a| a.cos()));
+        if self.w.lam() {
+            x.push(lam);
+        }
         let h: Vec<f32> = linear("mlp.0", &x)?.into_iter().map(|v| v / (1.0 + (-v).exp())).collect();
         let c = linear("mlp.2", &h)?;
         let mut out = vec![0.0f32; self.film_len];
-        for (k, b) in blocks().iter().enumerate() {
+        for (k, b) in blocks(self.w.chs()).iter().enumerate() {
             let f = linear(&format!("{}.film", b.name), &c)?;
             let (mul, add) = self.film_offsets[k];
             for j in 0..b.cout {
@@ -936,21 +964,28 @@ fn noise(seed: u32, i: u32) -> f32 {
     ((-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos()) as f32
 }
 
-/// One 4x stage over a whole map: `coarse` [h][w] metres -> [4h][4w] (flow.enhance). `x0`: the starting noise (default
-/// from `seed`). `report(fraction)` is called as it goes.
+/// One 4x stage over a whole map: `coarse` [h][w] metres -> [4h][4w] (flow.enhance). With weights trained as a sharpen
+/// stage (meta `mode`), the same grid instead: a soft [h][w] (multiples of 4) gets its finest grain (flow.sharpen).
+/// `lam` (weights trained for adherence): how loosely the input is followed, 0 (its coarse shape kept exactly) to 1.
+/// `x0`: the starting noise (default from `seed`). `report(fraction)` is called as it goes.
 #[allow(clippy::too_many_arguments)]
-fn enhance(device: &wgpu::Device, queue: &wgpu::Queue, w: Arc<Tensors>, coarse: &[f32], h: usize, wd: usize, tid: usize, cell_m: f32, steps: u32, seed: u32, x0: Option<&[f32]>, tile: usize, overlap: usize, report: &dyn Fn(f32)) -> Result<Vec<f32>, String> {
-    let ct = tile / FACTOR;
+fn enhance(device: &wgpu::Device, queue: &wgpu::Queue, w: Arc<Tensors>, coarse: &[f32], h: usize, wd: usize, tid: usize, cell_m: f32, steps: u32, guidance: f32, lam: f32, seed: u32, x0: Option<&[f32]>, tile: usize, overlap: usize, report: &dyn Fn(f32)) -> Result<Vec<f32>, String> {
+    let lam = if w.lam() { lam.clamp(0.0, 1.0) } else { 0.0 };
+    let sharpen = w.sharpen();
+    let up = if sharpen { 1 } else { FACTOR };
+    let ct = tile / FACTOR * if sharpen { FACTOR } else { 1 };
     if h < ct || wd < ct {
         // Smaller than a tile: pad with the edge values to one tile, and crop.
         let (ph, pw) = (h.max(ct), wd.max(ct));
         let padded: Vec<f32> = (0..ph * pw).map(|i| coarse[(i / pw).min(h - 1) * wd + (i % pw).min(wd - 1)]).collect();
-        let out = enhance(device, queue, w, &padded, ph, pw, tid, cell_m, steps, seed, None, tile, overlap, report)?;
-        let fw = pw * FACTOR;
-        return Ok((0..h * FACTOR * wd * FACTOR).map(|i| out[(i / (wd * FACTOR)) * fw + i % (wd * FACTOR)]).collect());
+        let out = enhance(device, queue, w, &padded, ph, pw, tid, cell_m, steps, guidance, lam, seed, None, tile, overlap, report)?;
+        let fw = pw * up;
+        return Ok((0..h * up * wd * up).map(|i| out[(i / (wd * up)) * fw + i % (wd * up)]).collect());
     }
-    let (fh, fw) = (h * FACTOR, wd * FACTOR);
-    let acc: Vec<f32> = flow_accumulation(&coarse.iter().map(|&v| v as f64).collect::<Vec<_>>(), h, wd).iter().map(|v| v.ln_1p()).collect();
+    let (fh, fw) = (h * up, wd * up);
+    // Drainage on the coarse grid: the input's own, or (sharpen) its 4x block means'.
+    let (acc_src, aw) = if sharpen { (block_mean(coarse, h, wd), wd / FACTOR) } else { (coarse.to_vec(), wd) };
+    let acc: Vec<f32> = flow_accumulation(&acc_src.iter().map(|&v| v as f64).collect::<Vec<_>>(), acc_src.len() / aw, aw).iter().map(|v| v.ln_1p()).collect();
     let starts = |n: usize| {
         let mut s: Vec<usize> = (0..=n - tile).step_by(tile - overlap).collect();
         if *s.last().expect("n >= tile") != n - tile {
@@ -965,8 +1000,14 @@ fn enhance(device: &wgpu::Device, queue: &wgpu::Queue, w: Arc<Tensors>, coarse: 
     let (cs, ct2) = (tile / FACTOR, (tile / FACTOR) * (tile / FACTOR));
     for &y in &starts(fh) {
         for &x in &starts(fw) {
-            let crop = |m: &[f32]| -> Vec<f32> { (0..ct2).map(|i| m[(y / FACTOR + i / cs) * wd + x / FACTOR + i % cs]).collect() };
-            let (feats, sigma) = features(&crop(coarse), &crop(&acc), cs, cs, cell_m);
+            let aw = if sharpen { wd / FACTOR } else { wd };
+            let crop = |m: &[f32]| -> Vec<f32> { (0..ct2).map(|i| m[(y / FACTOR + i / cs) * aw + x / FACTOR + i % cs]).collect() };
+            let (feats, sigma) = if sharpen {
+                let fine: Vec<f32> = (0..tile * tile).map(|i| coarse[(y + i / tile) * wd + x + i % tile]).collect();
+                features_up(&fine, &crop(&acc), cs, cs, cell_m)
+            } else {
+                features(&crop(coarse), &crop(&acc), cs, cs, cell_m)
+            };
             let buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: None, contents: bytemuck::cast_slice(&feats), usage: STORAGE });
             net.bufs.push(buf);
             tiles.push((y, x, net.bufs.len() - 1, sigma));
@@ -994,8 +1035,8 @@ fn enhance(device: &wgpu::Device, queue: &wgpu::Queue, w: Arc<Tensors>, coarse: 
     let plane = (tile * tile) as u64 * 4;
     let tp = Params { h: tile as u32, w: tile as u32, gw: fw as u32, dst_off: (4 * tile * tile) as u32, ..Default::default() };
     let gather_slot = net.run(Pipe::Gather, tp, (xs, net.input, 0), Net::groups_1d(tile * tile));
-    let scatter_slot = net.run(Pipe::Scatter, Params { dst_off: 0, ..tp }, (net.output, v, win), Net::groups_1d(tile * tile));
-    let euler = Params { count: (fh * fw) as u32, inv_steps: 1.0 / steps as f32, ..Default::default() };
+    let scatter_slot = net.run(Pipe::Scatter, Params { dst_off: 0, factor: 1.0, ..tp }, (net.output, v, win), Net::groups_1d(tile * tile));
+    let euler = Params { count: (fh * fw) as u32, factor: 1.0 / steps as f32, ..Default::default() };
     net.run(Pipe::Euler, euler, (v, xs, ws), Net::groups_1d(fh * fw));
     let sampler: Vec<Op> = net.ops.drain(n_ops..).collect();
     net.finish();
@@ -1004,17 +1045,24 @@ fn enhance(device: &wgpu::Device, queue: &wgpu::Queue, w: Arc<Tensors>, coarse: 
     for step in 0..steps {
         let t = step as f32 / steps as f32;
         for (k, &(y, x, feats, sigma)) in tiles.iter().enumerate() {
-            queue.write_buffer(&net.film, 0, bytemuck::cast_slice(&net.film_values(tid, sigma, cell_m, t)?));
-            for slot in [gather_slot, scatter_slot] {
-                let p = Params { ty: y as u32, tx: x as u32, ..net.params[slot as usize] };
-                queue.write_buffer(uniform, slot as u64 * SLOT, bytemuck::bytes_of(&p));
+            // Guidance: v_mean + w (v_type - v_mean) = w v_type + (1 - w) v_mean, two weighted passes into the velocity.
+            let passes: &[(Option<usize>, f32)] = if guidance == 1.0 { &[(Some(tid), 1.0)] } else { &[(Some(tid), guidance), (None, 1.0 - guidance)] };
+            for &(which, weight) in passes {
+                queue.write_buffer(&net.film, 0, bytemuck::cast_slice(&net.film_values(which, sigma, cell_m, t, lam)?));
+                for slot in [gather_slot, scatter_slot] {
+                    let mut p = Params { ty: y as u32, tx: x as u32, ..net.params[slot as usize] };
+                    if slot == scatter_slot {
+                        p.factor = weight;
+                    }
+                    queue.write_buffer(uniform, slot as u64 * SLOT, bytemuck::bytes_of(&p));
+                }
+                let mut enc = device.create_command_encoder(&Default::default());
+                enc.copy_buffer_to_buffer(&net.bufs[feats], 0, &net.bufs[net.input], 0, 4 * plane);
+                net.encode(&mut enc, &sampler[..1]);
+                net.encode(&mut enc, &net.ops);
+                net.encode(&mut enc, &sampler[1..2]);
+                queue.submit([enc.finish()]);
             }
-            let mut enc = device.create_command_encoder(&Default::default());
-            enc.copy_buffer_to_buffer(&net.bufs[feats], 0, &net.bufs[net.input], 0, 4 * plane);
-            net.encode(&mut enc, &sampler[..1]);
-            net.encode(&mut enc, &net.ops);
-            net.encode(&mut enc, &sampler[1..2]);
-            queue.submit([enc.finish()]);
             if k % 8 == 7 {
                 device.poll(wgpu::PollType::wait_indefinitely()).map_err(|e| format!("{e:?}"))?;
                 report((step as usize * tiles.len() + k + 1) as f32 / total as f32);
@@ -1028,7 +1076,8 @@ fn enhance(device: &wgpu::Device, queue: &wgpu::Queue, w: Arc<Tensors>, coarse: 
     report(1.0);
     // The residual in metres: each tile's relief scale, blended; then exactly zero over every coarse cell.
     let mut res = vec![0.0f32; fh * fw];
-    let k = net.scale / net.res;
+    // flow.gain: the detail's size, and with adherence loosened, the input's noise the model also corrects.
+    let k = ((net.scale / net.res).powi(2) + lam * lam).sqrt();
     for &(y, x, _, sigma) in &tiles {
         for i in 0..tile {
             for j in 0..tile {
@@ -1038,7 +1087,14 @@ fn enhance(device: &wgpu::Device, queue: &wgpu::Queue, w: Arc<Tensors>, coarse: 
         }
     }
     res.iter_mut().zip(&wsum).for_each(|(r, s)| *r /= s);
-    zero_block_mean(&mut res, fh, fw);
+    if sharpen {
+        // Only the fine band (flow.high_pass), so the larger shapes stay the input's.
+        let low = gauss(&res, fh, fw, 4.0);
+        return Ok(coarse.iter().zip(res).zip(low).map(|((a, r), l)| a + r - l).collect());
+    }
+    if lam == 0.0 {
+        zero_block_mean(&mut res, fh, fw);
+    }
     Ok(upsample(coarse, h, wd).into_iter().zip(res).map(|(a, b)| a + b).collect())
 }
 
@@ -1048,27 +1104,45 @@ fn enhance(device: &wgpu::Device, queue: &wgpu::Queue, w: Arc<Tensors>, coarse: 
 #[allow(clippy::too_many_arguments)]
 pub fn detail(device: &wgpu::Device, queue: &wgpu::Queue, heights: &[f32], n: usize, cell_m: f32, e: &Erosion, seed: u32, progress: &Progress) -> Result<ErosionResult, String> {
     let tid = TYPES.iter().position(|t| *t == e.detail_type).ok_or_else(|| format!("unknown terrain type {}", e.detail_type))?;
-    let scale = if e.detail_scale >= 16 { 16 } else { 4 };
+    let [s1, s2, s3] = e.detail_stages;
+    // Both stages: 16x coarser in, landforms then fine detail; one stage alone: 4x, with that stage's model.
+    let stages: Vec<(&str, DetailStage, f32)> = match (s1.on, s2.on) {
+        (true, true) => vec![(STAGE1, s1, cell_m * 4.0), (STAGE2, s2, cell_m)],
+        (true, false) => vec![(STAGE1, s1, cell_m)],
+        (false, true) => vec![(STAGE2, s2, cell_m)],
+        (false, false) => vec![],
+    };
+    let scale = 4usize.pow(stages.len() as u32);
+    let total = stages.len() + s3.on as usize;
+    if total == 0 {
+        return Ok(ErosionResult { heights: heights.to_vec(), flow: vec![0.0; heights.len()] });
+    }
     if heights.len() != n * n || !n.is_multiple_of(scale) {
         return Err(format!("the working grid ({n}) must be a multiple of {scale}"));
     }
     let report = |stage: usize, stages: usize| move |f: f32| progress.store((((stage as f32 + f) / stages as f32) * 1000.0) as u32, Ordering::Relaxed);
-    let steps = e.detail_steps.clamp(1, 256);
     let down = |x: &[f32], side: usize, by: usize| -> Vec<f32> {
         let s = side / by;
         (0..s * s).map(|i| { let (y, xx) = (i / s, i % s); (0..by * by).map(|k| x[(y * by + k / by) * side + xx * by + k % by]).sum::<f32>() / (by * by) as f32 }).collect()
     };
     let coarse = down(heights, n, scale);
     let c = n / scale;
-    let (out, flow_side, flow_src) = if scale == 16 {
-        let mid = enhance(device, queue, load_weights(STAGE1)?, &coarse, c, c, tid, cell_m * 4.0, steps, seed, None, TILE, OVERLAP, &report(0, 2))?;
-        let out = enhance(device, queue, load_weights(STAGE2)?, &mid, c * 4, c * 4, tid, cell_m, steps, seed.wrapping_add(100), None, TILE, OVERLAP, &report(1, 2))?;
-        (out, c, coarse)
-    } else {
-        (enhance(device, queue, load_weights(STAGE2)?, &coarse, c, c, tid, cell_m, steps, seed, None, TILE, OVERLAP, &report(0, 1))?, c, coarse)
-    };
-    let amount = e.detail_amount;
-    let heights_out: Vec<f32> = heights.iter().zip(&out).map(|(a, b)| a + (b - a) * amount).collect();
+    let (mut cur, mut side) = (coarse.clone(), c);
+    for (i, (file, st, cell)) in stages.iter().enumerate() {
+        let out = enhance(device, queue, load_weights(file)?, &cur, side, side, tid, *cell, st.steps.clamp(1, 256), st.guidance.clamp(0.0, 8.0), 1.0 - st.adherence, seed.wrapping_add(100 * i as u32), None, TILE, OVERLAP, &report(i, total))?;
+        // amount scales what this stage added to the smooth upsample of its input.
+        let base = upsample(&cur, side, side);
+        cur = base.iter().zip(&out).map(|(a, b)| a + (b - a) * st.amount).collect();
+        side *= FACTOR;
+    }
+    if s3.on {
+        if !n.is_multiple_of(FACTOR) {
+            return Err(format!("the working grid ({n}) must be a multiple of 4"));
+        }
+        let out = enhance(device, queue, load_weights(SHARPEN)?, &cur, n, n, tid, cell_m, s3.steps.clamp(1, 256), s3.guidance.clamp(0.0, 8.0), 0.0, seed.wrapping_add(300), None, TILE, OVERLAP, &report(stages.len(), total))?;
+        cur = cur.iter().zip(&out).map(|(a, b)| a + (b - a) * s3.amount).collect();
+    }
+    let (heights_out, flow_side, flow_src) = (cur, c, coarse);
     // Flow: cells draining through each coarse cell, carried up to the grid (on a log scale, smoothly).
     let mut acc: Vec<f32> = flow_accumulation(&flow_src.iter().map(|&v| v as f64).collect::<Vec<_>>(), flow_side, flow_side).iter().map(|v| v.ln_1p()).collect();
     let mut side = flow_side;
@@ -1087,6 +1161,37 @@ mod tests {
 
     fn fixture() -> Tensors {
         read_tensors(&std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/detail_fixture.nmlw")).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn learned_detail_stages_switch_off_and_scale_their_detail() {
+        let Some(gpu) = gpu() else { return eprintln!("no GPU adapter; skipping") };
+        let n = 64;
+        let heights: Vec<f32> = (0..n * n).map(|i| ((i % n) as f32 * 0.3).sin() * 20.0 + (i / n) as f32 * 0.5).collect();
+        let off = DetailStage { on: false, ..Default::default() };
+        let stages = |a: DetailStage, b: DetailStage| Erosion { kind: crate::landscape_erosion::ErosionKind::Detail, detail_stages: [a, b, off], ..Default::default() };
+        let run = |e: &Erosion| detail(&gpu.device, &gpu.queue, &heights, n, 1.0, e, 7, &Progress::default()).unwrap().heights;
+        assert_eq!(run(&stages(off, off)), heights, "both stages off keep the input");
+        if load_weights(STAGE2).is_err() {
+            return eprintln!("no detail weights (NOISER_DETAIL_WEIGHTS); skipping the rest");
+        }
+        // The fine stage alone at amount 0 is the smooth upsample of the 4x block means; at 1 it adds detail.
+        let c = n / 4;
+        let coarse: Vec<f32> = (0..c * c).map(|i| (0..16).map(|k| heights[((i / c) * 4 + k / 4) * n + (i % c) * 4 + k % 4]).sum::<f32>() / 16.0).collect();
+        let fine = DetailStage { steps: 2, ..Default::default() };
+        close("amount 0", &run(&stages(off, DetailStage { amount: 0.0, ..fine })), &upsample(&coarse, c, c), 1e-5);
+        let full = run(&stages(off, fine));
+        let added = full.iter().zip(upsample(&coarse, c, c)).map(|(a, b)| (a - b).abs()).fold(0.0, f32::max);
+        assert!(added > 0.01, "amount 1 adds detail ({added})");
+        if load_weights(SHARPEN).is_ok() {
+            // Sharpen alone works on the grid itself: grain added, the overall shape kept.
+            let e = Erosion { detail_stages: [off, off, DetailStage { steps: 2, ..Default::default() }], ..stages(off, off) };
+            let sharp = run(&e);
+            let change: Vec<f32> = sharp.iter().zip(&heights).map(|(a, b)| a - b).collect();
+            let worst = change.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+            let mean = change.iter().sum::<f32>() / change.len() as f32;
+            assert!(worst > 1e-3 && mean.abs() < 0.05, "sharpen: largest change {worst} m, mean change {mean} m");
+        }
     }
 
     fn close(name: &str, got: &[f32], want: &[f32], tol: f32) {
@@ -1139,7 +1244,7 @@ mod tests {
         let mut input = f.get("feats").unwrap().to_vec();
         input.extend_from_slice(f.get("xt").unwrap());
         gpu.queue.write_buffer(&net.bufs[net.input], 0, bytemuck::cast_slice(&input));
-        let film = net.film_values(0, f.meta_f32("sigma").unwrap(), 1.0, f.meta_f32("t").unwrap()).unwrap();
+        let film = net.film_values(Some(0), f.meta_f32("sigma").unwrap(), 1.0, f.meta_f32("t").unwrap(), 0.0).unwrap();
         gpu.queue.write_buffer(&net.film, 0, bytemuck::cast_slice(&film));
         let mut enc = gpu.device.create_command_encoder(&Default::default());
         net.encode(&mut enc, &net.ops);
@@ -1148,12 +1253,49 @@ mod tests {
         close("network", &v, f.get("v").unwrap(), 2e-3);
         // The whole sampler: 3 steps, tiles of 64 overlapping by 16, on a 128 x 128 output.
         let coarse = f.get("coarse").unwrap();
-        let out = enhance(&gpu.device, &gpu.queue, w, coarse, 32, 32, 0, 1.0, 3, 0, Some(f.get("x0").unwrap()), tile, 16, &|_| ()).unwrap();
+        let out = enhance(&gpu.device, &gpu.queue, w.clone(), coarse, 32, 32, 0, 1.0, 3, 1.0, 0.0, 0, Some(f.get("x0").unwrap()), tile, 16, &|_| ()).unwrap();
         let up = upsample(coarse, 32, 32);
         let detail = |o: &[f32]| o.iter().zip(&up).map(|(a, b)| a - b).collect::<Vec<_>>();
         close("enhance", &detail(&out), &detail(f.get("out").unwrap()), 5e-3);
+        let guided = enhance(&gpu.device, &gpu.queue, w.clone(), coarse, 32, 32, 0, 1.0, 3, f.meta_f32("guidance").unwrap(), 0.0, 0, Some(f.get("x0").unwrap()), tile, 16, &|_| ()).unwrap();
+        close("guided", &detail(&guided), &detail(f.get("guided").unwrap()), 5e-3);
         // The added detail averages to zero over every coarse cell (the base's own agreement is upsample's).
         let worst = block_mean(&detail(&out), 128, 128).iter().fold(0.0f32, |m, v| m.max(v.abs()));
         assert!(worst < 1e-3, "detail's mean over a coarse cell {worst} m");
+    }
+
+    #[test]
+    fn adherence_matches_the_python_reference() {
+        let Some(gpu) = gpu() else { return eprintln!("no GPU adapter; skipping") };
+        let Ok(w) = load_weights(STAGE1) else { return eprintln!("no detail weights (NOISER_DETAIL_WEIGHTS); skipping") };
+        if !w.lam() {
+            return eprintln!("stage-1 weights without adherence; skipping");
+        }
+        let f = read_tensors(&std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/adhere_fixture.nmlw")).unwrap()).unwrap();
+        let (coarse, x0, g, cell) = (f.get("coarse").unwrap(), f.get("x0").unwrap(), f.meta_f32("guidance").unwrap(), f.meta_f32("cell").unwrap());
+        let up = upsample(coarse, 32, 32);
+        let detail = |o: &[f32]| o.iter().zip(&up).map(|(a, b)| a - b).collect::<Vec<_>>();
+        let run = |lam: f32| enhance(&gpu.device, &gpu.queue, w.clone(), coarse, 32, 32, 0, cell, 3, g, lam, 0, Some(x0), 64, 16, &|_| ()).unwrap();
+        close("strict", &detail(&run(0.0)), &detail(f.get("guided").unwrap()), 5e-3);
+        // Loosened: the coarse shape moves too (no zero block mean), and the residual is scaled by flow.gain.
+        let lam = f.meta_f32("lam_value").unwrap();
+        close("loose", &detail(&run(lam)), &detail(f.get("loose").unwrap()), 5e-3);
+    }
+
+    #[test]
+    fn sharpen_matches_the_python_reference() {
+        let Some(gpu) = gpu() else { return eprintln!("no GPU adapter; skipping") };
+        let Ok(w) = load_weights(SHARPEN) else { return eprintln!("no sharpen weights (NOISER_DETAIL_WEIGHTS); skipping") };
+        let f = read_tensors(&std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/sharpen_fixture.nmlw")).unwrap()).unwrap();
+        let soft = f.get("soft").unwrap();
+        let out = enhance(&gpu.device, &gpu.queue, w, soft, 128, 128, 0, 1.0, 3, f.meta_f32("guidance").unwrap(), 0.0, 0, Some(f.get("x0").unwrap()), 64, 16, &|_| ()).unwrap();
+        let added = |o: &[f32]| o.iter().zip(soft).map(|(a, b)| a - b).collect::<Vec<_>>();
+        let (a, b) = (added(&out), added(f.get("sharp").unwrap()));
+        // The input is already smooth at 1 m, so its curvature is mostly f32 rounding of heights near 3000 m (differently
+        // summed on the CPU and GPU): the answers agree to under 1% RMS, with isolated cells up to about 4%.
+        let rms = |v: &[f32]| (v.iter().map(|x| x * x).sum::<f32>() / v.len() as f32).sqrt();
+        let diff: Vec<f32> = a.iter().zip(&b).map(|(x, y)| x - y).collect();
+        assert!(rms(&diff) < 0.01 * rms(&b), "sharpen: RMS difference {} against {}", rms(&diff), rms(&b));
+        close("sharpen", &a, &b, 6e-2);
     }
 }

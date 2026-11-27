@@ -41,7 +41,8 @@ def main():
     import terrain_ml as T
 
     ck = torch.load(a.ckpt, map_location="cpu", weights_only=False)
-    meta = {"format": 1, "scale": ck["scale"], "res": flow.RES, "cell": a.cell, "factor": T.FACTOR, "tile": T.PATCH, "types": T.TYPES}
+    meta = {"format": 1, "scale": ck["scale"], "res": flow.RES, "cell": a.cell, "factor": T.FACTOR, "tile": T.PATCH, "types": T.TYPES, "chs": list(ck.get("chs", (32, 64, 96, 128))),
+            "mode": ck.get("mode", "4x"), "lam": bool(ck.get("lam", False))}
     if a.cmd == "weights":
         write(a.out, meta, [(k, v.float().numpy(), "f16") for k, v in ck["ema"].items()])
         print("wrote", a.out, os.path.getsize(a.out), "bytes")
@@ -55,6 +56,15 @@ def main():
     coarse = fine.reshape(32, 4, 32, 4).mean(axis=(1, 3)).astype(np.float32)
     from prep_lidar import flow_accumulation
 
+    if meta["mode"] == "sharpen":
+        # A softened 128 x 128 crop and flow.sharpen's answer (3 steps, guidance 2, four 64-cell tiles).
+        soft = T._gauss(torch.from_numpy(fine)[None, None], 1.5)[0, 0].numpy()
+        x0 = rng.standard_normal((128, 128)).astype(np.float32)
+        sharp = flow.sharpen(soft, "alpine", a.cell, net, scale, steps=3, dev="cpu", tile=64, overlap=16, guidance=2.0, x0=x0)
+        meta.update({"tile": 64, "overlap": 16, "steps": 3, "kind": "alpine", "guidance": 2.0})
+        write(a.out, meta, [("soft", soft, "f32"), ("x0", x0, "f32"), ("sharp", sharp, "f32")])
+        print("wrote", a.out, os.path.getsize(a.out), "bytes; change std", float((sharp - soft).std()))
+        return
     acc = np.log1p(flow_accumulation(coarse.astype(np.float64))).astype(np.float32)
     c = torch.from_numpy(coarse)[None, None]
     up = T.upsample(c)[0, 0].numpy()
@@ -69,10 +79,15 @@ def main():
     r = torch.from_numpy(rng.standard_normal((1, 1, 64, 64)).astype(np.float32))
     zbm = T.zero_block_mean(r)[0, 0].numpy()
     out = flow.enhance(coarse, "alpine", a.cell, net, scale, steps=3, dev="cpu", tile=tile, overlap=16, x0=x0)
-    meta.update({"tile": tile, "overlap": 16, "steps": 3, "kind": "alpine", "t": 0.375, "sigma": float(sigma[0])})
+    guided = flow.enhance(coarse, "alpine", a.cell, net, scale, steps=3, dev="cpu", tile=tile, overlap=16, x0=x0, guidance=2.0)
+    meta.update({"tile": tile, "overlap": 16, "steps": 3, "kind": "alpine", "t": 0.375, "sigma": float(sigma[0]), "guidance": 2.0})
+    extra = []
+    if meta["lam"]:  # adherence weights: also the loosened answer (lam 0.5), where the coarse shape may move
+        extra = [("loose", flow.enhance(coarse, "alpine", a.cell, net, scale, steps=3, dev="cpu", tile=tile, overlap=16, x0=x0, guidance=2.0, lam=0.5), "f32")]
+        meta["lam_value"] = 0.5
     write(a.out, meta, [("coarse", coarse, "f32"), ("acc", acc, "f32"), ("up", up, "f32"), ("feats", feats[0].numpy(), "f32"),
                         ("xt", xt[0, 0].numpy(), "f32"), ("v", v[0, 0].numpy(), "f32"), ("r", r[0, 0].numpy(), "f32"),
-                        ("zbm", zbm, "f32"), ("x0", x0, "f32"), ("out", out, "f32")])
+                        ("zbm", zbm, "f32"), ("x0", x0, "f32"), ("out", out, "f32"), ("guided", guided, "f32")] + extra)
     print("wrote", a.out, os.path.getsize(a.out), "bytes; out range", float(out.min()), float(out.max()))
 
 

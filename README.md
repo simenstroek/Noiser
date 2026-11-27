@@ -73,7 +73,7 @@ field  ->  mesh  ->  UVs  ->  maps  ->  engine
 
 ## Running it
 
-Download `noiser-windows-x64.zip` from the latest release, unzip it and run `noiser.exe`. To open a graph straight away: `noiser.exe SimpleTestGraph.noisegraph` (an example is in the zip); `.meshgraph` files open the same way. Keep the `ml` folder next to `noiser.exe`: it holds the model files the Erosion node's Detail kind reads (`detail_16m_4m.nmlw`, `detail_4m_1m.nmlw`; made by `tools/ml/export_weights.py`, not kept in the repository, so a release zip has to include them).
+Download `noiser-windows-x64.zip` from the latest release, unzip it and run `noiser.exe`. To open a graph straight away: `noiser.exe SimpleTestGraph.noisegraph` (an example is in the zip); `.meshgraph` files open the same way. Keep the `ml` folder next to `noiser.exe`: it holds the model files the Learned Detail node reads (`detail_16m_4m.nmlw`, `detail_4m_1m.nmlw`, `detail_sharpen.nmlw`; made by `tools/ml/export_weights.py`, not kept in the repository, so a release zip has to include them).
 
 The `examples` folder in the repository is a ready-made library: ten shapes for the SDF Composer (`SDFs`), ten noise graphs (`Noises`) and a mesh graph that roughens a vase with one of them (`Mesh Graphs`), each with the picture the library drawer shows. Point Preferences > File paths at it (or copy it) and press Tab. The mesh graph's paths are relative, so keep the three folders together.
 
