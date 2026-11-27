@@ -13,26 +13,29 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-TYPES = ["alpine", "desert", "badlands", "hills", "volcanic", "karst", "coastal", "plains"]
+# The first seven are real lidar sites (alpine also has one Gaea terrain); the last four are Gaea terrains only (prep_gaea.py).
+# Plains is gone: its training sites were farmland, and the model drew field lines.
+TYPES = ["alpine", "desert", "badlands", "hills", "volcanic", "karst", "coastal", "craters", "fantasy", "rocky", "icelandic"]
 FACTOR = 4  # coarse -> fine
 PATCH = 256  # fine patch side in cells
 CELL = float(os.environ.get("NOISER_ML_CELL", "1"))  # metres per cell of the stored tiles (1 for the lidar, 4 for its first stage)
 
 
 def load_tiles(data_dir, holdout):
-    """{type: [(dem, acc, valid_integral)]} for the training (holdout=False) or the held-out (True) tiles."""
+    """{type: [(dem, acc, valid_integral, name, cell_m)]} for the training (holdout=False) or the held-out (True) tiles."""
     out = {t: [] for t in TYPES}
     for path in sorted(glob.glob(os.path.join(data_dir, "prep", "*.npz"))):
         name = os.path.basename(path)
         kind = name.split("__")[0]
         is_hold = "_HOLD" in name  # one whole site per type, never trained on
-        if is_hold != holdout:
+        if is_hold != holdout or kind not in out:
             continue
         z = np.load(path)
         valid = z["valid"].astype(np.float32)
         # Integral image of validity: the share of valid cells under any window in O(1).
         integral = np.pad(valid.cumsum(0).cumsum(1), ((1, 0), (1, 0)))
-        out[kind].append((z["dem"], z["acc"], integral, name))
+        cell = float(z["cell"]) if "cell" in z else CELL  # Gaea tiles store theirs (1.22 m); the lidar is CELL
+        out[kind].append((z["dem"], z["acc"], integral, name, cell))
     return {k: v for k, v in out.items() if v}
 
 
@@ -40,15 +43,37 @@ def valid_share(integral, y, x, size):
     return (integral[y + size, x + size] - integral[y, x + size] - integral[y + size, x] + integral[y, x]) / (size * size)
 
 
-def sample_batch(tiles, n, rng, scale_choices=(1, 2), fixed_type=None):
-    """n random fine patches: (fine [n,P,P] m, acc [n,P/F,P/F], type ids [n], cell metres [n])."""
+def load_noise(noise_dir):
+    """Noise-made heightmaps (E:/_NoiserML/noisemix/*.npy, made with Noiser) whose shapes are mixed into training inputs."""
+    return [np.load(p) for p in sorted(glob.glob(os.path.join(noise_dir, "*.npy")))]
+
+
+def noise_shape(noise, size, std, rng):
+    """A random crop of a random noise heightmap, [size, size] coarse cells, zero mean, std about 0.2-1x `std`."""
+    z = noise[rng.integers(len(noise))]
+    k = int(rng.choice([1, 2, 4, 8]))  # the same noise read at different zooms
+    s = size * k
+    y, x = rng.integers(0, z.shape[0] - s + 1), rng.integers(0, z.shape[1] - s + 1)
+    c = np.rot90(z[y : y + s, x : x + s].reshape(size, k, size, k).mean(axis=(1, 3)), rng.integers(4))
+    c = c - c.mean()
+    return (c / max(float(c.std()), 1e-6) * std * rng.uniform(0.2, 1.0)).astype(np.float32)
+
+
+def sample_batch(tiles, n, rng, scale_choices=(1, 2), fixed_type=None, noise=None, mix=0.4):
+    """n random fine patches: (fine [n,P,P] m, acc [n,P/F,P/F], type ids [n], cell metres [n], coarse add [n,P/F,P/F] m).
+
+    With `noise` (load_noise), a share `mix` of the patches gets a noise heightmap's shape added to its coarse input (the
+    add); the target detail stays the real terrain's, so the model learns to put real detail on noise-made shapes. Their
+    flow accumulation is recomputed from the mixed coarse height."""
+    from prep_lidar import flow_accumulation
+
     kinds = list(tiles)
-    fines, accs, tids, cells = [], [], [], []
+    fines, accs, tids, cells, adds = [], [], [], [], []
     while len(fines) < n:
         kind = fixed_type if fixed_type else kinds[rng.integers(len(kinds))]
         if kind not in tiles:
             continue
-        dem, acc, integral, _ = tiles[kind][rng.integers(len(tiles[kind]))]
+        dem, acc, integral, _, tile_cell = tiles[kind][rng.integers(len(tiles[kind]))]
         s = int(rng.choice(scale_choices))  # 2: the same terrain read at twice the cell size
         size = PATCH * s
         if dem.shape[0] <= size or dem.shape[1] <= size:
@@ -65,11 +90,20 @@ def sample_batch(tiles, n, rng, scale_choices=(1, 2), fixed_type=None):
         fine, a = np.rot90(fine, k), np.rot90(a, k)
         if rng.random() < 0.5:
             fine, a = fine[:, ::-1], a[:, ::-1]
+        c = PATCH // FACTOR
+        add = np.zeros((c, c), np.float32)
+        if noise and rng.random() < mix:
+            coarse = fine.reshape(c, FACTOR, c, FACTOR).mean(axis=(1, 3))
+            add = noise_shape(noise, c, float(coarse.std()), rng)
+            # shortcut: drainage from this patch alone, not the whole tile's (the app uses the whole map); fine while
+            # stage 1 maps are about one patch, revisit if mixed samples learn edge-of-patch drainage.
+            a = np.log1p(flow_accumulation((coarse + add).astype(np.float64))).astype(np.float32)
         fines.append(np.ascontiguousarray(fine))
         accs.append(np.ascontiguousarray(a))
         tids.append(TYPES.index(kind))
-        cells.append(CELL * s)
-    return np.stack(fines), np.stack(accs), np.array(tids), np.array(cells, np.float32)
+        cells.append(tile_cell * s)
+        adds.append(add)
+    return np.stack(fines), np.stack(accs), np.array(tids), np.array(cells, np.float32), np.stack(adds)
 
 
 def block_mean(x, f=FACTOR):

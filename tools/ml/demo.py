@@ -47,7 +47,7 @@ rows, names = [], []
 hold = T.load_tiles(a.data, True)
 rng = np.random.default_rng(2)
 for kind in ["alpine", "volcanic", "desert", "badlands", "hills"]:
-    dem, _, integ, _ = hold[kind][0]
+    dem, _, integ = hold[kind][0][:3]
     best = None
     for _ in range(40):  # the roughest fully valid 1 km window of a few tries
         y, x = rng.integers(0, dem.shape[0] - S), rng.integers(0, dem.shape[1] - S)

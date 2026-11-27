@@ -1,8 +1,8 @@
 """Small conditional flow-matching model for terrain detail: samples one plausible 4x detail field instead of predicting the
 average (an earlier L1/spectrum/GAN model did that, and looked like blur plus noise).
 
-    NOISER_ML_CELL=1 python tools/ml/flow.py train --data E:/_NoiserML/lidar    --out E:/_NoiserML/runs/flow1        (4 m -> 1 m)
-    NOISER_ML_CELL=4 python tools/ml/flow.py train --data E:/_NoiserML/lidar_4m --out E:/_NoiserML/runs/flow_stage1  (16 m -> 4 m)
+    NOISER_ML_CELL=1 python tools/ml/flow.py train --data E:/_NoiserML/lidar    --out E:/_NoiserML/runs/flow1_v3       --steps 16000  (4 m -> 1 m)
+    NOISER_ML_CELL=4 python tools/ml/flow.py train --data E:/_NoiserML/lidar_4m --out E:/_NoiserML/runs/flow_stage1_v3 --steps 16000  (16 m -> 4 m)
 
 Inputs and residual come from terrain_ml (smooth base, features, zero mean over every coarse cell). The network is a small
 U-Net (3.0 M parameters) that predicts the velocity from noise to the residual; sampling is a few Euler steps from pure noise.
@@ -29,14 +29,15 @@ RES = 10.0  # the within-cell residual is small next to the terrain's relief; sc
 
 def prepare(batch, rng, device):
     """From sampled patches: model inputs and the real within-cell residual (in units of the patch's sigma)."""
-    fine, acc, tid, cell = batch
+    fine, acc, tid, cell, add = batch
     fine = torch.from_numpy(fine).to(device).unsqueeze(1)
     acc = torch.from_numpy(acc).to(device).unsqueeze(1)
     tid = torch.from_numpy(tid).long().to(device)
     cell = torch.from_numpy(cell).to(device)
     coarse = T.block_mean(fine)
-    # The input is degraded (blur, smooth noise) so it is less like clean block means, as an artist's terrain is not.
-    x, sigma, _ = T.features(T.degrade(coarse, None), acc, cell)
+    # The input is degraded (blur, smooth noise, noise-made shapes) so it is less like clean block means, as an artist's
+    # terrain is not. The target below is still the real residual: the upsample is linear, so the added shape has none.
+    x, sigma, _ = T.features(T.degrade(coarse + torch.from_numpy(add).to(device).unsqueeze(1), None), acc, cell)
     real = T.zero_block_mean((fine - T.upsample(coarse)) / sigma.view(-1, 1, 1, 1))
     return x, real, tid, sigma, cell
 
@@ -176,12 +177,14 @@ def train(args):
     torch.backends.cudnn.benchmark = True
     os.makedirs(args.out, exist_ok=True)
     tiles = T.load_tiles(args.data, False)
+    noise = T.load_noise(args.noise) if args.noise else None
+    print("tiles:", {k: len(v) for k, v in tiles.items()}, "noise maps:", len(noise or []), flush=True)
     q = queue.Queue(maxsize=6)
 
     def producer(seed):
         rng = np.random.default_rng(seed)
         while True:
-            q.put(T.sample_batch(tiles, args.batch, rng))
+            q.put(T.sample_batch(tiles, args.batch, rng, noise=noise))
 
     for s in range(2):
         threading.Thread(target=producer, args=(s,), daemon=True).start()
@@ -234,4 +237,5 @@ if __name__ == "__main__":
     ap.add_argument("--lr", type=float, default=2e-4)
     ap.add_argument("--data", default="E:/_NoiserML/lidar")
     ap.add_argument("--out", default="E:/_NoiserML/runs/flow1")
+    ap.add_argument("--noise", default="", help="folder of noise heightmaps mixed into inputs (tried: less detail, off by default)")
     train(ap.parse_args())

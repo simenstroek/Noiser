@@ -18,7 +18,7 @@ use std::sync::Arc;
 use wgpu::util::DeviceExt;
 
 /// The terrain types the model knows (the conditioning label), in the order it was trained with.
-pub const TYPES: [&str; 8] = ["alpine", "desert", "badlands", "hills", "volcanic", "karst", "coastal", "plains"];
+pub const TYPES: [&str; 11] = ["alpine", "desert", "badlands", "hills", "volcanic", "karst", "coastal", "craters", "fantasy", "rocky", "icelandic"];
 const FACTOR: usize = 4;
 const TILE: usize = 256;
 const OVERLAP: usize = 64;
@@ -104,6 +104,9 @@ fn load_weights(name: &str) -> Result<Arc<Tensors>, String> {
     let path = weights_path(name);
     let bytes = std::fs::read(&path).map_err(|e| format!("Detail needs its model files in the ml folder next to noiser.exe (the release zip has them): {} ({e})", path.display()))?;
     let t = Arc::new(read_tensors(&bytes)?);
+    if t.meta["types"].as_array().is_none_or(|a| a.iter().map(|v| v.as_str()).ne(TYPES.iter().map(|s| Some(*s)))) {
+        return Err(format!("{} is for another version of Noiser (its terrain types differ); use the ml folder from this release", path.display()));
+    }
     cache.lock().map_err(|_| "weights cache unusable")?.insert(name.to_string(), t.clone());
     Ok(t)
 }
