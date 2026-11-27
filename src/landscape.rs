@@ -41,7 +41,7 @@ pub struct Settings {
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { seed: 0, world_m: 2000.0, height_m: 400.0, fit: true, water_m: None, resolution: 1024, legacy_erosion: None }
+        Settings { seed: 0, world_m: 2000.0, height_m: 400.0, fit: false, water_m: None, resolution: 1024, legacy_erosion: None }
     }
 }
 
@@ -191,6 +191,88 @@ pub fn write_unreal(path: &Path, n: usize, world_m: f32, h: &UnrealHeights) -> R
     });
     std::fs::write(&side, serde_json::to_string_pretty(&json).unwrap_or_default()).map_err(|e| format!("{}: {e}", side.display()))?;
     Ok(format!("Wrote {} ({n} x {n}, {:.2} cm per step) and {}", path.display(), h.step_cm, side.file_name().unwrap_or_default().to_string_lossy()))
+}
+
+/// The 3D view's camera as screen mapping: where world point `p` lands in `rect`, and the ray through a screen point.
+struct ViewCamera {
+    eye: [f32; 3],
+    fwd: [f32; 3],
+    right: [f32; 3],
+    up: [f32; 3],
+    rect: egui::Rect,
+    tan_half: f32,
+}
+
+impl ViewCamera {
+    fn new(grid: &crate::landscape_gpu::Grid, world_m: f32, view: (f32, f32, f32), rect: egui::Rect) -> ViewCamera {
+        let (eye, fwd, right, up) = crate::landscape_gpu::camera(world_m, grid.lo, grid.hi, view);
+        ViewCamera { eye, fwd, right, up, rect, tan_half: crate::landscape_gpu::tan_half_fov() }
+    }
+
+    fn aspect(&self) -> f32 {
+        self.rect.width() / self.rect.height().max(1.0)
+    }
+
+    fn project(&self, p: [f32; 3]) -> Option<egui::Pos2> {
+        let v = [p[0] - self.eye[0], p[1] - self.eye[1], p[2] - self.eye[2]];
+        let dot = |a: [f32; 3]| a[0] * v[0] + a[1] * v[1] + a[2] * v[2];
+        let z = dot(self.fwd);
+        if z <= 1e-3 {
+            return None;
+        }
+        let (sx, sy) = (dot(self.right) / z / (self.tan_half * self.aspect()), dot(self.up) / z / self.tan_half);
+        Some(self.rect.center() + egui::vec2(sx * self.rect.width() * 0.5, -sy * self.rect.height() * 0.5))
+    }
+
+    /// Where the ray through screen point `s` meets the level `z` (in front of the camera), as world x and y.
+    fn on_level(&self, s: egui::Pos2, z: f32) -> Option<[f32; 2]> {
+        let sx = (s.x - self.rect.center().x) / (self.rect.width() * 0.5) * self.tan_half * self.aspect();
+        let sy = -(s.y - self.rect.center().y) / (self.rect.height() * 0.5) * self.tan_half;
+        let d: [f32; 3] = std::array::from_fn(|a| self.fwd[a] + self.right[a] * sx + self.up[a] * sy);
+        let t = (z - self.eye[2]) / d[2];
+        (d[2].abs() > 1e-6 && t > 0.0).then(|| [self.eye[0] + d[0] * t, self.eye[1] + d[1] * t])
+    }
+}
+
+/// A handle on the one selected Stamp node's centre in the 3D view, with its footprint; dragging it moves the stamp.
+/// Returns whether it is being dragged (so the view does not orbit).
+fn stamp_gizmo(ui: &mut egui::Ui, rect: egui::Rect, grid: &crate::landscape_gpu::Grid, s: &Settings, view: (f32, f32, f32), selected: &std::collections::BTreeSet<crate::graph::NodeId>, graph: &mut Graph) -> bool {
+    let [id] = selected.iter().copied().collect::<Vec<_>>()[..] else { return false };
+    let Some(NodeKind::Stamp(p)) = graph.nodes.get_mut(&id).map(|n| &mut n.kind) else { return false };
+    let cam = ViewCamera::new(grid, s.world_m, view, rect);
+    let at = |c: [f32; 2]| {
+        let n = grid.n;
+        let (i, j) = ((c[0].clamp(0.0, 1.0) * (n - 1) as f32).round() as usize, (c[1].clamp(0.0, 1.0) * (n - 1) as f32).round() as usize);
+        grid.heights[j * n + i]
+    };
+    let z = at(p.center);
+    let world = |c: [f32; 2]| [c[0] * s.world_m, c[1] * s.world_m];
+    let [cx, cy] = world(p.center);
+    let Some(centre) = cam.project([cx, cy, z]) else { return false };
+    let response = ui.interact(egui::Rect::from_center_size(centre, egui::vec2(22.0, 22.0)), ui.scope_id().with(("stamp gizmo", id)), egui::Sense::drag());
+    let mut moving = false;
+    if response.dragged()
+        && let Some(xy) = ui.ctx().pointer_latest_pos().and_then(|pos| cam.on_level(pos, z)) {
+            p.center = [(xy[0] / s.world_m).clamp(0.0, 1.0), (xy[1] / s.world_m).clamp(0.0, 1.0)];
+            moving = true;
+        }
+    let colour = if response.hovered() || moving { egui::Color32::WHITE } else { egui::Color32::from_rgb(255, 200, 60) };
+    let painter = ui.painter_at(rect);
+    // The footprint: a circle of the stamp's size at the handle's height.
+    let r = p.size_m * 0.5;
+    let ring: Vec<egui::Pos2> = (0..=48).filter_map(|k| {
+        let a = k as f32 / 48.0 * std::f32::consts::TAU;
+        cam.project([cx + r * a.cos(), cy + r * a.sin(), z])
+    }).collect();
+    painter.add(egui::Shape::line(ring, egui::Stroke::new(1.5, colour.gamma_multiply(0.7))));
+    painter.circle(centre, 8.0, colour.gamma_multiply(0.35), egui::Stroke::new(2.0, colour));
+    if response.hovered() && !moving {
+        response.on_hover_text("Drag to move the stamp");
+    }
+    if moving {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+    }
+    moving
 }
 
 /// Where a ray `eye + t·d` (t ≥ 0) is inside the box `lo..hi`: `(t_in, t_out)`, or `None` when it misses.
@@ -636,7 +718,7 @@ impl LandscapeWorkspace {
     fn key(&self) -> u64 {
         let s = &self.settings;
         let mut h = std::collections::hash_map::DefaultHasher::new();
-        (self.graph.to_json(), s.seed, s.resolution, self.mask_rev, &self.erosion_run, crate::landscape_heightmap::files_stamp(&self.graph, &self.base_dir()), crate::landscape_stamp::files_stamp(&self.graph, &self.base_dir())).hash(&mut h);
+        (self.graph.to_json(), self.editor.preview, s.seed, s.resolution, self.mask_rev, &self.erosion_run, crate::landscape_heightmap::files_stamp(&self.graph, &self.base_dir()), crate::landscape_stamp::files_stamp(&self.graph, &self.base_dir())).hash(&mut h);
         if crate::landscape_terrain::has_erosion(&self.graph) {
             (s.world_m.to_bits(), s.height_m.to_bits()).hash(&mut h);
         }
@@ -956,7 +1038,9 @@ impl crate::App {
         if ls.job.is_none() && ls.sampled_key != Some(key) && settled {
             ls.sampled_key = Some(key);
             ls.pending = None;
-            let (graph, settings, masks, base) = (ls.graph.clone(), ls.settings.clone(), ls.mask_map(), ls.base_dir());
+            // The node previewed in the graph (its header's eye button) stands in for the output.
+            let graph = ls.editor.preview.map_or_else(|| ls.graph.clone(), |id| ls.graph.previewing(id));
+            let (settings, masks, base) = (ls.settings.clone(), ls.mask_map(), ls.base_dir());
             let (maps_key, cache, run) = (ls.mask_rev, ls.erosion_cache.clone(), ls.erosion_run.clone());
             let (tx, rx) = mpsc::channel();
             let progress = Progress::default();
@@ -1179,7 +1263,10 @@ impl crate::App {
                 view_toggle(ui, rect, &mut ls.map_mode);
                 return;
             }
-            if response.dragged() {
+            // The terrain is painted into this slot (below), so the stamp handle drawn after it stays on top.
+            let view_slot = ui.painter().add(egui::Shape::Noop);
+            let moving_stamp = ls.view_grid.as_ref().is_some_and(|grid| stamp_gizmo(ui, rect, grid, &settings, view, &ls.editor.selected, &mut ls.graph));
+            if response.dragged() && !moving_stamp {
                 let delta = response.drag_delta();
                 new_view.0 -= delta.x * 0.01;
                 new_view.1 = (new_view.1 + delta.y * 0.01).clamp(0.05, 1.5);
@@ -1206,7 +1293,7 @@ impl crate::App {
                 // Drawn on the GPU at the panel's full resolution, straight into egui's pass for this rectangle.
                 let uniforms = crate::landscape_gpu::ViewUniforms::new(grid, settings.world_m, settings.water_m, new_view, rect.width() / rect.height().max(1.0), format.is_srgb(), crate::landscape_gpu::MIN_STEP_CELLS, true);
                 let callback = crate::landscape_gpu::ViewCallback { uniforms, key: grid.key, heights: grid.heights.clone(), colours: grid.colours.clone(), n: grid.n, format };
-                ui.painter().add(eframe::egui_wgpu::Callback::new_paint_callback(rect, callback));
+                ui.painter().set(view_slot, eframe::egui_wgpu::Callback::new_paint_callback(rect, callback));
             } else {
                 ui.painter().rect_filled(rect, 0.0, egui::Color32::from_gray(30));
                 ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, if matches!(ls.job, Some(Job::Preview(..))) { "Sampling…" } else { "No terrain: the graph has no density output, or has an error" }, egui::FontId::proportional(14.0), egui::Color32::GRAY);
@@ -1409,8 +1496,22 @@ mod tests {
     }
 
     #[test]
+    fn the_stamp_gizmo_s_camera_projects_and_picks_back_the_same_point() {
+        let grid = crate::landscape_gpu::Grid::new(0, vec![0.0, 10.0, 20.0, 30.0], 2, 1000.0, None);
+        let cam = ViewCamera::new(&grid, 1000.0, (0.8, 0.6, 1.0), egui::Rect::from_min_size(egui::pos2(10.0, 20.0), egui::vec2(640.0, 360.0)));
+        for p in [[500.0, 500.0, 15.0], [200.0, 700.0, 5.0], [900.0, 100.0, 30.0]] {
+            let s = cam.project(p).expect("in front of the camera");
+            let back = cam.on_level(s, p[2]).unwrap();
+            assert!((back[0] - p[0]).abs() < 0.5 && (back[1] - p[1]).abs() < 0.5, "{p:?} -> {s:?} -> {back:?}");
+        }
+        // The middle of the terrain is the middle of the picture (the camera looks at it).
+        let mid = cam.project([500.0, 500.0, 15.0]).unwrap();
+        assert!((mid - cam.rect.center()).length() < 0.5);
+    }
+
+    #[test]
     fn the_height_range_fits_or_scales() {
-        let s = Settings { height_m: 100.0, ..Default::default() };
+        let s = Settings { fit: true, height_m: 100.0, ..Default::default() };
         assert_eq!(to_metres(&[-1.0, 0.0, 1.0], &s), [0.0, 50.0, 100.0]);
         let s = Settings { fit: false, height_m: 100.0, ..Default::default() };
         assert_eq!(to_metres(&[-1.0, 0.5], &s), [-100.0, 50.0]);

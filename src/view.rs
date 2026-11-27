@@ -472,10 +472,18 @@ pub fn request_timestamps(mut cfg: egui_wgpu::WgpuConfiguration) -> egui_wgpu::W
         new.device_descriptor = Arc::new(move |adapter| {
             let mut d = base(adapter);
             d.required_features |= adapter.features() & (wgpu::Features::TIMESTAMP_QUERY | crate::cache::FEATURE);
+            big_buffers(adapter, &mut d.required_limits);
             d
         });
     }
     cfg
+}
+
+/// Asks for the adapter's largest buffers: wgpu's default 128 MB binding is too small for a 2k terrain's maps.
+pub fn big_buffers(adapter: &wgpu::Adapter, limits: &mut wgpu::Limits) {
+    let a = adapter.limits();
+    limits.max_storage_buffer_binding_size = limits.max_storage_buffer_binding_size.max(a.max_storage_buffer_binding_size);
+    limits.max_buffer_size = limits.max_buffer_size.max(a.max_buffer_size);
 }
 
 pub fn build(device: &wgpu::Device, queue: &wgpu::Queue, format: wgpu::TextureFormat, graph_wgsl: &str, mask: bool, extras: Extras) -> Gpu {

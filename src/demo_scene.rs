@@ -235,7 +235,7 @@ fn write_demo_terrain() {
     std::fs::create_dir_all(&terrains).unwrap();
     let dunes = detail_graphs().into_iter().find(|(n, _)| *n == "Dunes").unwrap().1;
     let graph = landscape_graph(&embedded(&lib.join("Noises").join("Dunes.noisegraph"), &dunes));
-    let settings = crate::landscape::Settings { world_m: 1000.0, height_m: 140.0, ..Default::default() };
+    let settings = crate::landscape::Settings { world_m: 1000.0, height_m: 140.0, fit: true, ..Default::default() };
     let masks: Vec<_> = masks().iter().map(|m| serde_json::json!({ "name": m.name, "png": crate::landscape_masks::base64_encode(&m.to_png()) })).collect();
     let project = serde_json::json!({ "noiser_landscape": 1, "graph": graph.to_json(), "settings": settings, "masks": masks });
     let project_path = terrains.join("DemoLandscape.landscape");
