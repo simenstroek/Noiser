@@ -324,7 +324,7 @@ fn palette() -> Vec<(&'static str, NodeKind)> {
             ("Scatter SDF", NodeKind::Scatter(Default::default())),
             ("Terrain layer", NodeKind::TerrainLayer { name: String::new() }),
             ("Noise Graph", NodeKind::NoiseGraph(Default::default())),
-            ("Remesh", NodeKind::Remesh { triangles: 20_000, adaptivity: 1.0 }),
+            ("Remesh", NodeKind::Remesh { triangles: 5000, adaptivity: 1.0, mesher: Default::default(), auto_detail: false }),
             ("Auto UVs", NodeKind::AutoUv(Default::default())),
             ("Transfer UVs", NodeKind::TransferUv),
             ("Bake", NodeKind::Bake(Default::default())),

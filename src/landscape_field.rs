@@ -257,7 +257,7 @@ pub fn terrain_graph(png: &Path, world_m: f32) -> crate::graph::Graph {
     // Paint layers beside the heightmap (the Landscape tab writes them for its Layer nodes) are loaded too and baked per chunk.
     let layers: Vec<String> = sidecar_layers(png).into_iter().map(|(name, _)| name).take(8).collect();
     let land = g.add(NodeKind::LoadMesh(LoadMeshParams { path: png.to_string_lossy().into_owned(), unit_cm: 1.0, chunks, maps: layers.clone(), ..Default::default() }), [0.0, 0.0]);
-    let remesh = g.add(NodeKind::Remesh { triangles: 250_000, adaptivity: 1.0 }, [320.0, 0.0]);
+    let remesh = g.add(NodeKind::Remesh { triangles: 250_000, adaptivity: 1.0, mesher: Default::default(), auto_detail: false }, [320.0, 0.0]);
     let uv = g.add(NodeKind::AutoUv(crate::uvgen::UvParams { planar: true, ..Default::default() }), [600.0, 0.0]);
     let out = g.add(NodeKind::OutMesh(OutParams { folder: folder.clone(), name: "terrain".into(), ..Default::default() }), [880.0, 0.0]);
     let bake = g.add(NodeKind::Bake(crate::bake::Settings { channels: vec![crate::bake::Channel::Normal, crate::bake::Channel::Occlusion, crate::bake::Channel::Curvature], custom: layers.clone(), ..Default::default() }), [880.0, 160.0]);

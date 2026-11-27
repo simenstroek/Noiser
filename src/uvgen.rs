@@ -99,7 +99,7 @@ impl Default for UvParams {
 
 /// The positions after `rounds` of Taubin smoothing (a shrinking step and a slightly larger growing one, so the shape
 /// keeps its volume): the bumps go and the overall form stays.
-fn smoothed(mesh: &RawMesh, rounds: u32) -> Vec<V3> {
+pub(crate) fn smoothed(mesh: &RawMesh, rounds: u32) -> Vec<V3> {
     let n = mesh.positions.len();
     let mut ring: Vec<Vec<u32>> = vec![Vec::new(); n];
     for t in &mesh.triangles {

@@ -8,6 +8,10 @@ pub type NodeId = u32;
 pub use crate::graph_params::*;
 use crate::graph_params::{default_smooth, default_true, migrate_noise_kinds, one, tenth};
 
+fn default_triangles() -> u32 {
+    5000
+}
+
 fn eight() -> f32 {
     8.0
 }
@@ -135,10 +139,18 @@ pub enum NodeKind {
     NoiseGraph(crate::meshgraph::NoiseGraphParams),
     /// Mesh graph: the surface of a field as an adaptive triangle mesh of about `triangles` triangles.
     Remesh {
+        #[serde(default = "default_triangles")]
         triangles: u32,
         /// 0: even triangles everywhere; 1: strongly smaller ones where the surface bends (the default).
         #[serde(default = "one")]
         adaptivity: f32,
+        /// How the triangles are made (see `Mesher`).
+        #[serde(default)]
+        mesher: Mesher,
+        /// Scale `triangles` by how complex the shape is (measured on a coarse version of it, without the fine surface
+        /// noise): `triangles` is then the count for a plain sphere-like shape.
+        #[serde(default)]
+        auto_detail: bool,
     },
     /// Mesh graph: UVs for a mesh.
     AutoUv(crate::uvgen::UvParams),
@@ -1695,7 +1707,7 @@ mod frame_tests {
     fn meshes_and_images_only_connect_to_their_own_kind() {
         let mut g = Graph::default();
         let mesh = g.add(NodeKind::LoadMesh(Default::default()), [0.0; 2]);
-        let remesh = g.add(NodeKind::Remesh { triangles: 1000, adaptivity: 1.0 }, [0.0; 2]);
+        let remesh = g.add(NodeKind::Remesh { triangles: 1000, adaptivity: 1.0, mesher: Default::default(), auto_detail: false }, [0.0; 2]);
         let uv = g.add(NodeKind::AutoUv(Default::default()), [0.0; 2]);
         let bake = g.add(NodeKind::Bake(Default::default()), [0.0; 2]);
         let out_mesh = g.add(NodeKind::OutMesh(Default::default()), [0.0; 2]);

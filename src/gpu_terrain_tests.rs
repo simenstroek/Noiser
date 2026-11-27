@@ -66,7 +66,7 @@ fn graph_with(png: &Path, chunks: u32, triangles: u32, detail: bool, bake: Optio
         g.connect(rough, sum, 1);
         field = sum;
     }
-    let remesh = g.add(NodeKind::Remesh { triangles, adaptivity: 1.0 }, [0.0; 2]);
+    let remesh = g.add(NodeKind::Remesh { triangles, adaptivity: 1.0, mesher: Default::default(), auto_detail: false }, [0.0; 2]);
     let uv = g.add(NodeKind::AutoUv(crate::uvgen::UvParams { planar: true, ..Default::default() }), [0.0; 2]);
     let out = g.add(NodeKind::OutMesh(OutParams { folder: "out".into(), name: "terrain".into(), ..Default::default() }), [0.0; 2]);
     g.connect(field, remesh, 0);
@@ -94,7 +94,7 @@ fn run(dir: &Path, g: &Graph) -> (Vec<PathBuf>, Vec<String>) {
     let mut cache = MeshCache::default();
     let mut log = Vec::new();
     let mut note = |s: &str| log.push(s.to_string());
-    let written = Runner { device: &gpu.device, queue: &gpu.queue, cache: &mut cache, base: dir.to_path_buf(), seed: 0, progress: Default::default(), log: &mut note, batch_file: None, max_triangles: None }.run(g).unwrap();
+    let written = Runner { device: &gpu.device, queue: &gpu.queue, cache: &mut cache, base: dir.to_path_buf(), seed: 0, progress: Default::default(), log: &mut note, batch_file: None, max_triangles: None, tags: Default::default() }.run(g).unwrap();
     (written, log)
 }
 
@@ -376,7 +376,7 @@ fn the_field_view_shows_a_scattered_terrain_from_any_side_and_no_copies_past_its
     g.connect(scatter, remesh, 0);
     let mut cache = MeshCache::default();
     let mut quiet = |_: &str| {};
-    let view = Runner { device: &gpu.device, queue: &gpu.queue, cache: &mut cache, base: dir.clone(), seed: 0, progress: Default::default(), log: &mut quiet, batch_file: None, max_triangles: None }.field_view(&g).unwrap();
+    let view = Runner { device: &gpu.device, queue: &gpu.queue, cache: &mut cache, base: dir.clone(), seed: 0, progress: Default::default(), log: &mut quiet, batch_file: None, max_triangles: None, tags: Default::default() }.field_view(&g).unwrap();
     let clip = view.trace_box();
     assert!(clip.is_some(), "a terrain's field view traces only inside its box");
     let n = 128u32;
@@ -506,7 +506,7 @@ fn a_paint_layer_bakes_per_chunk() {
     // The layer baked as a custom map: bright on the left of the picture, dark on the right.
     let mut g = Graph::default();
     let land = g.add(NodeKind::LoadMesh(land_params(&["west"])), [0.0; 2]);
-    let remesh = g.add(NodeKind::Remesh { triangles: 6000, adaptivity: 1.0 }, [0.0; 2]);
+    let remesh = g.add(NodeKind::Remesh { triangles: 6000, adaptivity: 1.0, mesher: Default::default(), auto_detail: false }, [0.0; 2]);
     let uv = g.add(NodeKind::AutoUv(crate::uvgen::UvParams { planar: true, ..Default::default() }), [0.0; 2]);
     let bake = g.add(NodeKind::Bake(Settings { size: 64, padding: 2, channels: vec![Channel::Normal], custom: vec!["west".into()], samples: 1, ..Default::default() }), [0.0; 2]);
     let layer = g.add(NodeKind::TerrainLayer { name: "west".into() }, [0.0; 2]);
@@ -532,7 +532,7 @@ fn a_paint_layer_bakes_per_chunk() {
     let gpu = gpu().unwrap();
     let mut cache = MeshCache::default();
     let mut note = |_: &str| {};
-    let err = Runner { device: &gpu.device, queue: &gpu.queue, cache: &mut cache, base: dir.clone(), seed: 0, progress: Default::default(), log: &mut note, batch_file: None, max_triangles: None }.run(&bad).unwrap_err();
+    let err = Runner { device: &gpu.device, queue: &gpu.queue, cache: &mut cache, base: dir.clone(), seed: 0, progress: Default::default(), log: &mut note, batch_file: None, max_triangles: None, tags: Default::default() }.run(&bad).unwrap_err();
     assert!(err.contains("nope") && err.contains("maps"), "{err}");
 
 }
@@ -553,7 +553,7 @@ fn a_paint_layer_scales_scatter_density() {
         let mut g = Graph::default();
         let land = g.add(NodeKind::LoadMesh(land_params(&["none", "all"])), [0.0; 2]);
         let scatter = g.add(NodeKind::Scatter(crate::scatter::ScatterParams { file: sdf.to_string_lossy().into_owned(), cell: 160.0, density: 1.0, size: [50.0, 50.0], density_map: map.into(), blend: 0.0, ..Default::default() }), [0.0; 2]);
-        let remesh = g.add(NodeKind::Remesh { triangles: 6000, adaptivity: 1.0 }, [0.0; 2]);
+        let remesh = g.add(NodeKind::Remesh { triangles: 6000, adaptivity: 1.0, mesher: Default::default(), auto_detail: false }, [0.0; 2]);
         let out = g.add(NodeKind::OutMesh(OutParams { folder: "out".into(), name: name.into(), ..Default::default() }), [0.0; 2]);
         g.connect(land, scatter, 0);
         g.connect(scatter, remesh, 0);
@@ -567,4 +567,136 @@ fn a_paint_layer_scales_scatter_density() {
     let all = count("all", "scatter_all");
     assert_eq!(none, 0, "no copies where the map is 0");
     assert!(all > 0, "copies where the map is 1");
+}
+
+/// The mesh graph Noise Graph amplitude has the sign of the noise graph tab: a positive density pushes the surface outward.
+#[test]
+fn a_positive_noise_graph_amplitude_pushes_the_surface_outward() {
+    use crate::graph::{MathOp, Mesher};
+    if gpu().is_none() {
+        return eprintln!("no GPU adapter; skipping");
+    }
+    let dir = std::env::temp_dir().join("noiser-amplitude-sign");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let ball = crate::mesh::shapes::icosphere(1.0, 3);
+    crate::surface::RawMesh { normals: ball.positions.clone(), positions: ball.positions, triangles: ball.triangles }.write_obj(&dir.join("ball.obj")).unwrap();
+    // A noise graph whose density is the constant 0.2.
+    let mut n = Graph::default();
+    let c = n.add(NodeKind::Float(0.2), [0.0; 2]);
+    let out = n.add(NodeKind::OutDensity, [0.0; 2]);
+    n.connect(c, out, 0);
+    let radius = |amplitude: f32, mesher: Mesher, name: &str| -> f32 {
+        let mut g = Graph::default();
+        let mesh = g.add(NodeKind::LoadMesh(LoadMeshParams { path: "ball.obj".into(), resolution: 64, ..Default::default() }), [0.0; 2]);
+        let noise = g.add(NodeKind::NoiseGraph(crate::meshgraph::NoiseGraphParams { embedded: n.to_json(), frequency: 1.0, amplitude, ..Default::default() }), [0.0; 2]);
+        let sum = g.add(NodeKind::Math { op: MathOp::Add, a: 0.0, b: 0.0, c: 0.5 }, [0.0; 2]);
+        let remesh = g.add(NodeKind::Remesh { triangles: 3000, adaptivity: 1.0, mesher, auto_detail: false }, [0.0; 2]);
+        let o = g.add(NodeKind::OutMesh(OutParams { folder: "out".into(), name: name.into(), ..Default::default() }), [0.0; 2]);
+        g.connect(mesh, sum, 0);
+        g.connect(noise, sum, 1);
+        g.connect(sum, remesh, 0);
+        g.connect(remesh, o, 0);
+        let (written, log) = run(&dir, &g);
+        let v = vertices(&written[0]);
+        assert!(!v.is_empty(), "{log:?}");
+        let r: Vec<f32> = v.iter().map(|p| p.iter().map(|c| c.parse::<f32>().unwrap().powi(2)).sum::<f32>().sqrt()).collect();
+        r.iter().sum::<f32>() / r.len() as f32
+    };
+    let (plain, up, down) = (radius(0.0, Mesher::Adaptive, "plain"), radius(1.0, Mesher::Adaptive, "up"), radius(-1.0, Mesher::Adaptive, "down"));
+    assert!(up > plain + 0.1 && down < plain - 0.1, "plain {plain}, positive {up}, negative {down}");
+    // The other meshers follow the same field.
+    for mesher in [Mesher::SurfaceNets, Mesher::MarchingTets] {
+        let r = radius(1.0, mesher, "grid");
+        assert!((r - up).abs() < 0.08, "{mesher:?}: {r} against {up}");
+    }
+}
+
+/// With no input meshes a batch is the same graph run again, the seed changing and the smart tags keeping the files apart.
+#[test]
+fn a_batch_without_meshes_makes_one_file_per_seed() {
+    use crate::graph::MathOp;
+    let Some(gpu) = gpu() else { return eprintln!("no GPU adapter; skipping") };
+    let dir = std::env::temp_dir().join("noiser-seed-batch");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let ball = crate::mesh::shapes::icosphere(1.0, 3);
+    crate::surface::RawMesh { normals: ball.positions.clone(), positions: ball.positions, triangles: ball.triangles }.write_obj(&dir.join("ball.obj")).unwrap();
+    let mut n = Graph::default();
+    let pos = n.add(NodeKind::position(), [0.0; 2]);
+    let noise = n.add(NodeKind::Noise(NoiseParams { kind: NoiseKind::Perlin, scale: 2.0, octaves: 2, amount: 0.1, ..Default::default() }), [0.0; 2]);
+    let out = n.add(NodeKind::OutDensity, [0.0; 2]);
+    n.connect(pos, noise, 0);
+    n.connect(noise, out, 0);
+    let mut g = Graph::default();
+    let mesh = g.add(NodeKind::LoadMesh(LoadMeshParams { path: "ball.obj".into(), resolution: 64, ..Default::default() }), [0.0; 2]);
+    let rough = g.add(NodeKind::NoiseGraph(crate::meshgraph::NoiseGraphParams { embedded: n.to_json(), frequency: 1.0, amplitude: 1.0, ..Default::default() }), [0.0; 2]);
+    let sum = g.add(NodeKind::Math { op: MathOp::Add, a: 0.0, b: 0.0, c: 0.5 }, [0.0; 2]);
+    let remesh = g.add(NodeKind::Remesh { triangles: 800, adaptivity: 1.0, mesher: Default::default(), auto_detail: false }, [0.0; 2]);
+    let o = g.add(NodeKind::OutMesh(OutParams { folder: "out".into(), name: "{graph}_{seed}_{index}".into(), ..Default::default() }), [0.0; 2]);
+    g.connect(mesh, sum, 0);
+    g.connect(rough, sum, 1);
+    g.connect(sum, remesh, 0);
+    g.connect(remesh, o, 0);
+    let tags = crate::meshgraph::RunTags { graph: "rock".into(), count: 3, ..Default::default() };
+    let mut cache = MeshCache::default();
+    let mut files = Vec::new();
+    for i in 0..3 {
+        let mut note = |_: &str| {};
+        let w = Runner { device: &gpu.device, queue: &gpu.queue, cache: &mut cache, base: dir.clone(), seed: crate::meshexport::SeedMode::Increment.seed_for(10, i), progress: Default::default(), log: &mut note, batch_file: None, max_triangles: None, tags: tags.run(i) }.run(&g).unwrap();
+        files.extend(w);
+    }
+    let names: Vec<String> = files.iter().map(|f| f.file_name().unwrap().to_string_lossy().into_owned()).collect();
+    assert_eq!(names, ["rock_10_01.obj", "rock_11_02.obj", "rock_12_03.obj"]);
+    let contents: std::collections::BTreeSet<String> = files.iter().map(|f| std::fs::read_to_string(f).unwrap()).collect();
+    assert_eq!(contents.len(), 3, "a different seed makes a different rock");
+}
+
+/// Every mesher aims at the triangle count asked for, and the complexity option gives a plain sphere about the count and a
+/// rough one more.
+#[test]
+fn meshers_hit_the_triangle_count_and_complexity_scales_it() {
+    use crate::graph::{MathOp, Mesher};
+    if gpu().is_none() {
+        return eprintln!("no GPU adapter; skipping");
+    }
+    let dir = std::env::temp_dir().join("noiser-meshers");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let ball = crate::mesh::shapes::icosphere(1.0, 3);
+    crate::surface::RawMesh { normals: ball.positions.clone(), positions: ball.positions, triangles: ball.triangles }.write_obj(&dir.join("ball.obj")).unwrap();
+    let count = |mesher: Mesher, auto: bool, name: &str, bumps: Option<f32>| -> usize {
+        let mut g = Graph::default();
+        let mesh = g.add(NodeKind::LoadMesh(LoadMeshParams { path: "ball.obj".into(), resolution: 64, ..Default::default() }), [0.0; 2]);
+        let mut field = mesh;
+        if let Some(a) = bumps {
+            let mut n = Graph::default();
+            let pos = n.add(NodeKind::position(), [0.0; 2]);
+            let noise = n.add(NodeKind::Noise(NoiseParams { kind: NoiseKind::Perlin, scale: 1.0, octaves: 1, amount: 1.0, seed: Some(1), ..Default::default() }), [0.0; 2]);
+            let out = n.add(NodeKind::OutDensity, [0.0; 2]);
+            n.connect(pos, noise, 0);
+            n.connect(noise, out, 0);
+            let rough = g.add(NodeKind::NoiseGraph(crate::meshgraph::NoiseGraphParams { embedded: n.to_json(), frequency: 4.0, amplitude: a, ..Default::default() }), [0.0; 2]);
+            let sum = g.add(NodeKind::Math { op: MathOp::Add, a: 0.0, b: 0.0, c: 0.5 }, [0.0; 2]);
+            g.connect(mesh, sum, 0);
+            g.connect(rough, sum, 1);
+            field = sum;
+        }
+        let remesh = g.add(NodeKind::Remesh { triangles: 2000, adaptivity: 1.0, mesher, auto_detail: auto }, [0.0; 2]);
+        let o = g.add(NodeKind::OutMesh(OutParams { folder: "out".into(), name: name.into(), ..Default::default() }), [0.0; 2]);
+        g.connect(field, remesh, 0);
+        g.connect(remesh, o, 0);
+        let (written, log) = run(&dir, &g);
+        let n = std::fs::read_to_string(&written[0]).unwrap().lines().filter(|l| l.starts_with("f ")).count();
+        assert!(n > 0, "{log:?}");
+        n
+    };
+    for (mesher, name) in [(Mesher::Adaptive, "a"), (Mesher::SurfaceNets, "n"), (Mesher::MarchingTets, "t")] {
+        let n = count(mesher, false, name, None);
+        assert!((1500..2700).contains(&n), "{mesher:?} gave {n} triangles for 2000");
+    }
+    let plain = count(Mesher::Adaptive, true, "plain_auto", None);
+    let rough = count(Mesher::Adaptive, true, "rough_auto", Some(0.12));
+    assert!((1500..2800).contains(&plain), "a sphere keeps about the count: {plain}");
+    assert!(rough > plain * 3 / 2, "a bumpy shape gets more: {rough} against {plain}");
 }

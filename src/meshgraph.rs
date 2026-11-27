@@ -92,7 +92,8 @@ pub fn noise_graph_source(p: &NoiseGraphParams, base: &Path) -> Result<Graph, St
 
 /// The field part of a mesh graph as one plain graph: every Noise Graph node becomes a copy of the graph it names.
 /// The copy's Position nodes read the Noise Graph node's position input times `frequency`; its density output times
-/// `amplitude` takes the node's place (and id), so everything downstream and the node's preview keep working.
+/// minus `amplitude` takes the node's place (and id): a mesh graph's field is a distance, negative inside, so subtracting
+/// the density moves the surface outward where the noise graph's density is positive, as in the noise graph, so everything downstream and the node's preview keep working.
 pub fn lowered_mesh(g: &Graph, base: &Path) -> Result<Graph, String> {
     use crate::graph::MathOp;
     let mut out = g.clone();
@@ -162,7 +163,7 @@ pub fn lowered_mesh(g: &Graph, base: &Path) -> Result<Graph, String> {
         let Some(src) = sub.edges.iter().find(|e| e.to == out_id && e.port == 0) else { return Err("the noise graph's Density Output is not connected".into()) };
         let Some(&src_new) = map.get(&src.from) else { return Err("the noise graph's Density Output reads a missing node".into()) };
         out.edges.retain(|e| !(e.to == id));
-        out.nodes.get_mut(&id).unwrap().kind = NodeKind::Math { op: MathOp::Multiply, a: 0.0, b: p.amplitude * amp_k, c: 0.5 };
+        out.nodes.get_mut(&id).unwrap().kind = NodeKind::Math { op: MathOp::Multiply, a: 0.0, b: -p.amplitude * amp_k, c: 0.5 };
         out.connect_from(src_new, src.from_port, id, 0);
     }
     Ok(out)
@@ -240,7 +241,105 @@ pub struct Runner<'a> {
     pub batch_file: Option<PathBuf>,
     /// Quick previews: Remesh nodes make at most this many triangles.
     pub max_triangles: Option<u32>,
+    /// What the `{tags}` in output names become: the graph, the run's place in its batch, the time.
+    pub tags: RunTags,
 }
+
+/// What the smart tags of an output name stand for in one run.
+#[derive(Clone, Debug, Default)]
+pub struct RunTags {
+    /// The mesh graph file's name without its extension ("" for a graph never saved).
+    pub graph: String,
+    /// Which run of the batch this is (from 0) and how many there are.
+    pub index: usize,
+    pub count: usize,
+    /// When the batch started, local time as `YYYYMMDD-HHMMSS`: the same for every run of one batch.
+    pub timestamp: String,
+}
+
+impl RunTags {
+    /// Tags for a batch of `count` runs starting now, of the graph in `file`.
+    pub fn new(file: Option<&Path>, count: usize) -> RunTags {
+        let graph = file.and_then(|f| f.file_stem()).map_or(String::new(), |s| s.to_string_lossy().into_owned());
+        RunTags { graph, index: 0, count: count.max(1), timestamp: timestamp_now() }
+    }
+
+    /// The tags for run `index` of the same batch.
+    pub fn run(&self, index: usize) -> RunTags {
+        RunTags { index, ..self.clone() }
+    }
+}
+
+/// Local time as `YYYYMMDD-HHMMSS`.
+pub fn timestamp_now() -> String {
+    let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs()) as i64;
+    // The local offset from the clock the OS reports for this moment; UTC where it cannot be had.
+    let local = secs + local_offset_secs();
+    let (days, rem) = (local.div_euclid(86_400), local.rem_euclid(86_400));
+    // Civil date from days since 1970-01-01 (Howard Hinnant's algorithm).
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let (y, doy) = (yoe + era * 400, doe - (365 * yoe + yoe / 4 - yoe / 100));
+    let mp = (5 * doy + 2) / 153;
+    let (d, m) = (doy - (153 * mp + 2) / 5 + 1, if mp < 10 { mp + 3 } else { mp - 9 });
+    let y = if m <= 2 { y + 1 } else { y };
+    format!("{y:04}{m:02}{d:02}-{:02}{:02}{:02}", rem / 3600, rem % 3600 / 60, rem % 60)
+}
+
+#[cfg(windows)]
+fn local_offset_secs() -> i64 {
+    #[repr(C)]
+    struct TimeZoneInformation {
+        bias: i32,
+        standard_name: [u16; 32],
+        standard_date: [u16; 8],
+        standard_bias: i32,
+        daylight_name: [u16; 32],
+        daylight_date: [u16; 8],
+        daylight_bias: i32,
+    }
+    unsafe extern "system" {
+        fn GetTimeZoneInformation(info: *mut TimeZoneInformation) -> u32;
+    }
+    // SAFETY: a plain Win32 call that fills the struct it is given.
+    unsafe {
+        let mut info: TimeZoneInformation = std::mem::zeroed();
+        let id = GetTimeZoneInformation(&mut info);
+        let extra = match id {
+            1 => info.standard_bias,
+            2 => info.daylight_bias,
+            _ => 0,
+        };
+        -((info.bias + extra) as i64) * 60
+    }
+}
+
+#[cfg(not(windows))]
+fn local_offset_secs() -> i64 {
+    0
+}
+
+/// `name` with its smart tags replaced. `{name}`: the batch mesh's name, else the graph's; `{graph}`: the graph file's name;
+/// `{seed}`; `{index}`: the run's number from 1, as wide as the count needs (01 to 10); `{count}`; `{timestamp}`
+/// (`20261127-141502`), `{date}` and `{time}` (its parts). Unknown tags stay as written.
+pub fn expand_tags(name: &str, batch_stem: Option<&str>, seed: u32, t: &RunTags) -> String {
+    let graph = if t.graph.is_empty() { "mesh" } else { t.graph.as_str() };
+    let (date, time) = t.timestamp.split_once('-').unwrap_or((t.timestamp.as_str(), ""));
+    let width = t.count.to_string().len().max(2);
+    name.replace("{name}", batch_stem.filter(|s| !s.is_empty()).unwrap_or(graph))
+        .replace("{graph}", graph)
+        .replace("{seed}", &seed.to_string())
+        .replace("{index}", &format!("{:0width$}", t.index + 1))
+        .replace("{count}", &t.count.to_string())
+        .replace("{timestamp}", &t.timestamp)
+        .replace("{date}", date)
+        .replace("{time}", time)
+}
+
+/// The smart tags output names understand, for hints.
+pub const TAG_HELP: &str = "{name} (the batch mesh's name, else the graph's), {graph}, {seed}, {index} (run number), {count}, {timestamp}, {date}, {time}";
 
 impl Runner<'_> {
     fn resolve(&self, p: &str) -> PathBuf {
@@ -417,9 +516,9 @@ let (mut lo, mut hi) = if loaded.is_empty() && sdf_boxes.is_empty() { ([0.0; 3],
             crate::library::dir(crate::library::Kind::Bake).filter(|d| d.is_dir()).unwrap_or_else(|| self.base.clone())
         };
         let _ = std::fs::create_dir_all(&dir);
-        let stem = self.batch_file.as_ref().and_then(|f| f.file_stem()).map_or(String::new(), |s| s.to_string_lossy().into_owned());
+        let stem = self.batch_file.as_ref().and_then(|f| f.file_stem()).map(|s| s.to_string_lossy().into_owned());
         let chunk = self.cache.chunk.map_or(String::new(), |(cx, cy)| format!("_{cy:02}_{cx:02}"));
-        let name = format!("{}{chunk}{suffix}", o.name.replace("{name}", &stem));
+        let name = format!("{}{chunk}{suffix}", expand_tags(&o.name, stem.as_deref(), self.seed, &self.tags));
         // An existing file is overwritten: a rerun must keep the same names.
         dir.join(format!("{name}.{ext}"))
     }
@@ -571,18 +670,31 @@ let (mut lo, mut hi) = if loaded.is_empty() && sdf_boxes.is_empty() { ([0.0; 3],
         let node = original.nodes.get(&id).ok_or("a wire reads a missing node")?;
         let input = |port: usize| original.input_from(id, port).ok_or_else(|| format!("node {id} has input {} unconnected", port + 1));
         let v = match &node.kind {
-            NodeKind::Remesh { triangles, adaptivity } => {
-                let triangles = &self.max_triangles.map_or(*triangles, |m| (*triangles).min(m));
+            NodeKind::Remesh { triangles, adaptivity, mesher, auto_detail } => {
                 let field = self.field_for(original, lowered, input(0)?, true, fields)?;
+                // A terrain keeps its own meshing (chunks cut from one lattice); the options below are for shapes.
+                let mut triangles = *triangles;
+                if let (true, None) = (*auto_detail, &field.land) {
+                    let d = Displace { amount: 0.0, tile_size: 1.0, prim_size: 1.0, mask: crate::meshmask::PackedMask::NONE };
+                    let norm = Normalization { center: [0.0; 3], scale: 1.0 };
+                    let job = Job { ev: &field.ev, d, lo: field.lo, hi: field.hi, reach: field.reach, norm, settings: Settings { remesh: Some(triangles as usize), ..Default::default() } };
+                    let (complexity, _) = job.complexity_probe(&self.progress);
+                    // 1 is a sphere: plainer shapes get fewer triangles, complex ones more, within a factor of 4 either way.
+                    let factor = complexity.clamp(0.4, 4.0);
+                    let scaled = ((triangles as f32 * factor) as u32).max(200);
+                    (self.log)(&format!("shape complexity {complexity:.2} (a sphere is 1): {triangles} x {factor:.2} = {scaled} triangles"));
+                    triangles = scaled;
+                }
+                let triangles = &self.max_triangles.map_or(triangles, |m| triangles.min(m));
                 if let Some(land) = &field.land {
                     Value::Mesh(self.terrain_chunk(&field, land, *triangles as usize))
                 } else {
-                (self.log)(&format!("remeshing to {triangles} triangles"));
+                (self.log)(&format!("meshing to about {triangles} triangles ({mesher:?})"));
                 let d = Displace { amount: 0.0, tile_size: 1.0, prim_size: 1.0, mask: crate::meshmask::PackedMask::NONE };
                 let norm = Normalization { center: [0.0; 3], scale: 1.0 };
                 let settings = Settings { remesh: Some(*triangles as usize), ..Default::default() };
                 let job = Job { ev: &field.ev, d, lo: field.lo, hi: field.hi, reach: field.reach, norm, settings };
-                let mut mesh = job.remeshed_with(*triangles as usize, *adaptivity, &self.progress);
+                let mut mesh = job.meshed(*mesher, *triangles as usize, *adaptivity, &self.progress);
                 mesh.recompute_normals();
                 // The numbers that say whether the remesh is any good: triangle shape, folds, distance from the field's surface.
                 let diagonal = (0..3).map(|a| (field.hi[a] - field.lo[a]).powi(2)).sum::<f32>().sqrt();
@@ -620,8 +732,10 @@ let (mut lo, mut hi) = if loaded.is_empty() && sdf_boxes.is_empty() { ([0.0; 3],
                         (self.log)("planar UVs from above");
                         crate::uvgen::planar(&mesh, x0, y0, size)
                     }
-                    (true, None) => return Err(format!("node {id} (Auto UVs): Planar UVs need a terrain chunk (a Load Mesh node with a heightmap) before the Remesh")),
                     _ => {
+                        if params.planar {
+                            (self.log)("note: planar UVs are for terrain chunks (a Load Mesh with a heightmap before the Remesh); unwrapping this mesh instead");
+                        }
                         (self.log)("unwrapping");
                         crate::uvgen::generate(&mesh, params)?
                     }
@@ -765,4 +879,32 @@ struct FieldSource {
     objects: Vec<([f32; 3], [f32; 3])>,
     /// Keeps the distance grids' textures alive as long as the evaluator.
     _loaded: Vec<std::sync::Arc<LoadedMesh>>,
+}
+
+#[cfg(test)]
+mod tag_tests {
+    use super::*;
+
+    #[test]
+    fn smart_tags_fill_in_names_for_a_batch_with_and_without_meshes() {
+        let t = RunTags { graph: "ProcRock01".into(), index: 2, count: 10, timestamp: "20261127-141502".into() };
+        // No batch mesh: {name} is the graph's name, not nothing.
+        assert_eq!(expand_tags("{name}", None, 7, &t), "ProcRock01");
+        assert_eq!(expand_tags("{name}_{seed}_{index}", Some("rock.obj".trim_end_matches(".obj")), 9, &t), "rock_9_03");
+        assert_eq!(expand_tags("{graph}-{timestamp}-{date}-{time}-{count}", None, 0, &t), "ProcRock01-20261127-141502-20261127-141502-10");
+        // The index is as wide as the count needs, and never narrower than two digits.
+        assert_eq!(expand_tags("{index}", None, 0, &RunTags { index: 99, count: 100, ..t.clone() }), "100");
+        assert_eq!(expand_tags("{index}", None, 0, &RunTags { index: 0, count: 3, ..t.clone() }), "01");
+        // An unsaved graph is called "mesh"; unknown tags stay as they are.
+        assert_eq!(expand_tags("{name}{x}", None, 0, &RunTags::default()), "mesh{x}");
+    }
+
+    #[test]
+    fn the_timestamp_has_the_documented_shape() {
+        let t = timestamp_now();
+        assert_eq!(t.len(), 15, "{t}");
+        assert_eq!(t.as_bytes()[8], b'-');
+        assert!(t.chars().filter(|c| *c != '-').all(|c| c.is_ascii_digit()), "{t}");
+        assert!(t.starts_with("20"), "{t}");
+    }
 }

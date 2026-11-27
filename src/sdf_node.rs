@@ -549,7 +549,7 @@ pub(crate) mod tests {
         let shape = g.add(NodeKind::LoadSdf(LoadSdfParams { file: "../SDFs/Vase.sdf".into(), fit: false, ..Default::default() }), [0.0, 0.0]);
         let noise = g.add(NodeKind::NoiseGraph(crate::meshgraph::NoiseGraphParams { file: "../Noises/Warped cells.noisegraph".into(), embedded: noise_json, frequency: 0.8, amplitude: 0.1, detached: false }), [0.0, 130.0]);
         let add = g.add(NodeKind::Math { op: MathOp::Add, a: 0.0, b: 0.0, c: 0.5 }, [220.0, 60.0]);
-        let remesh = g.add(NodeKind::Remesh { triangles: 20_000, adaptivity: 1.0 }, [420.0, 60.0]);
+        let remesh = g.add(NodeKind::Remesh { triangles: 20_000, adaptivity: 1.0, mesher: Default::default(), auto_detail: false }, [420.0, 60.0]);
         let uv = g.add(NodeKind::AutoUv(Default::default()), [620.0, 60.0]);
         let out = g.add(NodeKind::OutMesh(crate::meshgraph::OutParams { folder: "out".into(), name: "vase_rough".into(), ..Default::default() }), [820.0, 60.0]);
         g.connect(shape, add, 0);
@@ -581,7 +581,7 @@ pub(crate) mod tests {
         let hole = g.add(NodeKind::LoadSdf(LoadSdfParams { file: sdf.to_string_lossy().into_owned(), fit: false, ..Default::default() }), [0.0; 2]);
         let negated = g.add(NodeKind::Math { op: MathOp::Multiply, a: 0.0, b: -1.0, c: 0.5 }, [0.0; 2]);
         let carved = g.add(NodeKind::Math { op: MathOp::Max, a: 0.0, b: 0.0, c: 0.5 }, [0.0; 2]);
-        let remesh = g.add(NodeKind::Remesh { triangles: 4000, adaptivity: 1.0 }, [0.0; 2]);
+        let remesh = g.add(NodeKind::Remesh { triangles: 4000, adaptivity: 1.0, mesher: Default::default(), auto_detail: false }, [0.0; 2]);
         let out = g.add(NodeKind::OutMesh(crate::meshgraph::OutParams { folder: "out".into(), name: "carved".into(), ..Default::default() }), [0.0; 2]);
         g.connect(hole, negated, 0);
         g.connect(mesh, carved, 0);
@@ -591,7 +591,7 @@ pub(crate) mod tests {
         let mut cache = crate::meshgraph::MeshCache::default();
         let mut log = Vec::new();
         let mut note = |s: &str| log.push(s.to_string());
-        let written = crate::meshgraph::Runner { device: &gpu.device, queue: &gpu.queue, cache: &mut cache, base: dir.clone(), seed: 0, progress: Default::default(), log: &mut note, batch_file: None, max_triangles: None }
+        let written = crate::meshgraph::Runner { device: &gpu.device, queue: &gpu.queue, cache: &mut cache, base: dir.clone(), seed: 0, progress: Default::default(), log: &mut note, batch_file: None, max_triangles: None, tags: Default::default() }
             .run(&g)
             .unwrap_or_else(|e| panic!("{e}
 {log:?}"));

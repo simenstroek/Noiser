@@ -34,6 +34,14 @@ ring facing the middle); `Remesh` turns the field into triangles (`LoadMesh` wit
 Nanite chunks); `AutoUv` (`planar: true` for terrain) unwraps; `Bake` makes normal/occlusion/curvature maps from a field; `OutMesh`
 and `OutImage` write files. A graph needs at least one output node to do anything.
 
+## Batches without input meshes
+
+`noiser --headless --mesh-graph G.meshgraph --runs 10 [--seed 3] [--seed-mode increment|random|same]` runs the graph ten times
+with the seed changing (increment is the default for several runs); in the app, **Run x N** does the same. Output names take smart
+tags: `{name}` (the batch mesh's name, else the graph file's), `{graph}`, `{seed}`, `{index}` (run number, 01..), `{count}`,
+`{timestamp}`, `{date}`, `{time}`. Without `{seed}`, `{index}` or `{timestamp}` every run overwrites the last (a warning says so).
+A Noise Graph node's amplitude has the noise graph tab's sign: positive pushes the surface outward.
+
 ## The Landscape graph
 
 A `.landscape` project is a graph over one tile (x and y across the terrain, 0 to 1) whose Density Output is the height, plus

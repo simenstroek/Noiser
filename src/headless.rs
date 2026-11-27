@@ -311,16 +311,27 @@ fn run_mesh_graph(args: &[String], log: &mut Log) -> Result<usize, String> {
             _ => {}
         }
     }
+    // Without meshes: `--runs N` makes N runs (with `--seed-mode increment|random|same`, default increment when there are several).
+    let runs = args.iter().position(|a| a == "--runs").and_then(|i| args.get(i + 1)).map_or(Ok(1), |v| v.parse::<usize>().map_err(|_| format!("--runs {v}: not a whole number")))?;
     if batch.is_empty() {
-        batch.push(None);
+        batch.extend(std::iter::repeat_n(None, runs.max(1)));
     }
+    let mode = match args.iter().position(|a| a == "--seed-mode").and_then(|i| args.get(i + 1)).map(String::as_str) {
+        Some("same") => crate::meshexport::SeedMode::Same,
+        Some("increment") => crate::meshexport::SeedMode::Increment,
+        Some("random") => crate::meshexport::SeedMode::Random,
+        Some(other) => return Err(format!("--seed-mode {other}: use same, increment or random")),
+        None if batch.len() > 1 => crate::meshexport::SeedMode::Increment,
+        None => crate::meshexport::SeedMode::Same,
+    };
+    let tags = crate::meshgraph::RunTags::new(Some(&file), batch.len());
     let started = std::time::Instant::now();
     let (mut failed, mut written) = (0usize, 0usize);
     for (i, file) in batch.iter().enumerate() {
         let lines = std::cell::RefCell::new(Vec::<String>::new());
         let mut note = |s: &str| lines.borrow_mut().push(s.to_string());
         let result = {
-            let mut runner = crate::meshgraph::Runner { device: &device, queue: &queue, cache: &mut cache, base: base.clone(), seed, progress: Default::default(), log: &mut note, batch_file: file.clone(), max_triangles: None };
+            let mut runner = crate::meshgraph::Runner { device: &device, queue: &queue, cache: &mut cache, base: base.clone(), seed: mode.seed_for(seed, i), progress: Default::default(), log: &mut note, batch_file: file.clone(), max_triangles: None, tags: tags.run(i) };
             runner.run(&graph)
         };
         let label = file.as_ref().map_or(String::new(), |f| format!("[{}/{}] {}: ", i + 1, batch.len(), f.display()));

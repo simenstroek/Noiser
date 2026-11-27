@@ -205,7 +205,7 @@ fn mesh_graph(png: &Path, lib: &Path, out_dir: &Path, triangles: u32) -> Graph {
         g.connect(rough, scatter, 1);
         field = scatter;
     }
-    let remesh = g.add(NodeKind::Remesh { triangles, adaptivity: 1.0 }, [0.0; 2]);
+    let remesh = g.add(NodeKind::Remesh { triangles, adaptivity: 1.0, mesher: Default::default(), auto_detail: false }, [0.0; 2]);
     let uv = g.add(NodeKind::AutoUv(crate::uvgen::UvParams { planar: true, ..Default::default() }), [0.0; 2]);
     let mesh_out = g.add(NodeKind::OutMesh(OutParams { folder: folder.clone(), name: "Terrain".into(), ..Default::default() }), [0.0; 2]);
     let bake = g.add(NodeKind::Bake(crate::bake::Settings { channels: vec![crate::bake::Channel::Normal, crate::bake::Channel::Occlusion, crate::bake::Channel::Curvature], size: 2048, ..Default::default() }), [0.0; 2]);
@@ -339,7 +339,7 @@ fn eiffel_mesh_graph(png: &Path, lib: &Path, out_dir: &Path, triangles: u32, map
     );
     g.connect(sphinxes, boulders, 0);
     g.connect(rough, boulders, 1);
-    let remesh = g.add(NodeKind::Remesh { triangles, adaptivity: 1.0 }, [0.0; 2]);
+    let remesh = g.add(NodeKind::Remesh { triangles, adaptivity: 1.0, mesher: Default::default(), auto_detail: false }, [0.0; 2]);
     let uv = g.add(NodeKind::AutoUv(crate::uvgen::UvParams { planar: true, ..Default::default() }), [0.0; 2]);
     let mesh_out = g.add(NodeKind::OutMesh(OutParams { folder: folder.clone(), name: "Terrain".into(), ..Default::default() }), [0.0; 2]);
     // An "objects" map: how far the surface is from the bare terrain (0 on the ground, 1 from 6 m up), so the material can paint

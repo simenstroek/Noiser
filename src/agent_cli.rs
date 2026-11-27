@@ -51,7 +51,7 @@ fn catalogue() -> Vec<(&'static str, NodeKind, &'static str)> {
         ("LoadSdf", K::LoadSdf(Default::default()), "A .sdf composition (from the SDF Composer) as a field, placed with `offset`/`size`/`snap`/`z_up`/`stamp`. Input 0: position."),
         ("Scatter", K::Scatter(Default::default()), "Copies of a .sdf shape planted across a terrain by density/size/slope/elevation, or in a ring. Inputs: 0 the terrain field, 1 optional displacement for the copies."),
         ("NoiseGraph", K::NoiseGraph(Default::default()), "A .noisegraph as a node (use it as displacement). Input 0: position."),
-        ("Remesh", K::Remesh { triangles: 100_000, adaptivity: 1.0 }, "Turns a field into an adaptive triangle mesh of about `triangles` triangles. Input 0: the field."),
+        ("Remesh", K::Remesh { triangles: 100_000, adaptivity: 1.0, mesher: Default::default(), auto_detail: false }, "Turns a field into a triangle mesh of about `triangles` triangles (default 5000). `mesher`: Adaptive (default; small even triangles where the surface bends), SurfaceNets or MarchingTets (regular grids, faster, always closed for tets). `auto_detail: true` scales `triangles` by the shape's complexity (measured on a coarse version without the fine noise; a sphere is 1, up to 4x more or 0.4x fewer), so each shape of a batch gets its own count. Input 0: the field."),
         ("AutoUv", K::AutoUv(Default::default()), "UVs for a mesh (input 0). `planar` for terrain."),
         ("Bake", K::Bake(Default::default()), "Maps baked onto a mesh (input 0) from a field (input 1); one image output per map."),
         ("OutMesh", K::OutMesh(Default::default()), "Writes the mesh at input 0 to `folder`/`name`."),

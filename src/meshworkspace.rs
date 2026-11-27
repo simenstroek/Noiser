@@ -138,7 +138,7 @@ impl RayWorker {
                     current = None;
                     let mut quiet = |_: &str| {};
                     let built = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        Runner { device: &device, queue: &queue, cache: &mut cache, base: req.base.clone(), seed: req.seed, progress: Default::default(), log: &mut quiet, batch_file: None, max_triangles: None }.field_view(&req.graph)
+                        Runner { device: &device, queue: &queue, cache: &mut cache, base: req.base.clone(), seed: req.seed, progress: Default::default(), log: &mut quiet, batch_file: None, max_triangles: None, tags: Default::default() }.field_view(&req.graph)
                     }));
                     match built {
                         Ok(Ok(view)) => current = Some((req.key, view)),
@@ -187,6 +187,8 @@ pub struct MeshWorkspace {
     pub seed: u32,
     /// How a batch ('Run on files') picks the seed of each mesh from `seed`.
     pub seed_mode: crate::meshexport::SeedMode,
+    /// How many runs "Run several times" makes (a batch with no input meshes: the seed changes from run to run).
+    pub batch_runs: u32,
     pub udim: crate::udim::Tool,
     /// Start a run on the first frame (for `--run-mesh-graph`).
     pub autorun: bool,
@@ -494,7 +496,7 @@ impl Default for MeshWorkspace {
         let mut editor = crate::editor::Editor::default();
         editor.mesh_mode = true;
         editor.frame_next = true;
-        MeshWorkspace { saved: graph.clone(), graph, editor, path: None, cache: Arc::new(Mutex::new(MeshCache::default())), job: None, log: Vec::new(), written: Vec::new(), seed: 0, seed_mode: Default::default(), udim: Default::default(), autorun: false, preview: None, show_uv: false, thumbnails: Vec::new(), map_files: Vec::new(), show_map: false, map_index: 0, map_tex: None, map_zoom: 1.0, map_pan: egui::Vec2::ZERO, field_view: true, surface: 0, surface_tex: None, surface_key: None, ray: None, ray_tex: None, ray_error: None, ray_sent: None, ray_key: (0, None), auto_preview: false, preview_key: 0, changed_since: None, history: crate::history::History::new(&Graph::default()), yaw: 0.6, pitch: 0.35, zoom: 1.0 }
+        MeshWorkspace { saved: graph.clone(), graph, editor, path: None, cache: Arc::new(Mutex::new(MeshCache::default())), job: None, log: Vec::new(), written: Vec::new(), seed: 0, seed_mode: Default::default(), batch_runs: 10, udim: Default::default(), autorun: false, preview: None, show_uv: false, thumbnails: Vec::new(), map_files: Vec::new(), show_map: false, map_index: 0, map_tex: None, map_zoom: 1.0, map_pan: egui::Vec2::ZERO, field_view: true, surface: 0, surface_tex: None, surface_key: None, ray: None, ray_tex: None, ray_error: None, ray_sent: None, ray_key: (0, None), auto_preview: false, preview_key: 0, changed_since: None, history: crate::history::History::new(&Graph::default()), yaw: 0.6, pitch: 0.35, zoom: 1.0 }
     }
 }
 
@@ -506,7 +508,7 @@ impl MeshWorkspace {
         let mesh = g.add(NodeKind::LoadMesh(Default::default()), [0.0, 0.0]);
         let noise = g.add(NodeKind::NoiseGraph(Default::default()), [0.0, 140.0]);
         let add = g.add(NodeKind::Math { op: MathOp::Add, a: 0.0, b: 0.0, c: 0.5 }, [200.0, 60.0]);
-        let remesh = g.add(NodeKind::Remesh { triangles: 20_000, adaptivity: 1.0 }, [400.0, 60.0]);
+        let remesh = g.add(NodeKind::Remesh { triangles: 5000, adaptivity: 1.0, mesher: Default::default(), auto_detail: false }, [400.0, 60.0]);
         let uv = g.add(NodeKind::AutoUv(Default::default()), [600.0, 60.0]);
         let bake = g.add(NodeKind::Bake(Default::default()), [800.0, 100.0]);
         let out_mesh = g.add(NodeKind::OutMesh(Default::default()), [1000.0, 0.0]);
@@ -698,7 +700,7 @@ impl MeshWorkspace {
             let mut cache = cache.lock().unwrap();
             let mut note = |s: &str| l.lock().unwrap().push(s.to_string());
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                let mesh = Runner { device: &device, queue: &queue, cache: &mut cache, base, seed, progress: p, log: &mut note, batch_file: None, max_triangles: Some(6000) }.preview(&graph)?;
+                let mesh = Runner { device: &device, queue: &queue, cache: &mut cache, base, seed, progress: p, log: &mut note, batch_file: None, max_triangles: Some(6000), tags: Default::default() }.preview(&graph)?;
                 let path = std::env::temp_dir().join("noiser-mesh-preview.obj");
                 mesh.write_obj(&path).map_err(|e| format!("{}: {e}", path.display()))?;
                 Ok(vec![path])
@@ -714,13 +716,30 @@ impl MeshWorkspace {
         self.job = Some(RunJob { progress, finished: Default::default(), total: 1, log, done: rx });
     }
 
+    /// Output names a batch of `runs` runs would write to the same file: no tag that tells the runs apart.
+    fn colliding_outputs(graph: &Graph, runs: usize, has_files: bool) -> Vec<String> {
+        if runs < 2 {
+            return Vec::new();
+        }
+        graph.nodes.values().filter(|n| !n.muted).filter_map(|n| match &n.kind {
+            NodeKind::OutMesh(o) | NodeKind::OutImage(o) => Some(o),
+            _ => None,
+        }).filter(|o| !["{seed}", "{index}", "{timestamp}", "{time}"].iter().any(|t| o.name.contains(t)) && !(has_files && o.name.contains("{name}")))
+            .map(|o| o.name.clone()).collect()
+    }
+
     fn start(&mut self, graph: Graph, device: eframe::wgpu::Device, queue: eframe::wgpu::Queue, files: Vec<Option<PathBuf>>) {
+        let clash = Self::colliding_outputs(&graph, files.len(), files.iter().any(|f| f.is_some()));
+        if !clash.is_empty() {
+            self.log.push(format!("warning: {} runs would write the same file(s) for output name(s) {}: each run overwrites the last. Put {{index}}, {{seed}} or {{timestamp}} in the name.", files.len(), clash.iter().map(|n| format!("\"{n}\"")).collect::<Vec<_>>().join(", ")));
+        }
         let progress = crate::meshexport::Progress::default();
         let log = Arc::new(Mutex::new(Vec::new()));
         let (tx, rx) = mpsc::channel();
         let (cache, seed, mode, p, l) = (self.cache.clone(), self.seed, self.seed_mode, progress.clone(), log.clone());
         let base = self.base();
         let total = files.len();
+        let tags = crate::meshgraph::RunTags::new(self.path.as_deref(), total);
         let finished = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let fin = finished.clone();
         std::thread::spawn(move || {
@@ -733,7 +752,7 @@ impl MeshWorkspace {
                 if mode != crate::meshexport::SeedMode::Same {
                     note(&format!("seed {}", mode.seed_for(seed, i)));
                 }
-                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| Runner { device: &device, queue: &queue, cache: &mut cache, base: base.clone(), seed: mode.seed_for(seed, i), progress: p.clone(), log: &mut note, batch_file: file, max_triangles: None }.run(&graph)));
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| Runner { device: &device, queue: &queue, cache: &mut cache, base: base.clone(), seed: mode.seed_for(seed, i), progress: p.clone(), log: &mut note, batch_file: file, max_triangles: None, tags: tags.run(i) }.run(&graph)));
                 match result.unwrap_or_else(|_| Err("the run crashed".into())) {
                     Ok(f) => written.extend(f),
                     Err(e) => {
@@ -780,11 +799,23 @@ impl crate::App {
             let same = |a: &std::path::Path, b: &std::path::Path| a == b || matches!((std::fs::canonicalize(a), std::fs::canonicalize(b)), (Ok(x), Ok(y)) if x == y);
             self.mesh_ws.graph.nodes.values().any(|n| matches!(&n.kind, NodeKind::NoiseGraph(p) if !p.file.is_empty() && same(&crate::meshgraph::resolve_in(&base, &p.file), open)))
         });
-        if uses_open && self.graph != self.saved {
+        let noise_saved = if uses_open && self.graph != self.saved {
             self.save(false);
-        }
-        if let Err(e) = self.mesh_ws.save(ask) {
-            self.status = e;
+            self.path.clone()
+        } else {
+            None
+        };
+        match self.mesh_ws.save(ask) {
+            // The status says what was saved: the mesh graph first, and the noise graph it uses when that went too.
+            Ok(()) => {
+                if let Some(p) = &self.mesh_ws.path.clone().filter(|_| !self.mesh_ws.dirty()) {
+                    self.status = match noise_saved {
+                        Some(n) => format!("Saved the mesh graph {} and the noise graph {}", p.display(), n.display()),
+                        None => format!("Saved the mesh graph {}", p.display()),
+                    };
+                }
+            }
+            Err(e) => self.status = e,
         }
     }
 
@@ -1036,11 +1067,16 @@ impl crate::App {
                     let (d, q, g) = (self.rs.device.clone(), self.rs.queue.clone(), self.graph_for_run());
                     self.mesh_ws.start_preview(g, d, q);
                 }
-                if crate::icons::tinted_button(ui, "run_files", "Run on files…", None, !running, Some(egui::Color32::from_rgb(110, 200, 120))).on_hover_text("Runs the graph once for each mesh file you pick: a Load Mesh node whose path is {batch} reads that file, and {name} in an output name becomes its name.").clicked()
+                if crate::icons::tinted_button(ui, "run_files", "Run on files…", None, !running, Some(egui::Color32::from_rgb(110, 200, 120))).on_hover_text("Runs the graph once for each mesh file you pick: a Load Mesh node whose path is {batch} reads that file, and {name} in an output name becomes its name. Other smart tags: {seed}, {index}, {timestamp}, {date}, {time}, {graph}, {count}.").clicked()
                     && let Some(files) = rfd::FileDialog::new().add_filter("Mesh", &["obj", "ply", "stl", "gltf", "glb", "fbx", "sdf"]).pick_files() {
                         let (d, q, g) = (self.rs.device.clone(), self.rs.queue.clone(), self.graph_for_run());
                         self.mesh_ws.start(g, d, q, files.into_iter().map(Some).collect());
                     }
+                if crate::icons::tinted_button(ui, "play", &format!("Run × {}", self.mesh_ws.batch_runs), None, !running, Some(egui::Color32::from_rgb(110, 200, 120))).on_hover_text("Runs the graph this many times with no input meshes: the seed changes from run to run (see the seed mode), so one procedural graph makes many different shapes. Put {seed} or {index} in the output names, or each run overwrites the last.").clicked() {
+                    let (d, q, g) = (self.rs.device.clone(), self.rs.queue.clone(), self.graph_for_run());
+                    let n = self.mesh_ws.batch_runs.max(1) as usize;
+                    self.mesh_ws.start(g, d, q, vec![None; n]);
+                }
                 if crate::icons::button(ui, "udim", "UDIM pack…", None, true).on_hover_text("After a batch: packs many meshes and their maps into one UDIM tileset with one combined mesh.").clicked() {
                     self.mesh_ws.udim.open = true;
                 }
@@ -1050,6 +1086,7 @@ impl crate::App {
             });
             ui.horizontal(|ui| {
                 ui.add(egui::DragValue::new(&mut self.mesh_ws.seed).prefix("seed "));
+                ui.add(egui::DragValue::new(&mut self.mesh_ws.batch_runs).range(1..=10_000).prefix("runs ")).on_hover_text("How many times Run × makes the graph");
                 egui::ComboBox::from_id_salt("batch seed mode").selected_text(match self.mesh_ws.seed_mode {
                     crate::meshexport::SeedMode::Same => "same seed",
                     crate::meshexport::SeedMode::Increment => "seed + 1 each",

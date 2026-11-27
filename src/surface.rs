@@ -254,6 +254,55 @@ pub fn material_name(path: &std::path::Path) -> String {
 }
 
 impl RawMesh {
+    /// The surface area.
+    pub fn surface_area(&self) -> f32 {
+        self.triangles.iter().map(|t| area(self.positions[t[0] as usize], self.positions[t[1] as usize], self.positions[t[2] as usize])).sum()
+    }
+
+    /// How much the surface bends, as a number that does not depend on size: the total absolute mean curvature (half the
+    /// sum over edges of length times the angle between the faces either side) over the square root of the area, scaled so
+    /// that a sphere is 1. Flat shapes with few bends come out below 1 (a cube is about 0.9), rocks and bumpy shapes above.
+    /// Returns (complexity, area). Open edges count nothing.
+    pub fn complexity(&self) -> (f32, f32) {
+        let sub = |a: V3, b: V3| [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+        let normals: Vec<V3> = self.triangles.iter().map(|t| {
+            let (p0, p1, p2) = (self.positions[t[0] as usize], self.positions[t[1] as usize], self.positions[t[2] as usize]);
+            let (u, v) = (sub(p1, p0), sub(p2, p0));
+            unit([u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]])
+        }).collect();
+        let mut edges: std::collections::HashMap<(u32, u32), usize> = std::collections::HashMap::new();
+        let mut total = 0.0f64;
+        for (i, t) in self.triangles.iter().enumerate() {
+            for k in 0..3 {
+                let (a, b) = (t[k], t[(k + 1) % 3]);
+                let key = (a.min(b), a.max(b));
+                let pa = sub(self.positions[a as usize], self.positions[b as usize]);
+                let len = (pa[0] * pa[0] + pa[1] * pa[1] + pa[2] * pa[2]).sqrt();
+                match edges.remove(&key) {
+                    Some(j) => {
+                        // The angle between the faces' planes, whichever way each is wound (a grid mesher does not promise
+                        // one winding): folds sharper than a right angle count as one.
+                        let (n, m) = (normals[i], normals[j]);
+                        // A degenerate triangle has no normal and says nothing about bending.
+                        if n != [0.0; 3] && m != [0.0; 3] {
+                            let cos = (n[0] * m[0] + n[1] * m[1] + n[2] * m[2]).abs().clamp(0.0, 1.0);
+                            total += 0.5 * len as f64 * cos.acos() as f64;
+                        }
+                    }
+                    None => {
+                        edges.insert(key, i);
+                    }
+                }
+            }
+        }
+        let area = self.surface_area();
+        if area <= 0.0 {
+            return (0.0, 0.0);
+        }
+        let sphere = 2.0 * std::f64::consts::PI.sqrt();
+        ((total / (area as f64).sqrt() / sphere) as f32, area)
+    }
+
     /// Replaces the vertex normals with the angle-weighted mean of the faces around each vertex: the normals a game
     /// engine or Blender computes by itself. A low-poly mesh needs these rather than the field's gradient, which on a
     /// bumpy surface is a random sample of one bump, and a baked normal map is only right against the normals the
@@ -537,5 +586,34 @@ mod tests {
         }
         let exact = 2.0 * 4.0 / 3.0 * std::f32::consts::PI * 0.6f32.powi(3) / (h * h * h);
         assert!((volume - exact).abs() < 0.1 * exact, "volume {volume} against {exact} (in voxels)");
+    }
+
+    /// A sphere is 1 by definition, and a bumpy sphere is more.
+    #[test]
+    fn complexity_is_one_for_a_sphere_and_grows_with_bumps() {
+        let sphere = |bumps: f32| -> RawMesh {
+            let (n, m) = (48usize, 96usize);
+            let mut positions = Vec::new();
+            for i in 0..=n {
+                let th = std::f32::consts::PI * i as f32 / n as f32;
+                for j in 0..m {
+                    let ph = 2.0 * std::f32::consts::PI * j as f32 / m as f32;
+                    let r = 1.0 + bumps * (6.0 * th).sin() * (6.0 * ph).sin();
+                    positions.push([r * th.sin() * ph.cos(), r * th.sin() * ph.sin(), r * th.cos()]);
+                }
+            }
+            let mut triangles = Vec::new();
+            for i in 0..n {
+                for j in 0..m {
+                    let (a, b, c, d) = ((i * m + j) as u32, (i * m + (j + 1) % m) as u32, ((i + 1) * m + j) as u32, ((i + 1) * m + (j + 1) % m) as u32);
+                    triangles.push([a, c, b]);
+                    triangles.push([b, c, d]);
+                }
+            }
+            RawMesh { normals: Vec::new(), positions, triangles }
+        };
+        let plain = sphere(0.0).complexity().0;
+        assert!((plain - 1.0).abs() < 0.1, "a sphere is about 1: {plain}");
+        assert!(sphere(0.08).complexity().0 > plain * 1.3, "bumps raise it");
     }
 }

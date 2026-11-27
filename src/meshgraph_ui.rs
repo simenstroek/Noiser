@@ -112,7 +112,7 @@ pub fn props(ui: &mut egui::Ui, kind: &mut NodeKind) -> bool {
             path_row(ui, "noise graph path", &mut p.file, "noise graph file", Some(("Noise graph", &["noisegraph"])));
             let d = crate::meshgraph::NoiseGraphParams::default();
             crate::row(ui, &mut p.frequency, d.frequency, |ui, v| _ = ui.add(egui::DragValue::new(v).speed(0.01).prefix("frequency × ")).on_hover_text("The noise graph sees the position times this: tiles per unit of the mesh file."));
-            crate::row(ui, &mut p.amplitude, d.amplitude, |ui, v| _ = ui.add(egui::DragValue::new(v).speed(0.001).prefix("amplitude × ")).on_hover_text("The graph's density output times this: its size in units of the mesh file."));
+            crate::row(ui, &mut p.amplitude, d.amplitude, |ui, v| _ = ui.add(egui::DragValue::new(v).speed(0.001).prefix("amplitude × ")).on_hover_text("The graph's density output times this: its size in units of the mesh file. Positive pushes the surface outward where the noise graph's density is positive, as in the noise graph tab."));
             if p.detached {
                 ui.colored_label(crate::editor::ORANGE, "Detached: this graph lives in the mesh graph only.");
                 if ui.button("Re-attach to the file").clicked() {
@@ -135,10 +135,20 @@ pub fn props(ui: &mut egui::Ui, kind: &mut NodeKind) -> bool {
             }
             true
         }
-        NodeKind::Remesh { triangles, adaptivity } => {
-            ui.weak("The surface of the field as an adaptive triangle mesh: small even triangles where it bends, large ones where it is flat.");
-            crate::row(ui, triangles, 20_000, |ui, v| _ = ui.add(egui::DragValue::new(v).range(200..=2_000_000).speed(100.0).suffix(" triangles")));
-            crate::row(ui, adaptivity, 1.0, |ui, v| _ = ui.add(egui::Slider::new(v, 0.0..=1.0).text("adaptivity")).on_hover_text("0 gives triangles of one size everywhere; 1 lets them be a quarter of that size on tight curves and five times larger on flat ground."));
+        NodeKind::Remesh { triangles, adaptivity, mesher, auto_detail } => {
+            ui.weak("The surface of the field as a triangle mesh. Adaptive (the default) makes even triangles, small where the surface bends and large where it is flat.");
+            crate::row(ui, mesher, crate::graph::Mesher::Adaptive, |ui, v| {
+                egui::ComboBox::from_id_salt("remesh mesher").selected_text(v.label()).show_ui(ui, |ui| {
+                    for m in crate::graph::Mesher::ALL {
+                        ui.selectable_value(v, m, m.label());
+                    }
+                }).response.on_hover_text("Adaptive: curvature-following, well-shaped triangles. Surface nets: a regular grid (what the Composer exports), fast. Marching tetrahedra: a regular grid that is always closed. The grid ones need the surface to be thicker than a cell.");
+            });
+            crate::row(ui, triangles, 5000, |ui, v| _ = ui.add(egui::DragValue::new(v).range(200..=2_000_000).speed(100.0).suffix(if *auto_detail { " triangles (sphere)" } else { " triangles" })));
+            crate::row(ui, auto_detail, false, |ui, v| _ = ui.checkbox(v, "scale by shape complexity").on_hover_text("Measures how much the shape bends on a coarse version of it (fine surface noise left out) and scales the triangle count: a sphere gets the count above, a plainer shape fewer, a lumpy or complex one up to four times more. Each mesh of a batch gets its own count."));
+            ui.add_enabled_ui(*mesher == crate::graph::Mesher::Adaptive, |ui| {
+                crate::row(ui, adaptivity, 1.0, |ui, v| _ = ui.add(egui::Slider::new(v, 0.0..=1.0).text("adaptivity")).on_hover_text("0 gives triangles of one size everywhere; 1 lets them be a quarter of that size on tight curves and five times larger on flat ground."));
+            });
             true
         }
         NodeKind::AutoUv(uv) => {
@@ -148,7 +158,7 @@ pub fn props(ui: &mut egui::Ui, kind: &mut NodeKind) -> bool {
             crate::row(ui, &mut uv.padding, d.padding, |ui, v| _ = ui.add(egui::DragValue::new(v).range(0..=64).prefix("padding ").suffix(" px")));
             crate::row(ui, &mut uv.smoothing, d.smoothing, |ui, v| _ = ui.add(egui::DragValue::new(v).range(0..=60).prefix("chart smoothing ")).on_hover_text("Rounds of smoothing of the surface the islands are cut from; the UVs still map the true surface. A few rounds merge small islands on a bumpy surface; many rounds stretch the texture on bumps."));
             crate::row(ui, &mut uv.absorb_tiny, d.absorb_tiny, |ui, v| _ = ui.checkbox(v, "fold tiny islands into neighbours"));
-            crate::row(ui, &mut uv.planar, d.planar, |ui, v| _ = ui.checkbox(v, "planar from above (terrain chunks)").on_hover_text("Projects the chunk straight down onto its 0 to 1 square: instant at any size, and chunk i is UDIM tile 1001 + i. Needs a terrain (Load Mesh with a heightmap) before the Remesh."));
+            crate::row(ui, &mut uv.planar, d.planar, |ui, v| _ = ui.checkbox(v, "planar from above (terrain chunks)").on_hover_text("Projects the chunk straight down onto its 0 to 1 square: instant at any size, and chunk i is UDIM tile 1001 + i. Only for a terrain (Load Mesh with a heightmap before the Remesh); on any other mesh the node unwraps as usual."));
             crate::row(ui, &mut uv.brute_force, d.brute_force, |ui, v| _ = ui.checkbox(v, "best packing (slower; up to 50k triangles)"));
             true
         }
@@ -240,7 +250,8 @@ pub fn props(ui: &mut egui::Ui, kind: &mut NodeKind) -> bool {
                 ui.label("name");
                 ui.add(egui::TextEdit::singleline(&mut o.name).desired_width(140.0));
             });
-            ui.weak(if image { "A map's name is added to the file name: name_normal_base.png. {name} in the name is the mesh file's name in a batch." } else { "An existing file with the same name is overwritten. {name} in the name is the mesh file's name in a batch." });
+            ui.weak(if image { "A map's name is added to the file name: name_normal_base.png." } else { "An existing file with the same name is overwritten." });
+            ui.weak(format!("Smart tags in the name: {}.", crate::meshgraph::TAG_HELP)).on_hover_text("Tags are replaced when the graph runs. In a batch (Run on files, or Run several times) {index}, {seed} or {timestamp} keep each run's files apart.");
             true
         }
         _ => false,
@@ -262,7 +273,7 @@ mod tests {
     /// Typing into a node's number field (double-click, type, Enter) and moving a slider with the keyboard change the node.
     #[test]
     fn remesh_fields_can_be_typed_into_and_the_slider_moved() {
-        let mut h = harness(NodeKind::Remesh { triangles: 20_000, adaptivity: 1.0 });
+        let mut h = harness(NodeKind::Remesh { triangles: 20_000, adaptivity: 1.0, mesher: Default::default(), auto_detail: false });
         h.run();
         h.get_by_label("triangles").click();
         h.run();

@@ -776,6 +776,10 @@ impl MeshEvaluator {
     }
 }
 
+/// What `RawMesh::complexity` gives for a sphere meshed by `Job::complexity_probe` (measured with the surface nets mesh of a
+/// sphere at the probe's resolution, where the facets of the grid mesh count as bends).
+const PROBE_SPHERE: f32 = 1.7;
+
 impl Job<'_> {
     pub fn grid(&self) -> Grid {
         Grid::plan(self.lo, self.hi, self.d, self.reach, self.settings.res)
@@ -853,6 +857,55 @@ impl Job<'_> {
             self.ev.points(d, &stencil, eps).chunks(7).map(|c| std::array::from_fn(|i| c.iter().map(|s| s[i]).sum::<f32>() / 7.0)).collect()
         };
         crate::remesh::remesh(mesh, &mut field, &params, &|round, rounds| progress.store(900 + (round * 100 / rounds.max(1)) as u32, Ordering::Relaxed))
+    }
+
+    /// How complex the surface is on a coarse extraction (about 48 samples along the longest side, so fine surface noise is
+    /// gone): (complexity, area), see `RawMesh::complexity`. The area is in the field's units.
+    pub fn complexity_probe(&self, progress: &Progress) -> (f32, f32) {
+        // Surface nets (smooth, quad-based) at a low resolution, then smoothed: a marching-tetrahedra surface is jagged
+        // and its jaggedness would count as bends.
+        let mut probe = self.with_res(40).extract_with(progress, false);
+        probe.remove_small_parts(self.settings.cull.max(0.02));
+        probe.positions = crate::uvgen::smoothed(&probe, 6);
+        let (raw, area) = probe.complexity();
+        // A grid mesh of a plain sphere at this resolution measures about 1.7 whatever its size (its facets are bends too):
+        // divide that out so a sphere is 1.
+        (raw / PROBE_SPHERE, area)
+    }
+
+    /// The surface as about `target` triangles by the chosen mesher, in the preview's space.
+    pub fn meshed(&self, mesher: crate::graph::Mesher, target: usize, adaptivity: f32, progress: &Progress) -> RawMesh {
+        use crate::graph::Mesher;
+        match mesher {
+            Mesher::Adaptive => self.remeshed_with(target, adaptivity, progress),
+            Mesher::SurfaceNets | Mesher::MarchingTets => {
+                // The triangle count of a grid mesh is about 2 A / h^2: size the grid from the surface area of a coarse one.
+                let coarse = self.with_res(48);
+                let mut probe = coarse.extract_with(progress, true);
+                probe.remove_small_parts(self.settings.cull.max(0.02));
+                let area = probe.surface_area().max(1e-9);
+                let grid = coarse.grid();
+                let longest = (0..3).map(|a| grid.dims[a] as f32 * grid.h).fold(0.0, f32::max);
+                let target = target.max(100) as f32;
+                let mut res = (longest / (2.0 * area / target).sqrt()).clamp(10.0, 800.0);
+                // The real surface is rougher than the coarse one, so the first try overshoots: a second grid is sized
+                // from the count the first gave (a count goes with the square of the resolution).
+                let mut mesh = RawMesh::default();
+                for _ in 0..3 {
+                    mesh = self.with_res(res as u32).extract_with(progress, mesher == Mesher::MarchingTets);
+                    mesh.remove_small_parts(self.settings.cull);
+                    let got = mesh.triangles.len().max(1) as f32;
+                    if std::env::var_os("NOISER_REMESH_DEBUG").is_some() {
+                        eprintln!("grid mesher: res {res:.1} gave {got} triangles (target {target})");
+                    }
+                    if (got / target - 1.0).abs() < 0.1 {
+                        break;
+                    }
+                    res = (res * (target / got).sqrt()).clamp(10.0, 800.0);
+                }
+                mesh
+            }
+        }
     }
 
     /// Extracts the surface, drops small parts, puts it back in the mesh's own units and writes it.
@@ -955,9 +1008,9 @@ impl crate::bake::Field for EvalField<'_> {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum SeedMode {
     /// Every mesh gets the global seed.
-    #[default]
     Same,
     /// The global seed plus the mesh's position in the batch.
+    #[default]
     Increment,
     /// A different pseudo-random seed per mesh, repeatable from the global seed.
     Random,

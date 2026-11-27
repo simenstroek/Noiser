@@ -1759,7 +1759,7 @@ fn a_mesh_graph_runs_from_a_mesh_file_to_files() {
     g.connect(facing, blend, 2);
     g.connect(mesh, sum, 0);
     g.connect(blend, sum, 1);
-    let remesh = g.add(NodeKind::Remesh { triangles: 3000, adaptivity: 1.0 }, [0.0; 2]);
+    let remesh = g.add(NodeKind::Remesh { triangles: 3000, adaptivity: 1.0, mesher: Default::default(), auto_detail: false }, [0.0; 2]);
     let uv = g.add(NodeKind::AutoUv(crate::uvgen::UvParams { resolution: 512, ..Default::default() }), [0.0; 2]);
     let bake = g.add(NodeKind::Bake(crate::bake::Settings { size: 128, padding: 2, channels: vec![crate::bake::Channel::Normal, crate::bake::Channel::Occlusion], custom: vec!["Mask".into()], green_up: false, ..Default::default() }), [0.0; 2]);
     let out_mesh = g.add(NodeKind::OutMesh(crate::meshgraph::OutParams { folder: "out".into(), name: "ball".into(), ..Default::default() }), [0.0; 2]);
@@ -1789,7 +1789,7 @@ fn a_mesh_graph_runs_from_a_mesh_file_to_files() {
     let mut cache = crate::meshgraph::MeshCache::default();
     let mut log = Vec::new();
     let mut note = |s: &str| log.push(s.to_string());
-    let mut runner = crate::meshgraph::Runner { device: &gpu.device, queue: &gpu.queue, cache: &mut cache, base: dir.clone(), seed: 0, progress: Default::default(), log: &mut note, batch_file: None, max_triangles: None };
+    let mut runner = crate::meshgraph::Runner { device: &gpu.device, queue: &gpu.queue, cache: &mut cache, base: dir.clone(), seed: 0, progress: Default::default(), log: &mut note, batch_file: None, max_triangles: None, tags: Default::default() };
     let written = runner.run(&g).unwrap();
     assert_eq!(written.len(), 5, "{written:?}");
     let obj = std::fs::read_to_string(dir.join("out").join("ball.obj")).unwrap();
@@ -1828,7 +1828,7 @@ fn a_mesh_graph_preview_is_the_remesh_at_a_triangle_limit() {
     crate::surface::RawMesh { normals: sphere.positions.clone(), positions: sphere.positions, triangles: sphere.triangles }.write_obj(&dir.join("ball.obj")).unwrap();
     let mut g = Graph::default();
     let mesh = g.add(NodeKind::LoadMesh(crate::meshgraph::LoadMeshParams { path: "ball.obj".into(), resolution: 48, ..Default::default() }), [0.0; 2]);
-    let remesh = g.add(NodeKind::Remesh { triangles: 50_000, adaptivity: 1.0 }, [0.0; 2]);
+    let remesh = g.add(NodeKind::Remesh { triangles: 50_000, adaptivity: 1.0, mesher: Default::default(), auto_detail: false }, [0.0; 2]);
     let uv = g.add(NodeKind::AutoUv(Default::default()), [0.0; 2]);
     let out = g.add(NodeKind::OutMesh(Default::default()), [0.0; 2]);
     g.connect(mesh, remesh, 0);
@@ -1836,7 +1836,7 @@ fn a_mesh_graph_preview_is_the_remesh_at_a_triangle_limit() {
     g.connect(uv, out, 0);
     let mut cache = crate::meshgraph::MeshCache::default();
     let mut note = |_: &str| {};
-    let m = crate::meshgraph::Runner { device: &gpu.device, queue: &gpu.queue, cache: &mut cache, base: dir.clone(), seed: 0, progress: Default::default(), log: &mut note, batch_file: None, max_triangles: Some(1500) }.preview(&g).unwrap();
+    let m = crate::meshgraph::Runner { device: &gpu.device, queue: &gpu.queue, cache: &mut cache, base: dir.clone(), seed: 0, progress: Default::default(), log: &mut note, batch_file: None, max_triangles: Some(1500), tags: Default::default() }.preview(&g).unwrap();
     assert!((1200..1800).contains(&m.triangles.len()), "{} triangles", m.triangles.len());
     assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1, "only the input file is there: nothing was written");
 }
@@ -1860,7 +1860,7 @@ fn a_mesh_graph_transfers_the_uvs_of_its_mesh_to_the_remeshed_result() {
     let mesh = g.add(NodeKind::LoadMesh(crate::meshgraph::LoadMeshParams { path: "ball_uv.obj".into(), resolution: 64, ..Default::default() }), [0.0; 2]);
     let n = g.add(NodeKind::NoiseGraph(crate::meshgraph::NoiseGraphParams { embedded: noise.to_json(), amplitude: 0.05, ..Default::default() }), [0.0; 2]);
     let sum = g.add(NodeKind::Math { op: MathOp::Add, a: 0.0, b: 0.0, c: 0.5 }, [0.0; 2]);
-    let remesh = g.add(NodeKind::Remesh { triangles: 2000, adaptivity: 1.0 }, [0.0; 2]);
+    let remesh = g.add(NodeKind::Remesh { triangles: 2000, adaptivity: 1.0, mesher: Default::default(), auto_detail: false }, [0.0; 2]);
     let transfer = g.add(NodeKind::TransferUv, [0.0; 2]);
     let out = g.add(NodeKind::OutMesh(crate::meshgraph::OutParams { folder: "out".into(), name: "moved".into(), ..Default::default() }), [0.0; 2]);
     g.connect(mesh, sum, 0);
@@ -1876,7 +1876,7 @@ fn a_mesh_graph_transfers_the_uvs_of_its_mesh_to_the_remeshed_result() {
     let mut cache = crate::meshgraph::MeshCache::default();
     let mut log = Vec::new();
     let mut note = |s: &str| log.push(s.to_string());
-    let written = crate::meshgraph::Runner { device: &gpu.device, queue: &gpu.queue, cache: &mut cache, base: dir.clone(), seed: 0, progress: Default::default(), log: &mut note, batch_file: None, max_triangles: None }.run(&g).unwrap();
+    let written = crate::meshgraph::Runner { device: &gpu.device, queue: &gpu.queue, cache: &mut cache, base: dir.clone(), seed: 0, progress: Default::default(), log: &mut note, batch_file: None, max_triangles: None, tags: Default::default() }.run(&g).unwrap();
     assert_eq!(written.len(), 1);
     let obj = std::fs::read_to_string(&written[0]).unwrap();
     let (vt, f) = (obj.lines().filter(|l| l.starts_with("vt ")).count(), obj.lines().filter(|l| l.starts_with("f ")).count());
@@ -1913,9 +1913,9 @@ fn a_coarser_remesh_takes_the_uvs_of_an_unwrapped_one_through_transfer_uvs() {
     crate::surface::RawMesh { normals: sphere.positions.clone(), positions: sphere.positions, triangles: sphere.triangles }.write_obj(&dir.join("ball.obj")).unwrap();
     let mut g = Graph::default();
     let mesh = g.add(NodeKind::LoadMesh(crate::meshgraph::LoadMeshParams { path: "ball.obj".into(), resolution: 64, ..Default::default() }), [0.0; 2]);
-    let lod0 = g.add(NodeKind::Remesh { triangles: 3000, adaptivity: 1.0 }, [0.0; 2]);
+    let lod0 = g.add(NodeKind::Remesh { triangles: 3000, adaptivity: 1.0, mesher: Default::default(), auto_detail: false }, [0.0; 2]);
     let uv = g.add(NodeKind::AutoUv(crate::uvgen::UvParams { resolution: 512, ..Default::default() }), [0.0; 2]);
-    let lod1 = g.add(NodeKind::Remesh { triangles: 800, adaptivity: 1.0 }, [0.0; 2]);
+    let lod1 = g.add(NodeKind::Remesh { triangles: 800, adaptivity: 1.0, mesher: Default::default(), auto_detail: false }, [0.0; 2]);
     let transfer = g.add(NodeKind::TransferUv, [0.0; 2]);
     let out = g.add(NodeKind::OutMesh(crate::meshgraph::OutParams { folder: "out".into(), name: "lod1".into(), ..Default::default() }), [0.0; 2]);
     g.connect(mesh, lod0, 0);
@@ -1927,7 +1927,7 @@ fn a_coarser_remesh_takes_the_uvs_of_an_unwrapped_one_through_transfer_uvs() {
     assert_eq!(g.edges.len(), 6, "the wires were accepted");
     let mut cache = crate::meshgraph::MeshCache::default();
     let mut note = |_: &str| {};
-    let written = crate::meshgraph::Runner { device: &gpu.device, queue: &gpu.queue, cache: &mut cache, base: dir.clone(), seed: 0, progress: Default::default(), log: &mut note, batch_file: None, max_triangles: None }.run(&g).unwrap();
+    let written = crate::meshgraph::Runner { device: &gpu.device, queue: &gpu.queue, cache: &mut cache, base: dir.clone(), seed: 0, progress: Default::default(), log: &mut note, batch_file: None, max_triangles: None, tags: Default::default() }.run(&g).unwrap();
     let loaded = crate::meshformats::load(&written[0]).unwrap();
     assert!((600..1100).contains(&loaded.triangles.len()), "{} triangles", loaded.triangles.len());
     assert_eq!(loaded.uvs.len(), loaded.triangles.len(), "the coarser mesh has UVs");
@@ -1957,7 +1957,7 @@ fn write_demo_mesh_graph() {
     let b = g.add(NodeKind::NoiseGraph(crate::meshgraph::NoiseGraphParams { file: "smooth.noisegraph".into(), frequency: 0.25, amplitude: 0.08, ..Default::default() }), [480.0, 260.0]);
     let blend = g.add(NodeKind::Math { op: MathOp::Lerp, a: 0.0, b: 0.0, c: 0.5 }, [660.0, 160.0]);
     let sum = g.add(NodeKind::Math { op: MathOp::Add, a: 0.0, b: 0.0, c: 0.5 }, [820.0, 80.0]);
-    let remesh = g.add(NodeKind::Remesh { triangles: 20_000, adaptivity: 1.0 }, [980.0, 80.0]);
+    let remesh = g.add(NodeKind::Remesh { triangles: 20_000, adaptivity: 1.0, mesher: Default::default(), auto_detail: false }, [980.0, 80.0]);
     let uv = g.add(NodeKind::AutoUv(Default::default()), [1140.0, 80.0]);
     let bake = g.add(NodeKind::Bake(crate::bake::Settings { size: 1024, channels: vec![crate::bake::Channel::Normal, crate::bake::Channel::Occlusion], custom: vec!["Mask".into()], ..Default::default() }), [1300.0, 120.0]);
     let out_mesh = g.add(NodeKind::OutMesh(crate::meshgraph::OutParams { folder: "out".into(), name: "rock".into(), ..Default::default() }), [1480.0, 40.0]);

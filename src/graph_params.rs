@@ -264,6 +264,32 @@ pub(crate) fn tenth() -> f32 {
     0.1
 }
 
+/// How a Remesh node makes its triangles.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Mesher {
+    /// A coarse extraction, then adaptive isotropic remeshing onto the exact field: even, well-shaped triangles, smaller
+    /// where the surface bends. The default.
+    #[default]
+    Adaptive,
+    /// Surface nets on a regular grid sized for the triangle count: fast, regular, and what the Composer exports; the
+    /// triangles are halves of grid quads. Thin features smaller than a cell can be lost.
+    SurfaceNets,
+    /// Marching tetrahedra on a regular grid: always a closed manifold surface, with more uneven triangles.
+    MarchingTets,
+}
+
+impl Mesher {
+    pub const ALL: [Mesher; 3] = [Mesher::Adaptive, Mesher::SurfaceNets, Mesher::MarchingTets];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Mesher::Adaptive => "Adaptive (curvature follows)",
+            Mesher::SurfaceNets => "Surface nets (regular grid)",
+            Mesher::MarchingTets => "Marching tetrahedra (always closed)",
+        }
+    }
+}
+
 /// Craters: a bowl and a raised rim in every cell that has one, at hashed places and sizes.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
