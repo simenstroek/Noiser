@@ -221,14 +221,15 @@ pub fn show(prefs: &mut Prefs, tab: &mut PrefsTab, ui: &mut egui::Ui, shortcuts:
     if *tab != PrefsTab::Keybinds {
         keymap::set_capturing(false);
     }
-    ui.set_min_width(470.0);
+    // One size for every tab, so the tab buttons stay where they are when switching.
+    ui.set_width(780.0);
     ui.horizontal(|ui| {
         for (which, label) in PrefsTab::ALL {
             ui.selectable_value(tab, which, label);
         }
     });
     ui.separator();
-    egui::ScrollArea::vertical().max_height(420.0).auto_shrink([false, true]).show(ui, |ui| match *tab {
+    egui::ScrollArea::vertical().max_height(420.0).min_scrolled_height(420.0).auto_shrink([false, false]).show(ui, |ui| match *tab {
         PrefsTab::General => {
             heading(ui, "Files");
             ui.checkbox(&mut prefs.backups, "Keep rolling backups for crash recovery");

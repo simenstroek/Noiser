@@ -1331,7 +1331,9 @@ impl eframe::App for App {
             ui.label("• File > Import mesh shapes a low-poly OBJ, PLY or STL with the graph; Export displaced mesh writes the high-resolution result.");
             ui.label("• Help > Keyboard shortcuts lists the keys. Source and releases: github.com/simenstroek/Noiser");
         });
-        egui::Window::new("Preferences").open(&mut self.prefs_open).collapsible(false).resizable(false).anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0]).show(&ctx, |ui| {
+        // Movable, and placed by its top edge: the tab buttons stay put whatever the tab holds.
+        let top = ctx.content_rect().center_top() + egui::vec2(0.0, 80.0);
+        egui::Window::new("Preferences").open(&mut self.prefs_open).collapsible(false).resizable(false).pivot(egui::Align2::CENTER_TOP).default_pos(top).show(&ctx, |ui| {
             let effects = prefs::show(&mut self.prefs, &mut self.prefs_tab, ui, &SHORTCUTS);
             if effects.scale_committed {
                 ctx.set_zoom_factor(self.prefs.ui_scale);
