@@ -7,14 +7,14 @@ the later ones again.
 SDF Composer      shapes (mushroom, boulder, arch, cave...)          .sdf files in the library
 Noise graph       detail noises for each kind of shape               .noisegraph files
 Landscape         layered terrain, painted masks, erosion            .landscape project -> heightmap PNG
-Mesh graph        terrain + Scatter SDF nodes -> Remesh in chunks    chunk meshes + maps + terrain_chunks.json
+Mesh graph        terrain + Scatter on Terrain nodes -> Remesh in chunks    chunk meshes + maps + terrain_chunks.json
 Unreal            tools/unreal_import_terrain.py                     Nanite meshes, material, lit level
 ```
 
 ## 1. Shapes (SDF Composer)
 
 Build each kind of object once and save it into the library's SDFs folder. The Composer's up is +Y; the terrain's is +Z,
-and the Mesh graph turns shapes upright for you (the *Z is up* option, on for Scatter SDF).
+and the Mesh graph turns shapes upright for you (the *Z is up* option, on for Scatter on Terrain).
 
 * An object stands on its lowest point: build it with its base at the bottom.
 * A cave, pit or tunnel is the shape of the **empty space**: build the volume and cut it out of the terrain later.
@@ -55,7 +55,7 @@ The generated graph has the terrain (a *Load Mesh* node with the heightmap, in c
 *Auto UVs* (planar from above) and *Bake* (normal, occlusion, curvature maps), with *Mesh Output* and *Image Output* nodes.
 Put things on the terrain between the terrain and Remesh:
 
-* **Scatter SDF** plants copies of a shape by a rule. Drop it in the chain, pick the `.sdf`, and set the *cell* (about the
+* **Scatter on Terrain** plants copies of a shape by a rule. Drop it in the chain, pick the `.sdf`, and set the *cell* (about the
   spacing), *density*, *size* range, and where it may stand (*slope*, *height*). Wire another noise graph into its
   *Roughen* input and only these copies are roughened. Use one Scatter node per kind of object; chain them. Tick *cut out of
   the base* for caves and pits, and *face uphill* so a cave's chamber goes into the hillside and its mouth opens downhill (put

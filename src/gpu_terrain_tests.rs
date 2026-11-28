@@ -320,7 +320,7 @@ fn a_scatter_ring_stands_round_the_middle_of_the_terrain() {
     assert!(tall.iter().all(|p| (p[0] - 320.0).hypot(p[1] - 320.0) > 120.0), "nothing stands in the middle");
 }
 
-/// A Scatter SDF node plants copies of a shape on the ground by a rule.
+/// A Scatter on Terrain node plants copies of a shape on the ground by a rule.
 #[test]
 fn a_scatter_node_plants_shapes_on_the_terrain() {
     if gpu().is_none() {

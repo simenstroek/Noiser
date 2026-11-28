@@ -34,6 +34,7 @@ mod landscape_wind;
 mod landscape_detail;
 mod terrain_maps;
 mod scatter;
+mod scatter_surface;
 mod landscape_masks;
 mod landscape_erosion;
 mod udim;

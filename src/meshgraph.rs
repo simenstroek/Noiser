@@ -506,6 +506,14 @@ let (mut lo, mut hi) = if loaded.is_empty() && sdf_boxes.is_empty() { ([0.0; 3],
                 hi[a] += margin;
             }
         }
+        // Copies scattered on a surface stand out of it.
+        let out = original.nodes.values().filter_map(|n| if let NodeKind::ScatterSurface(p) = &n.kind { Some(p.reach()) } else { None }).fold(0.0, f32::max);
+        if !sdf_boxes.is_empty() || !loaded.is_empty() {
+            for a in 0..3 {
+                lo[a] -= out;
+                hi[a] += out;
+            }
+        }
         let radius = (0..3).map(|a| hi[a] - lo[a]).fold(0.0, f32::max) * 0.5;
         // How far noise graphs can move the surface: their amplitudes times the largest value of their density, plus a margin.
         let mut reach = if land.is_some() { 0.0 } else { 0.05 * radius };

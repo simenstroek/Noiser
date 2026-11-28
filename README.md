@@ -57,7 +57,7 @@ A terrain workspace where a noise graph is the height function. Masks are painte
 
 Plan and status: [`docs/landscape-plan.md`](docs/landscape-plan.md).
 
-**Terrain with 3D shapes (new, rough edges):** in the Mesh graph, *Load Mesh* given a Landscape heightmap PNG is the ground. *Scatter SDF* plants copies of a Composer shape across it by a rule (spacing, density, size, slope, height; each kind with its own noise graph), *Remesh* cuts the result into chunks that match at their borders, and `tools/unreal_import_terrain.py` brings the chunks into Unreal as Nanite meshes with a terrain material. The whole path is in [`docs/terrain-workflow.md`](docs/terrain-workflow.md).
+**Terrain with 3D shapes (new, rough edges):** in the Mesh graph, *Load Mesh* given a Landscape heightmap PNG is the ground. *Scatter on Terrain* plants copies of a Composer shape across it by a rule (spacing, density, size, slope, height; each kind with its own noise graph), *Remesh* cuts the result into chunks that match at their borders, and `tools/unreal_import_terrain.py` brings the chunks into Unreal as Nanite meshes with a terrain material. The whole path is in [`docs/terrain-workflow.md`](docs/terrain-workflow.md). *Scatter on Surface* does the same on any shape's surface (barnacles on a rock), where a mask built from nodes allows: the surface's Normal for tops only, another SDF for inside a shape, Position for a gradient.
 
 ## How the pieces fit
 

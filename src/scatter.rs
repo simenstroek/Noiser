@@ -1,4 +1,4 @@
-//! The Scatter SDF node (Mesh graph): plants copies of an SDF shape across a terrain by a rule, instead of one node per
+//! The Scatter on Terrain node (Mesh graph): plants copies of an SDF shape across a terrain by a rule, instead of one node per
 //! copy. The field is `union(base, shapes)` (or `base` minus the shapes), where the shapes are found without a list: the
 //! terrain is cut into square cells, each cell may hold one copy (a hash of the cell and the seed decides whether, where
 //! in the cell, how big and which way it faces), and a sample looks at its own cell and the eight around it.
@@ -60,6 +60,21 @@ impl Default for ScatterParams {
     }
 }
 
+/// Of a shape file, in its own units: 1 / its longest side, its centre, and how far its centre is above its lowest point.
+pub fn shape_fit(file: &str) -> (f32, [f32; 3], f32) {
+    match crate::sdf_node::load(file).as_ref() {
+        Ok(data) => match data.tight.or(data.scene.bounds) {
+            Some((lo, hi)) => {
+                let longest = (0..3).map(|a| hi[a] - lo[a]).fold(0.0, f64::max).max(1e-9);
+                let c = [0, 1, 2].map(|a| ((lo[a] + hi[a]) * 0.5) as f32);
+                ((1.0 / longest) as f32, c, c[1] - lo[1] as f32)
+            }
+            None => (1.0, [0.0; 3], 0.0),
+        },
+        Err(_) => (1.0, [0.0; 3], 0.0),
+    }
+}
+
 /// How many shader parameters the node uses (see `shader_params`).
 pub const SLOTS: usize = 31;
 
@@ -69,17 +84,7 @@ impl ScatterParams {
     /// and how far its centre is above its lowest point.
     /// `map` is 1 + the index of the density map among the terrain's maps, 0 for none.
     pub fn shader_params(&self, map: usize) -> [f32; SLOTS] {
-        let (inv, centre, half) = match crate::sdf_node::load(&self.file).as_ref() {
-            Ok(data) => match data.tight.or(data.scene.bounds) {
-                Some((lo, hi)) => {
-                    let longest = (0..3).map(|a| hi[a] - lo[a]).fold(0.0, f64::max).max(1e-9);
-                    let c = [0, 1, 2].map(|a| ((lo[a] + hi[a]) * 0.5) as f32);
-                    ((1.0 / longest) as f32, c, c[1] - lo[1] as f32)
-                }
-                None => (1.0, [0.0; 3], 0.0),
-            },
-            Err(_) => (1.0, [0.0; 3], 0.0),
-        };
+        let (inv, centre, half) = shape_fit(&self.file);
         [
             self.seed as f32,
             self.cell.max(1e-3),

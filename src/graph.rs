@@ -135,6 +135,7 @@ pub enum NodeKind {
     /// Mesh graph: copies of an SDF shape planted across a terrain by a rule (see scatter.rs). Inputs: the field to scatter
     /// onto, and an optional displacement for the copies.
     Scatter(crate::scatter::ScatterParams),
+    ScatterSurface(crate::scatter_surface::ScatterSurfaceParams),
     /// Mesh graph: a noise graph as a node. Input: position (defaults to world position).
     NoiseGraph(crate::meshgraph::NoiseGraphParams),
     /// Mesh graph: the surface of a field as an adaptive triangle mesh of about `triangles` triangles.
@@ -214,6 +215,7 @@ impl NodeKind {
             NodeKind::Noise(_) | NodeKind::Grid { .. } | NodeKind::Pattern(_) => 1 + self.param_pins().len(),
             NodeKind::Normal { .. } | NodeKind::Radial(_) | NodeKind::Mask { .. } | NodeKind::Slope { .. } | NodeKind::Erosion(_) | NodeKind::Select { .. } | NodeKind::Layer(_) | NodeKind::Heightmap(_) | NodeKind::Stamp(_) | NodeKind::TerrainLayer { .. } | NodeKind::Terrace { .. } | NodeKind::Craters(_) | NodeKind::OutDensity | NodeKind::OutNormal => 1,
             NodeKind::Scatter(_) => 2,
+            NodeKind::ScatterSurface(_) => 3,
             NodeKind::LoadMesh(_) | NodeKind::LoadSdf(_) | NodeKind::NoiseGraph(_) | NodeKind::Remesh { .. } | NodeKind::AutoUv(_) | NodeKind::OutMesh(_) | NodeKind::OutImage(_) | NodeKind::ImageSplit | NodeKind::ImageLevels { .. } => 1,
             NodeKind::Bake(s) => 2 + s.custom.len(),
             NodeKind::ImageCombine => 4,
@@ -782,7 +784,7 @@ impl Graph {
             NodeKind::Float(_) | NodeKind::Vec3(_) => Const,
             NodeKind::LoadMesh(_) => Broken("a loaded mesh does not tile".into()),
             NodeKind::LoadSdf(_) => Broken("a loaded SDF does not tile".into()),
-            NodeKind::Scatter(_) => Broken("scattered shapes do not tile".into()),
+            NodeKind::Scatter(_) | NodeKind::ScatterSurface(_) => Broken("scattered shapes do not tile".into()),
             NodeKind::NoiseGraph(_) | NodeKind::Remesh { .. } | NodeKind::AutoUv(_) | NodeKind::Bake(_) | NodeKind::OutMesh(_) | NodeKind::OutImage(_) | NodeKind::ImageSplit | NodeKind::ImageCombine | NodeKind::ImageLevels { .. } | NodeKind::TransferUv => Const,
             // Each axis times a whole number (a default, or a Value node's) is still a coordinate.
             NodeKind::Position { scale } => {
@@ -1082,7 +1084,7 @@ impl Graph {
         let r = match &self.nodes[&id].kind {
             NodeKind::Float(v) => (*v, *v),
             NodeKind::Vec3(v) => (v.iter().cloned().fold(f32::MAX, f32::min), v.iter().cloned().fold(f32::MIN, f32::max)),
-            NodeKind::Position { .. } | NodeKind::Radial(_) | NodeKind::LoadMesh(_) | NodeKind::LoadSdf(_) | NodeKind::Scatter(_) | NodeKind::NoiseGraph(_) | NodeKind::Remesh { .. } | NodeKind::AutoUv(_) | NodeKind::Bake(_) | NodeKind::OutMesh(_) | NodeKind::OutImage(_) | NodeKind::ImageSplit | NodeKind::ImageCombine | NodeKind::ImageLevels { .. } | NodeKind::TransferUv => UNBOUNDED,
+            NodeKind::Position { .. } | NodeKind::Radial(_) | NodeKind::LoadMesh(_) | NodeKind::LoadSdf(_) | NodeKind::Scatter(_) | NodeKind::ScatterSurface(_) | NodeKind::NoiseGraph(_) | NodeKind::Remesh { .. } | NodeKind::AutoUv(_) | NodeKind::Bake(_) | NodeKind::OutMesh(_) | NodeKind::OutImage(_) | NodeKind::ImageSplit | NodeKind::ImageCombine | NodeKind::ImageLevels { .. } | NodeKind::TransferUv => UNBOUNDED,
             NodeKind::Separate => match self.input(id, 0) {
                 Some(src) => self.range_of(src, stack),
                 None => (0.0, 0.0),

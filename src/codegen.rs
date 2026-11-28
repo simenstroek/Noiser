@@ -205,6 +205,7 @@ fn compile_inner(g: &Graph, caches: &BTreeMap<NodeId, u32>, eps: f32, preview: b
                 let loaded = crate::sdf_node::load(&p.file);
                 params.extend(p.shader_params(loaded.as_ref().as_ref().ok()));
             }
+            NodeKind::ScatterSurface(p) => params.extend(p.shader_params()),
             NodeKind::Scatter(p) => params.extend(p.shader_params(terrain_maps(g).iter().position(|m| *m == p.density_map && !m.is_empty()).map_or(0, |i| i + 1))),
             NodeKind::Noise(n) => params.extend([
                 n.scale,
@@ -282,6 +283,12 @@ fn compile_inner(g: &Graph, caches: &BTreeMap<NodeId, u32>, eps: f32, preview: b
         {
             wgsl += &crate::sdf_node::embed(&format!("sdf{id}_"), &data.scene, true);
             wgsl += &crate::scatter::wgsl(*id, cg.slots[id], land);
+        }
+        if let NodeKind::ScatterSurface(p) = &g.nodes[id].kind
+            && let Ok(data) = crate::sdf_node::load(&p.file).as_ref()
+        {
+            wgsl += &crate::sdf_node::embed(&format!("sdf{id}_"), &data.scene, true);
+            wgsl += &crate::scatter_surface::wgsl(*id, cg.slots[id], &format!("ssurf{id}_surf"), &format!("ssurf{id}_mask"), cg.eps);
         }
         if let NodeKind::LoadSdf(p) = &g.nodes[id].kind
             && let Ok(data) = crate::sdf_node::load(&p.file).as_ref()
@@ -397,6 +404,16 @@ impl Gen<'_> {
             if let Some(src) = self.g.input(id, 0) {
                 self.cone(src)?;
             }
+        } else if matches!(kind, NodeKind::ScatterSurface(_)) {
+            // The surface and the mask are read at the copies' points: they get cone functions. The roughening is read at p.
+            for port in [0, 2] {
+                if let Some(src) = self.g.input(id, port) {
+                    self.cone(src)?;
+                }
+            }
+            if let Some(src) = self.g.input(id, 1) {
+                self.topo(src, visiting, seen, order)?;
+            }
         } else {
             for port in 0..kind.input_count() {
                 if let Some(src) = self.g.input(id, port) {
@@ -435,6 +452,24 @@ impl Gen<'_> {
         } else {
             (format!("v{src}"), self.types[&src])
         })
+    }
+
+    /// Writes `fn {name}(q: vec3f) -> f32`: input `port` of `id` read at any point (through its cone function), or
+    /// `fallback` when nothing is wired.
+    fn point_fn(&mut self, id: NodeId, port: usize, name: &str, fallback: &str) -> Result<(), String> {
+        let body = match self.g.input_from(id, port) {
+            Some((src, from_port)) => {
+                let ty = self.cone(src)?;
+                if matches!(self.g.nodes[&src].kind, NodeKind::Separate) {
+                    format!("c{src}(q).{}", ["x", "y", "z"][from_port.min(2)])
+                } else {
+                    convert(&format!("c{src}(q)"), ty, Ty::F)
+                }
+            }
+            None => fallback.to_string(),
+        };
+        writeln!(self.out, "fn {name}(q: vec3f) -> f32 {{ return {body}; }}").unwrap();
+        Ok(())
     }
 
     fn node_expr(&mut self, id: NodeId) -> Result<String, String> {
@@ -481,7 +516,7 @@ impl Gen<'_> {
                 let base = self.operand(id, 0, Ty::F, "1.0e6");
                 let displace = self.operand(id, 1, Ty::F, "0.0");
                 if self.land_slot().is_none() {
-                    return Err("a Scatter SDF node needs a terrain: add a Load Mesh node with a heightmap".into());
+                    return Err("a Scatter on Terrain node needs a terrain: add a Load Mesh node with a heightmap".into());
                 }
                 if !p.density_map.is_empty() && !terrain_maps(self.g).contains(&p.density_map) {
                     return Err(format!("the Scatter density map {} is not one of the terrain's maps: add it to the maps of the Load Mesh node", p.density_map));
@@ -492,6 +527,19 @@ impl Gen<'_> {
                         (Ty::F, format!("scatter{id}(p, {base}, {displace})"))
                     }
                     Err(_) => (Ty::F, base),
+                }
+            }
+            // Copies of a shape on any surface: the surface, its gradient and the mask become functions of a point.
+            NodeKind::ScatterSurface(p) => {
+                let displace = self.operand(id, 1, Ty::F, "0.0");
+                self.point_fn(id, 0, &format!("ssurf{id}_surf"), "1.0e6")?;
+                self.point_fn(id, 2, &format!("ssurf{id}_mask"), "1.0")?;
+                match crate::sdf_node::load(&p.file).as_ref() {
+                    Ok(_) => {
+                        self.sdf_used.insert(id);
+                        (Ty::F, format!("ssurf{id}(p, ssurf{id}_surf(p), {displace})"))
+                    }
+                    Err(_) => (Ty::F, format!("ssurf{id}_surf(p)")),
                 }
             }
             NodeKind::NoiseGraph(_) => return Err("a Noise Graph node must be lowered first (meshgraph::lowered_mesh)".into()),

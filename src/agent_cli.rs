@@ -49,7 +49,8 @@ fn catalogue() -> Vec<(&'static str, NodeKind, &'static str)> {
         ("OutNormal", K::OutNormal, "Optional normal output of a .noisegraph."),
         ("LoadMesh", K::LoadMesh(Default::default()), "Mesh graph: a mesh file, a Landscape heightmap PNG, or a `.landscape` project (exported to a heightmap when the graph runs; the app's Load Landscape node sets `landscape`) as a field. Output 0: the field, 1: the mesh. `unit_cm` = centimetres per field unit."),
         ("LoadSdf", K::LoadSdf(Default::default()), "A .sdf composition (from the SDF Composer) as a field, placed with `offset`/`size`/`snap`/`z_up`/`stamp`. Input 0: position."),
-        ("Scatter", K::Scatter(Default::default()), "Copies of a .sdf shape planted across a terrain by density/size/slope/elevation, or in a ring. Inputs: 0 the terrain field, 1 optional displacement for the copies."),
+        ("Scatter", K::Scatter(Default::default()), "Scatter on Terrain: copies of a .sdf shape planted across a terrain by density/size/slope/elevation, or in a ring. Inputs: 0 the terrain field, 1 optional displacement for the copies."),
+        ("ScatterSurface", K::ScatterSurface(Default::default()), "Scatter on Surface: copies of a .sdf shape on the surface of any field (barnacles on a rock), in cubic cells of `cell`, standing along the surface normal (`align`) or upright. Inputs: 0 the surface field, 1 optional displacement for the copies, 2 optional mask 0..1 read where each copy would stand (e.g. Normal of the surface -> Math Dot with a Vec3 -> Select for tops only; a LoadSdf -> Select for inside a shape; Position for a gradient; Math Multiply to combine)."),
         ("NoiseGraph", K::NoiseGraph(Default::default()), "A .noisegraph as a node (use it as displacement). Input 0: position."),
         ("Remesh", K::Remesh { triangles: 100_000, adaptivity: 1.0, mesher: Default::default(), auto_detail: false }, "Turns a field into a triangle mesh of about `triangles` triangles (default 5000). `mesher`: Adaptive (default; small even triangles where the surface bends), SurfaceNets or MarchingTets (regular grids, faster, always closed for tets). `auto_detail: true` scales `triangles` by the shape's complexity (measured on a coarse version without the fine noise; a sphere is 1, up to 4x more or 0.4x fewer), so each shape of a batch gets its own count. Input 0: the field."),
         ("AutoUv", K::AutoUv(Default::default()), "UVs for a mesh (input 0). `planar` for terrain."),
@@ -294,7 +295,7 @@ fn check_graph(g: &Graph, mesh: bool, base: &Path, errors: &mut Vec<String>, war
         }
     }
     let connected = |id: u32, port: usize| g.edges.iter().any(|e| e.to == id && e.port == port);
-    let needs: &[(&str, &[usize])] = &[("Remesh", &[0]), ("AutoUv", &[0]), ("OutMesh", &[0]), ("OutImage", &[0]), ("Bake", &[0, 1]), ("OutDensity", &[0]), ("Scatter", &[0]), ("TransferUv", &[0, 1])];
+    let needs: &[(&str, &[usize])] = &[("Remesh", &[0]), ("AutoUv", &[0]), ("OutMesh", &[0]), ("OutImage", &[0]), ("Bake", &[0, 1]), ("OutDensity", &[0]), ("Scatter", &[0]), ("ScatterSurface", &[0]), ("TransferUv", &[0, 1])];
     for (id, n) in &g.nodes {
         let k = kind_name(&n.kind);
         if n.muted {
@@ -330,6 +331,7 @@ fn check_graph(g: &Graph, mesh: bool, base: &Path, errors: &mut Vec<String>, war
             NodeKind::LoadMesh(p) => vec![("path", &p.path)],
             NodeKind::LoadSdf(p) => vec![("file", &p.file)],
             NodeKind::Scatter(p) => vec![("file", &p.file)],
+            NodeKind::ScatterSurface(p) => vec![("file", &p.file)],
             NodeKind::NoiseGraph(p) if !p.detached || p.embedded.is_empty() => vec![("file", &p.file)],
             _ => vec![],
         };
@@ -638,9 +640,9 @@ mod tests {
         }
         // Adding a NodeKind variant breaks this match until the catalogue lists it.
         let _ = |k: &NodeKind| match k {
-            NodeKind::Float(_) | NodeKind::Vec3(_) | NodeKind::Math { .. } | NodeKind::Remap { .. } | NodeKind::Separate | NodeKind::Combine { .. } | NodeKind::Random { .. } | NodeKind::Mix { .. } | NodeKind::Curve { .. } | NodeKind::Grid { .. } | NodeKind::Pattern(_) | NodeKind::Position { .. } | NodeKind::Radial(_) | NodeKind::Mask { .. } | NodeKind::Slope { .. } | NodeKind::Erosion(_) | NodeKind::Select { .. } | NodeKind::Layer(_) | NodeKind::Heightmap(_) | NodeKind::Stamp(_) | NodeKind::TerrainLayer { .. } | NodeKind::Terrace { .. } | NodeKind::Craters(_) | NodeKind::Reroute | NodeKind::NamedReroute { .. } | NodeKind::NamedRerouteUse { .. } | NodeKind::Normal { .. } | NodeKind::Noise(_) | NodeKind::OutDensity | NodeKind::OutNormal | NodeKind::LoadMesh(_) | NodeKind::LoadSdf(_) | NodeKind::Scatter(_) | NodeKind::NoiseGraph(_) | NodeKind::Remesh { .. } | NodeKind::AutoUv(_) | NodeKind::Bake(_) | NodeKind::OutMesh(_) | NodeKind::OutImage(_) | NodeKind::TransferUv | NodeKind::ImageSplit | NodeKind::ImageCombine | NodeKind::ImageLevels { .. } => {}
+            NodeKind::Float(_) | NodeKind::Vec3(_) | NodeKind::Math { .. } | NodeKind::Remap { .. } | NodeKind::Separate | NodeKind::Combine { .. } | NodeKind::Random { .. } | NodeKind::Mix { .. } | NodeKind::Curve { .. } | NodeKind::Grid { .. } | NodeKind::Pattern(_) | NodeKind::Position { .. } | NodeKind::Radial(_) | NodeKind::Mask { .. } | NodeKind::Slope { .. } | NodeKind::Erosion(_) | NodeKind::Select { .. } | NodeKind::Layer(_) | NodeKind::Heightmap(_) | NodeKind::Stamp(_) | NodeKind::TerrainLayer { .. } | NodeKind::Terrace { .. } | NodeKind::Craters(_) | NodeKind::Reroute | NodeKind::NamedReroute { .. } | NodeKind::NamedRerouteUse { .. } | NodeKind::Normal { .. } | NodeKind::Noise(_) | NodeKind::OutDensity | NodeKind::OutNormal | NodeKind::LoadMesh(_) | NodeKind::LoadSdf(_) | NodeKind::Scatter(_) | NodeKind::ScatterSurface(_) | NodeKind::NoiseGraph(_) | NodeKind::Remesh { .. } | NodeKind::AutoUv(_) | NodeKind::Bake(_) | NodeKind::OutMesh(_) | NodeKind::OutImage(_) | NodeKind::TransferUv | NodeKind::ImageSplit | NodeKind::ImageCombine | NodeKind::ImageLevels { .. } => {}
         };
-        assert_eq!(seen.len(), 43);
+        assert_eq!(seen.len(), 44);
     }
 
     #[test]

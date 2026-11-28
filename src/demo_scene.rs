@@ -174,7 +174,7 @@ fn masks() -> Vec<Mask> {
     vec![range, basin]
 }
 
-/// The Mesh graph: the terrain with grit, then one Scatter SDF node per kind of object (each with its own noise graph
+/// The Mesh graph: the terrain with grit, then one Scatter on Terrain node per kind of object (each with its own noise graph
 /// roughening its copies), then Remesh in chunks, planar UVs and the maps.
 fn mesh_graph(png: &Path, lib: &Path, out_dir: &Path, triangles: u32) -> Graph {
     let mut g = Graph::default();
