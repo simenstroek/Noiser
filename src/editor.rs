@@ -176,7 +176,7 @@ pub fn title(kind: &NodeKind) -> String {
         NodeKind::OutNormal => "Normal Output".into(),
         NodeKind::LoadSdf(p) => std::path::Path::new(&p.file).file_stem().filter(|_| !p.file.is_empty()).map_or("Load SDF".into(), |s| s.to_string_lossy().into_owned()),
         NodeKind::Scatter(p) => std::path::Path::new(&p.file).file_stem().filter(|_| !p.file.is_empty()).map_or("Scatter SDF".into(), |s| format!("Scatter {}", s.to_string_lossy())),
-        NodeKind::LoadMesh(p) => std::path::Path::new(&p.path).file_stem().filter(|_| !p.path.is_empty()).map_or(if p.sdf { "Load SDF" } else { "Load Mesh" }.into(), |s| s.to_string_lossy().into_owned()),
+        NodeKind::LoadMesh(p) => std::path::Path::new(&p.path).file_stem().filter(|_| !p.path.is_empty()).map_or(if p.landscape { "Load Landscape" } else if p.sdf { "Load SDF" } else { "Load Mesh" }.into(), |s| s.to_string_lossy().into_owned()),
         NodeKind::NoiseGraph(p) => std::path::Path::new(&p.file).file_stem().map_or("Noise Graph".into(), |s| s.to_string_lossy().into_owned()),
         NodeKind::Remesh { .. } => "Remesh".into(),
         NodeKind::AutoUv(_) => "Auto UVs".into(),
@@ -328,6 +328,7 @@ fn palette() -> Vec<(&'static str, NodeKind)> {
         all.retain(|(_, k)| !matches!(k, NodeKind::OutDensity | NodeKind::OutNormal));
         all.extend([
             ("Load Mesh", NodeKind::LoadMesh(Default::default())),
+            ("Load Landscape", NodeKind::LoadMesh(crate::meshgraph::LoadMeshParams { landscape: true, unit_cm: 1.0, ..Default::default() })),
             ("Scatter SDF", NodeKind::Scatter(Default::default())),
             ("Terrain layer", NodeKind::TerrainLayer { name: String::new() }),
             ("Noise Graph", NodeKind::NoiseGraph(Default::default())),
@@ -563,6 +564,8 @@ impl Editor {
 
     fn show_inner(&mut self, ui: &mut egui::Ui, graph: &mut Graph, tiling: &BTreeMap<NodeId, Tiling>) {
         let (canvas, bg) = ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
+        // Node widgets (eyes, value boxes, dropdowns) scrolled past the edge would draw over the panels beside the graph.
+        ui.set_clip_rect(canvas.intersect(ui.clip_rect()));
         if std::mem::take(&mut self.frame_next) {
             self.frame(canvas.size(), graph, &BTreeSet::new());
         }

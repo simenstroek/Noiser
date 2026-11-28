@@ -579,6 +579,9 @@ impl MeshWorkspace {
                 }
                 self.graph.add(NodeKind::LoadSdf(p), at);
             }
+            "landscape" => {
+                self.graph.add(NodeKind::LoadMesh(crate::meshgraph::LoadMeshParams { path: text, landscape: true, unit_cm: 1.0, ..Default::default() }), at);
+            }
             "png" => {
                 self.graph.add(NodeKind::LoadMesh(crate::meshgraph::LoadMeshParams { path: text, unit_cm: 1.0, ..Default::default() }), at);
             }

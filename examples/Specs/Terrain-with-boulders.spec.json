@@ -1,7 +1,7 @@
 {
-  "about": "A terrain .meshgraph from a spec, the same shape as the demo scenes: a Landscape heightmap (Landscape tab, or: noiser --headless --landscape-export Hills.landscape ../Terrains/Hills.png) cut into 4x4 Nanite chunks, boulders scattered on it by slope, then planar UVs and baked normal/occlusion maps. Needs ../Terrains/Hills.png (not shipped: too big for the repo). Lengths are in centimetres because unit_cm is 1.",
+  "about": "A terrain .meshgraph from a spec, the same shape as the demo scenes: a Landscape heightmap (Landscape tab, or: noiser --headless --landscape-export Hills.landscape ../Landscapes/Hills.png) cut into 4x4 Nanite chunks, boulders scattered on it by slope, then planar UVs and baked normal/occlusion maps. Needs ../Landscapes/Hills.png (not shipped: too big for the repo). Lengths are in centimetres because unit_cm is 1.",
   "nodes": {
-    "terrain": { "LoadMesh": { "path": "../Terrains/Hills.png", "unit_cm": 1.0, "chunks": 4 } },
+    "terrain": { "LoadMesh": { "path": "../Landscapes/Hills.png", "unit_cm": 1.0, "chunks": 4 } },
     "boulders": { "Scatter": { "file": "../SDFs/Mushroom.sdf", "seed": 9, "cell": 9000.0, "density": 0.35, "size": [1500.0, 4500.0], "slope": [0.05, 0.7], "blend": 150.0 } },
     "remesh":  { "Remesh": { "triangles": 250000 } },
     "uv":      { "AutoUv": { "planar": true } },

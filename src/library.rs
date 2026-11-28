@@ -17,12 +17,13 @@ pub enum Kind {
     Udim,
     /// Erosion settings saved from the Landscape tab.
     Erosion,
+    Landscape,
 }
 
 impl Kind {
-    pub const ALL: [Kind; 6] = [Kind::Sdf, Kind::Noise, Kind::MeshGraph, Kind::Bake, Kind::Udim, Kind::Erosion];
+    pub const ALL: [Kind; 7] = [Kind::Sdf, Kind::Noise, Kind::MeshGraph, Kind::Landscape, Kind::Bake, Kind::Udim, Kind::Erosion];
     /// The kinds the drawer lists (the others are only output folders).
-    pub const SHOWN: [Kind; 3] = [Kind::Sdf, Kind::Noise, Kind::MeshGraph];
+    pub const SHOWN: [Kind; 4] = [Kind::Sdf, Kind::Noise, Kind::MeshGraph, Kind::Landscape];
 
     pub fn folder(self) -> &'static str {
         match self {
@@ -32,6 +33,7 @@ impl Kind {
             Kind::Bake => "Bakes",
             Kind::Udim => "UDIM Packs",
             Kind::Erosion => "Erosion Presets",
+            Kind::Landscape => "Landscapes",
         }
     }
 
@@ -41,6 +43,7 @@ impl Kind {
             Kind::Noise => Some("noisegraph"),
             Kind::MeshGraph => Some("meshgraph"),
             Kind::Erosion => Some("erosion"),
+            Kind::Landscape => Some("landscape"),
             Kind::Bake | Kind::Udim => None,
         }
     }
@@ -53,6 +56,7 @@ impl Kind {
             Kind::Bake => "bake",
             Kind::Udim => "udim",
             Kind::Erosion => "erosion",
+            Kind::Landscape => "landscape",
         }
     }
 }

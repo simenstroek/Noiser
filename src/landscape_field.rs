@@ -24,12 +24,50 @@ pub struct Heights {
     pub maps: Vec<(String, Vec<f32>)>,
 }
 
+/// A terrain file: a heightmap PNG from the Landscape tab, or a Landscape project (a Load Landscape node).
 pub fn is_heightmap(path: &str) -> bool {
-    Path::new(path).extension().is_some_and(|e| e.eq_ignore_ascii_case("png"))
+    Path::new(path).extension().is_some_and(|e| e.eq_ignore_ascii_case("png")) || is_landscape(Path::new(path))
+}
+
+pub fn is_landscape(path: &Path) -> bool {
+    path.extension().is_some_and(|e| e.eq_ignore_ascii_case("landscape"))
+}
+
+/// Where a Landscape project is exported for a Load Landscape node: a heightmap, its sidecar and weightmaps in the temp
+/// folder (not beside the project, which may sit in a synced library), one per project path.
+pub fn export_path(project: &Path) -> std::path::PathBuf {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    project.hash(&mut h);
+    let stem = project.file_stem().map_or_else(|| "landscape".into(), |s| s.to_string_lossy().into_owned());
+    std::env::temp_dir().join("noiser_landscapes").join(format!("{stem}_{:016x}.png", h.finish()))
+}
+
+/// The heightmap to read for a terrain file: a PNG as it is; a Landscape project exported first, and again whenever the
+/// project was saved after the export.
+// shortcut: files the project reads (heightmaps, SDFs, noise graphs) changing do not redo the export; resave the project.
+pub fn heightmap_file(path: &Path) -> Result<std::path::PathBuf, String> {
+    if !is_landscape(path) {
+        return Ok(path.to_path_buf());
+    }
+    let out = export_path(path);
+    let modified = |p: &Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
+    let project = modified(path).ok_or_else(|| format!("{}: no such Landscape project", path.display()))?;
+    if modified(&out).is_none_or(|done| done < project) {
+        std::fs::create_dir_all(out.parent().unwrap_or(Path::new("."))).map_err(|e| e.to_string())?;
+        crate::landscape::export_headless(path, &out, false, &mut |_| {}).map_err(|e| format!("{}: {e}", path.display()))?;
+    }
+    Ok(out)
+}
+
+/// For reading a sidecar without exporting (the UI, every frame): a project's last export, if there is one.
+fn exported(path: &Path) -> std::path::PathBuf {
+    if is_landscape(path) { export_path(path) } else { path.to_path_buf() }
 }
 
 /// The heights of an exported heightmap in units of `unit_cm` centimetres.
 pub fn load(path: &Path, unit_cm: f32) -> Result<Heights, String> {
+    let path = &heightmap_file(path)?;
     let img = image::open(path).map_err(|e| format!("{}: {e}", path.display()))?.to_luma16();
     let n = img.width() as usize;
     if img.height() as usize != n || n < 2 {
@@ -51,6 +89,7 @@ pub fn load(path: &Path, unit_cm: f32) -> Result<Heights, String> {
 
 /// The paint layers the Landscape tab wrote beside a heightmap: (name, weightmap file), from the sidecar's `layers`.
 pub fn sidecar_layers(path: &Path) -> Vec<(String, String)> {
+    let path = &exported(path);
     let Ok(text) = std::fs::read_to_string(format!("{}.json", path.display())) else { return Vec::new() };
     let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) else { return Vec::new() };
     json["layers"].as_array().map(|a| a.iter().filter_map(|l| Some((l["name"].as_str()?.to_string(), l["file"].as_str()?.to_string()))).collect()).unwrap_or_default()
@@ -58,6 +97,7 @@ pub fn sidecar_layers(path: &Path) -> Vec<(String, String)> {
 
 /// The paint layers beside a heightmap with the colour the Landscape tab painted each in (grey when the sidecar has none).
 pub fn sidecar_layer_colours(path: &Path) -> Vec<(String, [f32; 3])> {
+    let path = &exported(path);
     let Ok(text) = std::fs::read_to_string(format!("{}.json", path.display())) else { return Vec::new() };
     let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) else { return Vec::new() };
     json["layers"].as_array().map(|a| a.iter().filter_map(|l| {
@@ -79,7 +119,7 @@ pub fn load_with_maps(path: &Path, unit_cm: f32, names: &[String]) -> Result<Hei
             let known: Vec<&str> = layers.iter().map(|(n, _)| n.as_str()).collect();
             format!("{}: no paint layer called {name} (the sidecar lists: {})", path.display(), if known.is_empty() { "none; export the terrain with Layer nodes".to_string() } else { known.join(", ") })
         })?;
-        let wpath = path.with_file_name(file);
+        let wpath = exported(path).with_file_name(file);
         let img = image::open(&wpath).map_err(|e| format!("{}: {e}", wpath.display()))?.to_luma16();
         let side = img.width() as usize;
         if img.height() as usize != side || side < 2 {
@@ -94,6 +134,7 @@ pub fn load_with_maps(path: &Path, unit_cm: f32, names: &[String]) -> Result<Hei
 
 /// The height of the water a heightmap's sidecar names, in centimetres.
 pub fn water_level_cm(path: &Path) -> Option<f32> {
+    let path = &exported(path);
     let text = std::fs::read_to_string(format!("{}.json", path.display())).ok()?;
     let json: serde_json::Value = serde_json::from_str(&text).ok()?;
     json["water_level_m"].as_f64().map(|w| w as f32 * 100.0)
@@ -102,6 +143,7 @@ pub fn water_level_cm(path: &Path) -> Option<f32> {
 /// The side of a heightmap's terrain and the middle of its height range in a node's units, from its sidecar alone (no
 /// need to read the image).
 pub fn extent(path: &Path, unit_cm: f32) -> Option<(f32, f32)> {
+    let path = &exported(path);
     let text = std::fs::read_to_string(format!("{}.json", path.display())).ok()?;
     let json: serde_json::Value = serde_json::from_str(&text).ok()?;
     let k = 100.0 / unit_cm;

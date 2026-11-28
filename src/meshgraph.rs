@@ -24,6 +24,8 @@ pub struct LoadMeshParams {
     pub unit_cm: f32,
     /// A Load SDF node: the same node, offering .sdf files.
     pub sdf: bool,
+    /// A Load Landscape node: the same node, offering .landscape projects (exported to a heightmap when the graph runs).
+    pub landscape: bool,
     /// A heightmap (a PNG from the Landscape tab) as the file: the terrain is cut into this many chunks per side, and a
     /// run makes every chunk. 1 is the whole terrain.
     pub chunks: u32,
@@ -34,7 +36,7 @@ pub struct LoadMeshParams {
 
 impl Default for LoadMeshParams {
     fn default() -> Self {
-        LoadMeshParams { path: String::new(), resolution: 128, padding: 0.5, combine: Default::default(), unit_cm: 100.0, sdf: false, chunks: 1, maps: Vec::new() }
+        LoadMeshParams { path: String::new(), resolution: 128, padding: 0.5, combine: Default::default(), unit_cm: 100.0, sdf: false, landscape: false, chunks: 1, maps: Vec::new() }
     }
 }
 

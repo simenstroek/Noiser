@@ -31,7 +31,7 @@ expect (examples/Specs builds beside `../SDFs` and `../Noises`).
 The graph computes one field. `Math Add` of a shape field and a noise field roughens the shape; `SmoothMin` blends shapes;
 `LoadSdf` and `Scatter` bring in `.sdf` shapes (Scatter plants copies on a terrain by density, size, slope and elevation, or in a
 ring facing the middle); `Remesh` turns the field into triangles (`LoadMesh` with `chunks: 4` and a heightmap makes a terrain in 4x4
-Nanite chunks); `AutoUv` (`planar: true` for terrain) unwraps; `Bake` makes normal/occlusion/curvature maps from a field; `OutMesh`
+Nanite chunks; the heightmap can be a `.landscape` project, exported when the graph runs, as the app's Load Landscape node); `AutoUv` (`planar: true` for terrain) unwraps; `Bake` makes normal/occlusion/curvature maps from a field; `OutMesh`
 and `OutImage` write files. A graph needs at least one output node to do anything.
 
 ## Batches without input meshes

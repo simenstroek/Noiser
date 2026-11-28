@@ -319,6 +319,11 @@ pub fn consume(input: &mut egui::InputState, action: Action) -> bool {
     fired
 }
 
+/// A raw key press bound to `action` (never while a shortcut is being recorded).
+pub fn is_bound(action: Action, key: egui::Key, modifiers: &egui::Modifiers) -> bool {
+    !CAPTURING.load(Ordering::Relaxed) && ACTIVE.read().is_ok_and(|keymap| keymap.get(action).iter().flatten().any(|b| b.key == key && b.modifiers_match(modifiers)))
+}
+
 pub fn text(action: Action) -> String {
     ACTIVE.read().map_or(String::new(), |keymap| keymap.text(action))
 }

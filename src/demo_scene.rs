@@ -231,7 +231,7 @@ fn write_demo_terrain() {
     for (name, g) in detail_graphs() {
         std::fs::write(lib.join("Noises").join(format!("{name}.noisegraph")), g.to_json()).unwrap();
     }
-    let terrains = lib.join("Terrains");
+    let terrains = lib.join("Landscapes");
     std::fs::create_dir_all(&terrains).unwrap();
     let dunes = detail_graphs().into_iter().find(|(n, _)| *n == "Dunes").unwrap().1;
     let graph = landscape_graph(&embedded(&lib.join("Noises").join("Dunes.noisegraph"), &dunes));
@@ -371,7 +371,7 @@ fn write_eiffel_scene() {
     for (name, g) in detail_graphs() {
         std::fs::write(lib.join("Noises").join(format!("{name}.noisegraph")), g.to_json()).unwrap();
     }
-    let terrains = lib.join("Terrains");
+    let terrains = lib.join("Landscapes");
     let settings = crate::landscape::Settings { world_m: 2000.0, height_m: 100.0, fit: false, water_m: Some(6.5), ..Default::default() };
     let masks: Vec<_> = eiffel_masks().iter().map(|m| serde_json::json!({ "name": m.name, "png": crate::landscape_masks::base64_encode(&m.to_png()) })).collect();
     let mut graph = eiffel_landscape_graph();

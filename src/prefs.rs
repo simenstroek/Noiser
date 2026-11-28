@@ -167,7 +167,8 @@ fn keybind_table(keymap: &mut Keymap, ui: &mut egui::Ui) {
                 let text = if listening { "Press a key…".to_string() } else { keymap.get(action)[slot].map_or("—".to_string(), Binding::text) };
                 let button = ui.add_sized([116.0, 20.0], egui::Button::new(egui::RichText::new(text).monospace()).selected(listening));
                 button.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, format!("{} binding {}", action.label(), slot + 1)));
-                if button.clicked() {
+                // Listening is checked first: Space and Enter on the focused button would otherwise count as a click.
+                if !listening && button.clicked() {
                     recording = Some((action, slot));
                 } else if listening {
                     // Holding focus keeps the editors from also acting on the key that is being recorded.
@@ -407,6 +408,15 @@ mod tests {
         h.key_press(egui::Key::Escape);
         h.run();
         assert_eq!(h.state().get(Action::Mute)[0], Some(Binding::plain(egui::Key::M)), "escape leaves it alone");
+
+        // Space (and Tab) on the focused button must be recorded, not taken as another click on it.
+        for key in [egui::Key::Space, egui::Key::Tab] {
+            h.get_by_label("Mute (bypass) the selected nodes binding 1").click();
+            h.run();
+            h.key_press(key);
+            h.run();
+            assert_eq!(h.state().get(Action::Mute)[0], Some(Binding::plain(key)));
+        }
         keymap::set_capturing(false);
     }
 

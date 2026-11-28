@@ -60,14 +60,19 @@ pub(crate) fn path_row(ui: &mut egui::Ui, id: &str, path: &mut String, hint: &st
 pub fn props(ui: &mut egui::Ui, kind: &mut NodeKind) -> bool {
     let image = matches!(kind, NodeKind::OutImage(_));
     match kind {
-        NodeKind::LoadMesh(p) if crate::landscape_field::is_heightmap(&p.path) => {
-            ui.weak("A terrain: a heightmap PNG from the Landscape tab (its .json sidecar must sit next to it) as the ground, z up. The field is the height above it. Wire it to a Remesh: that makes the terrain in chunks of about the Remesh's triangle count each, cut from one lattice so neighbours meet exactly. Add Load Mesh / Load SDF nodes with a union to put objects on it, and a noise graph to add 3D detail.");
-            path_row(ui, "terrain path", &mut p.path, "heightmap .png", Some(("Heightmap", &["png"])));
+        NodeKind::LoadMesh(p) if p.landscape || crate::landscape_field::is_heightmap(&p.path) => {
+            if p.landscape {
+                ui.weak("A terrain from a Landscape project, z up: the project is exported to a heightmap when the graph runs (again after the project is saved). The field is the height above it. Wire it to a Remesh: that makes the terrain in chunks of about the Remesh's triangle count each, cut from one lattice so neighbours meet exactly. Add Load Mesh / Load SDF nodes with a union to put objects on it, and a noise graph to add 3D detail.");
+                path_row(ui, "landscape path", &mut p.path, "a .landscape file", Some(("Landscape project", &["landscape"])));
+            } else {
+                ui.weak("A terrain: a heightmap PNG from the Landscape tab (its .json sidecar must sit next to it) as the ground, z up. The field is the height above it. Wire it to a Remesh: that makes the terrain in chunks of about the Remesh's triangle count each, cut from one lattice so neighbours meet exactly. Add Load Mesh / Load SDF nodes with a union to put objects on it, and a noise graph to add 3D detail.");
+                path_row(ui, "terrain path", &mut p.path, "heightmap .png", Some(("Heightmap", &["png"])));
+            }
             let d = crate::meshgraph::LoadMeshParams::default();
             crate::row(ui, &mut p.chunks, d.chunks, |ui, v| _ = ui.add(egui::DragValue::new(v).range(1..=32).prefix("chunks ").suffix(" per side")).on_hover_text("The terrain is cut into this many chunks along each side; a run writes one file per chunk and map, named ending _row_column."));
             let layers = crate::landscape_field::sidecar_layers(&crate::meshgraph::resolve_in(&base(), &p.path));
             if layers.is_empty() {
-                ui.weak("No paint layers beside this heightmap (the Landscape tab writes them when its graph has Layer nodes).");
+                ui.weak(if p.landscape { "No paint layers yet: they show here after the first run, when the project has Layer nodes." } else { "No paint layers beside this heightmap (the Landscape tab writes them when its graph has Layer nodes)." });
             } else {
                 ui.label("paint layers to load:");
                 ui.horizontal_wrapped(|ui| {

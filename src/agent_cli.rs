@@ -47,7 +47,7 @@ fn catalogue() -> Vec<(&'static str, NodeKind, &'static str)> {
         ("Noise", K::Noise(crate::graph_params::NoiseParams::default()), "Noise (`kind` is a NoiseKind value). Input 0: position. Output 0: value, output 1: displacement vector. Extra inputs drive scale/octaves/etc."),
         ("OutDensity", K::OutDensity, "The end of a .noisegraph: input 0 is the density. Exactly one is needed."),
         ("OutNormal", K::OutNormal, "Optional normal output of a .noisegraph."),
-        ("LoadMesh", K::LoadMesh(Default::default()), "Mesh graph: a mesh file or a Landscape heightmap PNG as a field. Output 0: the field, 1: the mesh. `unit_cm` = centimetres per field unit."),
+        ("LoadMesh", K::LoadMesh(Default::default()), "Mesh graph: a mesh file, a Landscape heightmap PNG, or a `.landscape` project (exported to a heightmap when the graph runs; the app's Load Landscape node sets `landscape`) as a field. Output 0: the field, 1: the mesh. `unit_cm` = centimetres per field unit."),
         ("LoadSdf", K::LoadSdf(Default::default()), "A .sdf composition (from the SDF Composer) as a field, placed with `offset`/`size`/`snap`/`z_up`/`stamp`. Input 0: position."),
         ("Scatter", K::Scatter(Default::default()), "Copies of a .sdf shape planted across a terrain by density/size/slope/elevation, or in a ring. Inputs: 0 the terrain field, 1 optional displacement for the copies."),
         ("NoiseGraph", K::NoiseGraph(Default::default()), "A .noisegraph as a node (use it as displacement). Input 0: position."),

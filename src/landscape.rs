@@ -727,7 +727,7 @@ impl LandscapeWorkspace {
 
     /// A landscape project (graph, settings, masks) or a plain noise graph (the masks stay).
     pub fn open(&mut self) {
-        let Some(path) = rfd::FileDialog::new().add_filter("Landscape project or noise graph", &["landscape", "noisegraph", "json"]).pick_file() else { return };
+        let Some(path) = crate::library::dialog(crate::library::Kind::Landscape, rfd::FileDialog::new().add_filter("Landscape project or noise graph", &["landscape", "noisegraph", "json"])).pick_file() else { return };
         self.open_path(path);
     }
 
@@ -776,7 +776,8 @@ impl LandscapeWorkspace {
 
     fn save(&mut self, project: bool) {
         let (title, ext) = if project { ("Landscape project", "landscape") } else { ("Noise graph", "noisegraph") };
-        let Some(path) = rfd::FileDialog::new().add_filter(title, &[ext]).set_file_name(format!("terrain.{ext}")).save_file() else { return };
+        let kind = if project { crate::library::Kind::Landscape } else { crate::library::Kind::Noise };
+        let Some(path) = crate::library::dialog(kind, rfd::FileDialog::new().add_filter(title, &[ext]).set_file_name(format!("terrain.{ext}"))).save_file() else { return };
         self.write(&path, project);
     }
 
@@ -1533,6 +1534,27 @@ mod tests {
     }
 
     #[test]
+    fn a_landscape_project_loads_as_a_terrain_and_is_exported_once() {
+        if crate::meshgraph::headless_gpu().is_err() {
+            return eprintln!("no GPU adapter; skipping");
+        }
+        let dir = std::env::temp_dir().join("noiser_load_landscape");
+        std::fs::create_dir_all(&dir).unwrap();
+        let project = dir.join("hill.landscape");
+        let mut ls = LandscapeWorkspace::default();
+        ls.settings.world_m = 500.0;
+        ls.settings.resolution = 64;
+        std::fs::write(&project, ls.to_project()).unwrap();
+        let out = crate::landscape_field::export_path(&project);
+        let _ = std::fs::remove_file(&out);
+        let h = crate::landscape_field::load(&project, 100.0).unwrap();
+        assert!((h.world() - 500.0).abs() < 1.0, "a 500 m terrain in metres, got {}", h.world());
+        let first = std::fs::metadata(&out).unwrap().modified().unwrap();
+        crate::landscape_field::load(&project, 100.0).unwrap();
+        assert_eq!(std::fs::metadata(&out).unwrap().modified().unwrap(), first, "an unchanged project is not exported again");
+    }
+
+    #[test]
     fn a_project_keeps_the_graph_the_settings_and_the_masks() {
         let mut a = LandscapeWorkspace::default();
         a.settings.world_m = 3000.0;
@@ -1555,7 +1577,7 @@ mod tests {
 
     #[test]
     fn the_eiffel_project_in_the_library_opens() {
-        let path = std::path::Path::new("H:/My Drive/NoiserLibrary/Terrains/EiffelLandscape.landscape");
+        let path = std::path::Path::new("H:/My Drive/NoiserLibrary/Landscapes/EiffelLandscape.landscape");
         let Ok(text) = std::fs::read_to_string(path) else { return };
         let mut ls = LandscapeWorkspace::default();
         ls.from_project(&text).unwrap();

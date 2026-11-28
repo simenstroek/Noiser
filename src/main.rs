@@ -322,6 +322,7 @@ impl App {
                 library_tab = match args.next().unwrap_or_default().as_str() {
                     "noises" => Some(library::Kind::Noise),
                     "meshgraphs" => Some(library::Kind::MeshGraph),
+                    "landscapes" => Some(library::Kind::Landscape),
                     _ => None,
                 };
                 show_library = true;
@@ -1028,9 +1029,6 @@ impl App {
     fn library_drawer(&mut self, ui: &mut egui::Ui) {
         use meshworkspace::Workspace;
         let ctx = ui.ctx().clone();
-        if !ctx.egui_wants_keyboard_input() && ctx.input_mut(|i| keymap::consume(i, keymap::Action::Library)) {
-            self.drawer.open = !self.drawer.open;
-        }
         if !self.drawer.open {
             return;
         }
@@ -1038,6 +1036,7 @@ impl App {
             (Workspace::Composer, library::Kind::Sdf) => "Drag an SDF into the view to add it to the composition.",
             (Workspace::Noise, library::Kind::Sdf) => "Drag an SDF onto the view to use it as the mesh.",
             (Workspace::Mesh, library::Kind::MeshGraph) => "Double-click to open a mesh graph.",
+            (Workspace::Mesh, library::Kind::Landscape) => "Drag a landscape into the graph to make a Load Landscape node; double-click to open it.",
             (Workspace::Mesh, _) => "Drag a file into the graph to make a node from it.",
             _ => "Double-click to open it.",
         };
@@ -1075,6 +1074,10 @@ impl App {
             library::Kind::Erosion => {
                 self.workspace = Workspace::Landscape;
                 self.landscape.apply_erosion_preset(&path);
+            }
+            library::Kind::Landscape => {
+                self.workspace = Workspace::Landscape;
+                self.landscape.open_path(path);
             }
             library::Kind::Bake | library::Kind::Udim => {}
         }
@@ -1118,6 +1121,24 @@ impl eframe::App for App {
         }
         if let Ok(s) = serde_json::to_string(&self.prefs) {
             storage.set_string(PREFS_KEY, s);
+        }
+    }
+
+    /// The library key is taken before egui sees it: egui moves keyboard focus on Tab before any widget can read the press.
+    fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        if ctx.egui_wants_keyboard_input() {
+            return;
+        }
+        let mut toggle = false;
+        raw_input.events.retain(|e| match e {
+            egui::Event::Key { key, pressed: true, repeat, modifiers, .. } if keymap::is_bound(keymap::Action::Library, *key, modifiers) => {
+                toggle |= !repeat;
+                false
+            }
+            _ => true,
+        });
+        if toggle {
+            self.drawer.open = !self.drawer.open;
         }
     }
 
