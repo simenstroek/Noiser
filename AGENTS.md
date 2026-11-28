@@ -50,7 +50,9 @@ A `.landscape` project is a graph over one tile (x and y across the terrain, 0 t
 out.landscape` takes the usual spec plus an optional `"settings"` object; `--preview P.landscape out.png` draws the map from above
 and a 3D view side by side (Erosion nodes run, Layer colours painted); `--describe` shows graph and settings. Landscape nodes:
 `Map` (a painted mask), `Heightmap` (a PNG/EXR image), `Stamp` (an `.sdf` pressed in from above: Add, Max or Cut), `Slope`,
-`Select` (a range with soft edges), `Terrace`, `Craters`, `Erosion` (kind Water, Wind or Detail: learned detail of real terrain, see `docs/ml-terrain-results.md`; outputs height, flow, deposition, wear),
+`Select` (a range with soft edges), `Terrace`, `Craters`, `Erosion` (kind Water or Wind; outputs height, flow, deposition, wear),
+**Learned Detail** (in a spec: `Erosion` with kind Detail; three stages, each on/off with steps, guidance and amount: landforms
+16x to 4x, fine detail 4x to the grid, sharpen; see `docs/ml-terrain-results.md`), **Blur** (`Erosion` with kind Blur, `blur_m`),
 `Layer` (an output: a paint layer; exports write one normalised 8-bit weightmap each), `Noise Graph`.
 
 * **Set `fit: false`.** With fit on, the whole terrain is rescaled to 0..`height_m` after your nodes, so heights and thresholds in
