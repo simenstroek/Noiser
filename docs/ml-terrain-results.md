@@ -52,8 +52,10 @@ The **Learned Detail** node (`src/landscape_detail.rs`; in files an Erosion node
 cached results, Run and outputs): terrain type (alpine, desert, badlands, hills, volcanic, karst, coastal from lidar;
 craters, fantasy, rocky, icelandic from Gaea), then each stage on or off with its own steps (default 8), guidance (default
 2, up to 8) and amount (how much of that stage's detail is kept, up to 3). Landforms (16x to 4x) and fine detail (4x to the
-grid): both on read the input 16x coarser, one alone 4x. Sharpen (the third stage, experimental: an early 4 000-step
-model) adds the finest grain on the grid itself, trained on lidar blurred by 1 to 2.5 cells (`flow.py --sharpen`).
+grid): both on read the input 16x coarser, one alone 4x. Sharpen (the third stage, 24 000 steps) adds the finest grain on
+the grid itself, trained on lidar blurred by 1 to 2.5 cells (`flow.py --sharpen`). Against the early 4 000-step model it
+drops the pits on volcanic and hills and adds more grain on desert, but it adds less detail on volcanic and hills, and badlands
+still shows fine ripples.
 **Adherence** (landforms stage): 1 keeps the input's coarse shape exactly; lower lets the model reshape it. Trained
 (`flow.py --adhere 1.0`) with smooth noise of random strength lam (up to the patch's relief) added to the coarse input,
 the model conditioned on lam, and for lam > 0 the target taken against the noisy input with no zero block mean; each noise
