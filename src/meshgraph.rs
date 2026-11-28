@@ -95,6 +95,16 @@ pub fn noise_graph_source(p: &NoiseGraphParams, base: &Path) -> Result<Graph, St
 /// minus `amplitude` takes the node's place (and id): a mesh graph's field is a distance, negative inside, so subtracting
 /// the density moves the surface outward where the noise graph's density is positive, as in the noise graph, so everything downstream and the node's preview keep working.
 pub fn lowered_mesh(g: &Graph, base: &Path) -> Result<Graph, String> {
+    lowered(g, base, -1.0)
+}
+
+/// `lowered_mesh` for a Landscape graph, whose output is a height: the density times plus `amplitude`, so positive
+/// raises the terrain.
+pub fn lowered_landscape(g: &Graph, base: &Path) -> Result<Graph, String> {
+    lowered(g, base, 1.0)
+}
+
+fn lowered(g: &Graph, base: &Path, sign: f32) -> Result<Graph, String> {
     use crate::graph::MathOp;
     let mut out = g.clone();
     // The unit of the first Load Mesh node (a file in centimetres: 1) turns the noise's metres into the file's units.
@@ -163,7 +173,7 @@ pub fn lowered_mesh(g: &Graph, base: &Path) -> Result<Graph, String> {
         let Some(src) = sub.edges.iter().find(|e| e.to == out_id && e.port == 0) else { return Err("the noise graph's Density Output is not connected".into()) };
         let Some(&src_new) = map.get(&src.from) else { return Err("the noise graph's Density Output reads a missing node".into()) };
         out.edges.retain(|e| !(e.to == id));
-        out.nodes.get_mut(&id).unwrap().kind = NodeKind::Math { op: MathOp::Multiply, a: 0.0, b: -p.amplitude * amp_k, c: 0.5 };
+        out.nodes.get_mut(&id).unwrap().kind = NodeKind::Math { op: MathOp::Multiply, a: 0.0, b: sign * p.amplitude * amp_k, c: 0.5 };
         out.connect_from(src_new, src.from_port, id, 0);
     }
     Ok(out)

@@ -1697,7 +1697,8 @@ fn remesh_a_real_mesh() {
 // ---- mesh graph ---------------------------------------------------------------------
 
 /// Two noise graphs used as nodes of a mesh graph, added together, compile into one shader and give what each does
-/// alone: amplitude times its own density at the position times its frequency.
+/// alone: minus amplitude times its own density at the position times its frequency (a mesh graph's field is a distance,
+/// so a positive density pushes the surface outward).
 #[test]
 fn a_mesh_graph_of_two_noise_graphs_matches_the_standalone_graphs() {
     let Some(gpu) = gpu() else { return eprintln!("no GPU adapter; skipping") };
@@ -1718,7 +1719,7 @@ fn a_mesh_graph_of_two_noise_graphs_matches_the_standalone_graphs() {
     let ea = crate::export::Evaluator::new(&gpu.device, &gpu.queue, &a, 0).unwrap().eval_points(&pts.iter().map(|p| p.map(|v| v * 2.0)).collect::<Vec<_>>());
     let eb = crate::export::Evaluator::new(&gpu.device, &gpu.queue, &b, 0).unwrap().eval_points(&pts.iter().map(|p| p.map(|v| v * 3.0)).collect::<Vec<_>>());
     for i in 0..pts.len() {
-        near(combined[i], 0.5 * ea[i] + 0.25 * eb[i], &format!("point {i}"));
+        near(combined[i], -(0.5 * ea[i] + 0.25 * eb[i]), &format!("point {i}"));
     }
     // A graph that cannot be read is an error that names the file.
     let mut bad = Graph::default();

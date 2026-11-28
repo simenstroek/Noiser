@@ -494,7 +494,7 @@ fn add_layers_to_sidecar(heightmap: &Path, files: &[(String, String)], layers: &
 /// The evaluator for the terrain: Noise Graph nodes inlined, the slope scale set from the size and height, the terrain
 /// maps in.
 pub(crate) fn build_evaluator(device: &eframe::wgpu::Device, queue: &eframe::wgpu::Queue, graph: &Graph, s: &Settings, masks: &crate::terrain_maps::TerrainMaps, base: &Path) -> Result<Evaluator, String> {
-    let mut g = crate::meshgraph::lowered_mesh(graph, base)?;
+    let mut g = crate::meshgraph::lowered_landscape(graph, base)?;
     for n in g.nodes.values_mut() {
         if let NodeKind::Slope { scale } = &mut n.kind {
             *scale = s.height_m / s.world_m.max(1.0);

@@ -40,7 +40,8 @@ and `OutImage` write files. A graph needs at least one output node to do anythin
 with the seed changing (increment is the default for several runs); in the app, **Run x N** does the same. Output names take smart
 tags: `{name}` (the batch mesh's name, else the graph file's), `{graph}`, `{seed}`, `{index}` (run number, 01..), `{count}`,
 `{timestamp}`, `{date}`, `{time}`. Without `{seed}`, `{index}` or `{timestamp}` every run overwrites the last (a warning says so).
-A Noise Graph node's amplitude has the noise graph tab's sign: positive pushes the surface outward.
+A Noise Graph node's amplitude has the noise graph tab's sign: positive pushes the surface outward (in a Landscape graph,
+where the output is a height, positive raises the terrain).
 
 ## The Landscape graph
 
